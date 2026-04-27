@@ -1,0 +1,9 @@
+model Profile {
+    id        String  @id @default(uuid())
+    accountId String  @unique
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    fullName     String
+    profilePhoto String?
+    templateAccesses TemplateAccess[]
+}

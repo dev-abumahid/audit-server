@@ -1,0 +1,50 @@
+model Template {
+    id           String  @id @default(uuid())
+    orgAccountId String
+    templateLogo String?
+    templateName String
+    templateDisc String?
+
+    pages  Page[]
+    access TemplateAccess[]
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+}
+
+model Page {
+    id         String @id @default(uuid())
+    templateId String
+    pageIndex  Int
+    title      String
+
+    template  Template   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+    questions Question[]
+
+    @@index([templateId, pageIndex])
+}
+
+model Question {
+    id         String  @id @default(uuid())
+    pageId     String
+    index      Int
+    question   String
+    isRequired Boolean
+
+    answerType String
+    value      Json
+
+    page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+    @@index([pageId, index])
+}
+
+model TemplateAccess {
+    id         String   @id @default(uuid())
+    templateId String
+    userId     String
+    profile    Profile  @relation(fields: [userId], references: [id])
+    template   Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+    @@index([templateId, userId])
+}

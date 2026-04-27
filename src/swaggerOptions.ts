@@ -1,0 +1,51 @@
+import { fileURLToPath } from 'node:url';
+import path from 'path';
+import { configs } from './app/configs/index.js';
+import { accountSwaggerDocs } from './app/modules/account/account.swagger.js';
+import { profileSwaggerDocs } from './app/modules/profile/profile.swagger.js';
+import { templateSwaggerDocs } from './app/modules/template/template.swagger.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export const swaggerOptions = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: 'API Doc - Build with exp-node-server',
+      version: '1.0.0',
+      description: 'Express + Prisma API with auto-generated Swagger docs',
+    },
+    paths: {
+      ...accountSwaggerDocs,
+      ...profileSwaggerDocs,
+      ...templateSwaggerDocs,
+    },
+    servers:
+      configs.env === 'production'
+        ? [
+            { url: configs.swagger_config.production_base_url },
+            { url: configs.swagger_config.development_base_url },
+          ]
+        : [
+            { url: configs.swagger_config.development_base_url },
+            { url: configs.swagger_config.production_base_url },
+          ],
+    components: {
+      securitySchemes: {
+        AuthorizationToken: {
+          type: 'apiKey',
+          in: 'header',
+          name: 'Authorization',
+          description: 'Put your accessToken here ',
+        },
+      },
+    },
+    security: [
+      {
+        AuthorizationToken: [],
+      },
+    ],
+  },
+  apis: [path.join(__dirname, configs.env === 'production' ? './**/*.js' : './**/*.ts')],
+};

@@ -1,0 +1,32 @@
+enum ROLE {
+    ADMIN
+    USER
+    ORGANIZATION
+}
+
+enum PROVIDER {
+    LOCAL
+    GOOGLE
+    FACEBOOK
+    GITHUB
+    TWITTER
+    LINKEDIN
+    INSTAGRAM
+}
+
+model Account {
+    id                 String    @id @default(uuid())
+    email              String    @unique
+    password           String?
+    provider           PROVIDER  @default(LOCAL)
+    role               ROLE      @default(ORGANIZATION)
+    lastOtp            String?
+    lastOtpSendingTime DateTime?
+    isDeleted          Boolean   @default(false)
+    isAccountVerified  Boolean   @default(false)
+    createdAt          DateTime  @default(now())
+    updatedAt          DateTime  @default(now())
+
+    profile             Profile?
+    organizationProfile OrganizationProfile?
+}

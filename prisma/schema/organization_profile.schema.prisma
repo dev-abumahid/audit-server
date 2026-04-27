@@ -1,0 +1,12 @@
+model OrganizationProfile {
+    id        String  @id @default(uuid())
+    accountId String  @unique
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    organizationName        String
+    organizationLogo        String?
+    organizationLocation    String?
+    organizationDescription String?
+    organizationWebsite     String?
+    organizationPhone       String?
+}

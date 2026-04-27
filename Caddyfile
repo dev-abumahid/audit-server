@@ -1,0 +1,12 @@
+yourdomain.com {
+
+    reverse_proxy app:5000
+
+    encode gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000;"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+    }
+}
