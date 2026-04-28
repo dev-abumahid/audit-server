@@ -44,6 +44,20 @@ router.delete(
   auth('ORGANIZATION'),
   template_controller.delete_page_question_by_id,
 );
+router.post(
+  '/send-template-access-invitation',
+  auth('ORGANIZATION'),
+  RequestValidator(template_validations.send_template_access_invitation),
+  template_controller.add_template_access_member,
+);
+router.delete(
+  '/remove-template-access',
+  auth('ORGANIZATION'),
+  RequestValidator(template_validations.send_template_access_invitation),
+  template_controller.remove_template_access_member,
+);
+
+// -----------------------------
 
 router.get('/:id', auth('ORGANIZATION'), template_controller.get_single_template);
 router.patch(

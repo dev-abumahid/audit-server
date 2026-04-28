@@ -99,6 +99,26 @@ const delete_page_question_by_id = catchAsync(async (req, res) => {
     meta: {},
   });
 });
+const add_template_access_member = catchAsync(async (req, res) => {
+  const result = await template_service.add_template_access_member_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Template access invitation send successfully.',
+    data: result,
+    meta: {},
+  });
+});
+const remove_template_access_member = catchAsync(async (req, res) => {
+  const result = await template_service.remove_template_access_member_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Template access removed successfully.',
+    data: result,
+    meta: {},
+  });
+});
 
 export const template_controller = {
   get_all_template,
@@ -110,4 +130,6 @@ export const template_controller = {
   delete_template_page_by_id,
   update_or_delete_new_question,
   delete_page_question_by_id,
+  add_template_access_member,
+  remove_template_access_member,
 };

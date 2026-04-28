@@ -277,4 +277,46 @@ export const templateSwaggerDocs = {
       },
     },
   },
+  '/api/template/send-template-access-invitation': {
+    post: {
+      tags: ['template [access]'],
+      summary: 'Send Template Access Invitation',
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            example: JSON.stringify({
+              templateId: '',
+              access: '',
+            }),
+          },
+        },
+      },
+      responses: {
+        200: { description: 'page question delete successfully' },
+        500: { description: 'Validation error or internal server error' },
+      },
+    },
+  },
+  '/api/template/remove-template-access': {
+    delete: {
+      tags: ['template [access]'],
+      summary: 'Remove Template Access',
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            example: JSON.stringify({
+              templateId: '',
+              access: '',
+            }),
+          },
+        },
+      },
+      responses: {
+        200: { description: 'page question delete successfully' },
+        500: { description: 'Validation error or internal server error' },
+      },
+    },
+  },
 };

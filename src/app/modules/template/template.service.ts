@@ -1,6 +1,7 @@
 import { Request } from 'express';
 import { JwtPayload } from 'jsonwebtoken';
 import { prisma } from '../../lib/prisma.js';
+import { TTemplateAccess } from '../../types/common.js';
 import uploadCloud from '../../utils/cloudinary.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { mapTemplateData } from './template.utils.js';
@@ -184,6 +185,31 @@ const delete_page_question_by_id_from_db = async (req: Request) => {
   return await prisma.question.delete({ where: { id } });
 };
 
+const add_template_access_member_into_db = async (req: Request) => {
+  const body = req?.body as TTemplateAccess;
+  const res = await prisma.templateAccess.create({
+    data: {
+      templateId: body.templateId,
+      userId: body.userId,
+    },
+  });
+
+  // in future need to send notification email
+
+  return res;
+};
+
+const remove_template_access_member_from_db = async (req: Request) => {
+  const body = req?.body as TTemplateAccess;
+  const res = await prisma.templateAccess.deleteMany({
+    where: {
+      userId: body.userId,
+      templateId: body.templateId,
+    },
+  });
+  return res;
+};
+
 export const template_service = {
   get_all_template_from_db,
   get_single_template_from_db,
@@ -194,4 +220,6 @@ export const template_service = {
   delete_template_page_by_id_from_db,
   update_or_delete_new_question_into_db,
   delete_page_question_by_id_from_db,
+  add_template_access_member_into_db,
+  remove_template_access_member_from_db,
 };
