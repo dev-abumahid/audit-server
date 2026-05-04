@@ -1,0 +1,16 @@
+model Site {
+    id              String   @id @default(uuid())
+    org_account_id  String
+    account         Account  @relation(fields: [org_account_id], references: [id])
+    name            String
+    location        String?
+    country         String?
+    activity        String?
+    revenue         Int
+    employees_count Int
+    site_type       String
+    lat             Float?
+    lng             Float?
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+}

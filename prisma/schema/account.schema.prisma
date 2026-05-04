@@ -29,4 +29,5 @@ model Account {
 
     profile             Profile?
     organizationProfile OrganizationProfile?
+    sites               Site[]
 }
