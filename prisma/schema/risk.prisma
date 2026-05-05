@@ -1,0 +1,33 @@
+model Risk {
+    id        String   @id @default(uuid())
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+}
+
+// export interface Risk {
+//   id: string;
+//   organization_id: string;
+//   ref: string;
+//   name: string;
+//   description: string | null;
+//   category: string;
+//   inherent_score: number;
+//   residual_score: number;
+//   pagerank_score: number;
+//   is_tipping_point: boolean;
+//   financial_impact_min: number;
+//   financial_impact_max: number;
+//   probability: number;
+//   velocity: string;
+//   trend: string;
+//   status: string;
+//   color_hex: string;
+//   ai_generated: boolean;
+//   is_edited: boolean;
+//   site_id: string | null;
+//   source_info: string | null;
+//   control_design_eff: number;
+//   control_operating_eff: number;
+//   created_at: string;
+//   updated_at: string;
+// }
