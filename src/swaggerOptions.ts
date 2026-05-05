@@ -4,9 +4,9 @@ import { configs } from './app/configs/index.js';
 import { accountSwaggerDocs } from './app/modules/account/account.swagger.js';
 import { profileSwaggerDocs } from './app/modules/profile/profile.swagger.js';
 import { templateSwaggerDocs } from './app/modules/template/template.swagger.js';
-import { siteSwaggerDocs } from "./app/modules/site/site.swagger.js";
-import { actionSwaggerDocs } from "./app/modules/action/action.swagger";
-import { riskSwaggerDocs } from "./app/modules/risk/risk.swagger";
+import { siteSwaggerDocs } from './app/modules/site/site.swagger.js';
+import { actionSwaggerDocs } from './app/modules/action/action.swagger';
+import { riskSwaggerDocs } from './app/modules/risk/risk.swagger';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,19 +24,19 @@ export const swaggerOptions = {
       ...profileSwaggerDocs,
       ...templateSwaggerDocs,
       ...siteSwaggerDocs,
-          ...actionSwaggerDocs,
-          ...riskSwaggerDocs,
+      ...actionSwaggerDocs,
+      ...riskSwaggerDocs,
     },
     servers:
       configs.env === 'production'
         ? [
-          { url: configs.swagger_config.production_base_url },
-          { url: configs.swagger_config.development_base_url },
-        ]
+            { url: configs.swagger_config.production_base_url },
+            { url: configs.swagger_config.development_base_url },
+          ]
         : [
-          { url: configs.swagger_config.development_base_url },
-          { url: configs.swagger_config.production_base_url },
-        ],
+            { url: configs.swagger_config.development_base_url },
+            { url: configs.swagger_config.production_base_url },
+          ],
     components: {
       securitySchemes: {
         AuthorizationToken: {

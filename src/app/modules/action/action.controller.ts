@@ -1,14 +1,13 @@
-
-import catchAsync from "../../utils/catch_async";
-import manageResponse from "../../utils/manage_response";
-import { action_service } from "./action.service";
+import catchAsync from '../../utils/catch_async';
+import manageResponse from '../../utils/manage_response';
+import { action_service } from './action.service';
 
 const get_all_action = catchAsync(async (req, res) => {
   const result = await action_service.get_all_action_from_db(req);
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "All action fetched successfully.",
+    message: 'All action fetched successfully.',
     data: result,
     meta: {},
   });
@@ -19,7 +18,7 @@ const get_single_action = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "Single action fetched successfully.",
+    message: 'Single action fetched successfully.',
     data: result,
     meta: {},
   });
@@ -30,7 +29,7 @@ const create_action = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "action created successfully.",
+    message: 'action created successfully.',
     data: result,
     meta: {},
   });
@@ -41,7 +40,7 @@ const update_action = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "action updated successfully.",
+    message: 'action updated successfully.',
     data: result,
     meta: {},
   });
@@ -52,7 +51,7 @@ const delete_action = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "action deleted successfully.",
+    message: 'action deleted successfully.',
     data: result,
     meta: {},
   });
@@ -65,4 +64,3 @@ export const action_controller = {
   update_action,
   delete_action,
 };
-    

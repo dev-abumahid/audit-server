@@ -1,37 +1,112 @@
-
-import { Request } from "express";
-import { prisma } from "../../lib/prisma";
+import { Request } from 'express';
+import { prisma } from '../../lib/prisma.js';
+import { JwtPayloadType } from '../../utils/JWT.js';
 
 const get_all_risk_from_db = async (req: Request) => {
-  // define your own login here
-  const result = await prisma.risk.findMany();
-  return result;
+  const {
+    searchTerm,
+    siteId,
+    category,
+    page = '1',
+    limit = '10',
+  } = req.query as Record<string, string>;
+
+  const user = req.user as JwtPayloadType;
+  const pageNumber = parseInt(page) || 1;
+  const limitNumber = parseInt(limit) || 10;
+  const skip = (pageNumber - 1) * limitNumber;
+
+  const whereCondition: any = {
+    org_account_id: user.accountId,
+  };
+
+  // search by name
+  if (searchTerm) {
+    whereCondition.name = {
+      contains: searchTerm,
+      mode: 'insensitive',
+    };
+  }
+
+  // filter by site
+  if (siteId) {
+    whereCondition.site_id = siteId;
+  }
+
+  // filter by category
+  if (category) {
+    whereCondition.category = category;
+  }
+
+  const [data, total] = await Promise.all([
+    prisma.risk.findMany({
+      where: whereCondition,
+      skip,
+      take: limitNumber,
+      orderBy: {
+        createdAt: 'desc',
+      },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        category: true,
+        residual_score: true,
+        pagerank_score: true,
+        financial_impact_min: true,
+        financial_impact_max: true,
+        status: true,
+        ai_generated: true,
+        is_edited: true,
+        site: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+        updatedAt: true,
+      },
+    }),
+
+    prisma.risk.count({
+      where: whereCondition,
+    }),
+  ]);
+
+  return {
+    meta: {
+      page: pageNumber,
+      limit: limitNumber,
+      total,
+      totalPage: Math.ceil(total / limitNumber),
+    },
+    data,
+  };
 };
 
 const get_single_risk_from_db = async (req: Request) => {
-  // define your own login here
-  const { id } = req.params;
-  const result = await prisma.risk.findUnique({where:{id}});
+  const { id } = req.params as Record<string, string>;
+  const result = await prisma.risk.findUnique({ where: { id } });
   return result;
 };
 
 const create_risk_into_db = async (req: Request) => {
-  // define your own login here
-  const result = await prisma.risk.create({data:req.body});
+  const user = req.user as JwtPayloadType;
+  const payload = req.body;
+  payload.org_account_id = user.accountId;
+  const result = await prisma.risk.create({ data: payload });
   return result;
 };
 
 const update_risk_into_db = async (req: Request) => {
-  // define your own login here
-  const { id } = req.params;
-  const result = await prisma.risk.update({where:{id},data:req.body});
+  const { id } = req.params as Record<string, string>;
+  const result = await prisma.risk.update({ where: { id }, data: req.body });
   return result;
 };
 
 const delete_risk_from_db = async (req: Request) => {
-  // define your own login here
-  const { id } = req.params;
-  const result = await prisma.risk.delete({where:{id}});
+  const { id } = req.params as Record<string, string>;
+  const result = await prisma.risk.delete({ where: { id } });
   return result;
 };
 
@@ -42,4 +117,3 @@ export const risk_service = {
   update_risk_into_db,
   delete_risk_from_db,
 };
-    

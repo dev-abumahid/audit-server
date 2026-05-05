@@ -1,33 +1,26 @@
 model Risk {
-    id        String   @id @default(uuid())
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+    id                    String   @id @default(uuid())
+    org_account_id        String
+    account               Account  @relation(fields: [org_account_id], references: [id])
+    name                  String
+    description           String?
+    category              String
+    inherent_score        Int?
+    residual_score        Int?
+    pagerank_score        Int?
+    financial_impact_min  Int?
+    financial_impact_max  Int?
+    probability           Int?
+    velocity              String?
+    trend                 String?
+    status                String
+    ai_generated          Boolean  @default(false)
+    is_edited             Boolean  @default(false)
+    site_id               String
+    site                  Site     @relation(fields: [site_id], references: [id])
+    source_info           String?
+    control_design_eff    Int?
+    control_operating_eff Int?
+    createdAt             DateTime @default(now())
+    updatedAt             DateTime @updatedAt
 }
-
-// export interface Risk {
-//   id: string;
-//   organization_id: string;
-//   ref: string;
-//   name: string;
-//   description: string | null;
-//   category: string;
-//   inherent_score: number;
-//   residual_score: number;
-//   pagerank_score: number;
-//   is_tipping_point: boolean;
-//   financial_impact_min: number;
-//   financial_impact_max: number;
-//   probability: number;
-//   velocity: string;
-//   trend: string;
-//   status: string;
-//   color_hex: string;
-//   ai_generated: boolean;
-//   is_edited: boolean;
-//   site_id: string | null;
-//   source_info: string | null;
-//   control_design_eff: number;
-//   control_operating_eff: number;
-//   created_at: string;
-//   updated_at: string;
-// }

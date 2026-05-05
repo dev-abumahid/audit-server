@@ -1,6 +1,5 @@
-
-import { Request } from "express";
-import { prisma } from "../../lib/prisma";
+import { Request } from 'express';
+import { prisma } from '../../lib/prisma.js';
 
 const get_all_action_from_db = async (req: Request) => {
   // define your own login here
@@ -10,28 +9,28 @@ const get_all_action_from_db = async (req: Request) => {
 
 const get_single_action_from_db = async (req: Request) => {
   // define your own login here
-  const { id } = req.params;
-  const result = await prisma.action.findUnique({where:{id}});
+  const { id } = req.params as Record<string, string>;
+  const result = await prisma.action.findUnique({ where: { id } });
   return result;
 };
 
 const create_action_into_db = async (req: Request) => {
   // define your own login here
-  const result = await prisma.action.create({data:req.body});
+  const result = await prisma.action.create({ data: req.body });
   return result;
 };
 
 const update_action_into_db = async (req: Request) => {
   // define your own login here
-  const { id } = req.params;
-  const result = await prisma.action.update({where:{id},data:req.body});
+  const { id } = req.params as Record<string, string>;
+  const result = await prisma.action.update({ where: { id }, data: req.body });
   return result;
 };
 
 const delete_action_from_db = async (req: Request) => {
   // define your own login here
-  const { id } = req.params;
-  const result = await prisma.action.delete({where:{id}});
+  const { id } = req.params as Record<string, string>;
+  const result = await prisma.action.delete({ where: { id } });
   return result;
 };
 
@@ -42,4 +41,3 @@ export const action_service = {
   update_action_into_db,
   delete_action_from_db,
 };
-    

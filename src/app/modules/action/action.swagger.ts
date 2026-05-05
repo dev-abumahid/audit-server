@@ -1,110 +1,106 @@
-
-    export const actionSwaggerDocs = {
-  "/api/action": {
+export const actionSwaggerDocs = {
+  '/api/action': {
     post: {
-      tags: ["action"],
-      summary: "Create  new action",
-      description: "",
+      tags: ['action'],
+      summary: 'Create  new action',
+      description: '',
       requestBody: {
         required: true,
         content: {
-          "application/json": {
+          'application/json': {
             example: JSON.stringify({}), // put your request body
           },
         },
       },
       responses: {
-        201: { description: "action created successfully" },
-        500: { description: "Validation error or internal server error" },
+        201: { description: 'action created successfully' },
+        500: { description: 'Validation error or internal server error' },
       },
     },
     get: {
-      tags: ["action"],
-      summary: "Get all action",
-      description: "",
+      tags: ['action'],
+      summary: 'Get all action',
+      description: '',
       parameters: [
         {
-          name: "page",
-          in: "query",
+          name: 'page',
+          in: 'query',
           required: false,
-          schema: { type: "number" },
+          schema: { type: 'number' },
         },
         {
-          name: "limit",
-          in: "query",
+          name: 'limit',
+          in: 'query',
           required: false,
-          schema: { type: "number" },
+          schema: { type: 'number' },
         },
       ],
       responses: {
-        200: { description: "action fetched successfully" },
-        401: { description: "unauthorized" },
+        200: { description: 'action fetched successfully' },
+        401: { description: 'unauthorized' },
       },
     },
   },
 
-  "/api/action/{id}": {
+  '/api/action/{id}': {
     get: {
-      tags: ["action"],
-      summary: "Get single action",
-      description: "",
+      tags: ['action'],
+      summary: 'Get single action',
+      description: '',
       parameters: [
         {
-          name: "id",
-          in: "path",
+          name: 'id',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
+          schema: { type: 'string' },
         },
       ],
       responses: {
-        200: { description: "action fetched successfully" },
-        401: { description: "unauthorized" },
+        200: { description: 'action fetched successfully' },
+        401: { description: 'unauthorized' },
       },
     },
     patch: {
-      tags: ["action"],
-      summary: "Update action",
-      description: "",
+      tags: ['action'],
+      summary: 'Update action',
+      description: '',
       parameters: [
         {
-          name: "id",
-          in: "path",
+          name: 'id',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
+          schema: { type: 'string' },
         },
       ],
       requestBody: {
         required: true,
         content: {
-          "application/json": {
+          'application/json': {
             example: JSON.stringify({}), // put your request body
           },
         },
       },
       responses: {
-        200: { description: "action updated successfully" },
-        500: { description: "Validation error or internal server error" },
+        200: { description: 'action updated successfully' },
+        500: { description: 'Validation error or internal server error' },
       },
     },
     delete: {
-      tags: ["action"],
-      summary: "Delete action",
-      description: "",
+      tags: ['action'],
+      summary: 'Delete action',
+      description: '',
       parameters: [
         {
-          name: "id",
-          in: "path",
+          name: 'id',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
+          schema: { type: 'string' },
         },
       ],
       responses: {
-        200: { description: "action delete successfully" },
-        401: { description: "unauthorized" },
+        200: { description: 'action delete successfully' },
+        401: { description: 'unauthorized' },
       },
     },
   },
 };
-
-    
-    

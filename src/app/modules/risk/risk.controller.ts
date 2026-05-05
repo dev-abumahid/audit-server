@@ -1,16 +1,15 @@
-
-import catchAsync from "../../utils/catch_async";
-import manageResponse from "../../utils/manage_response";
-import { risk_service } from "./risk.service";
+import catchAsync from '../../utils/catch_async.js';
+import manageResponse from '../../utils/manage_response.js';
+import { risk_service } from './risk.service.js';
 
 const get_all_risk = catchAsync(async (req, res) => {
   const result = await risk_service.get_all_risk_from_db(req);
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "All risk fetched successfully.",
-    data: result,
-    meta: {},
+    message: 'All risk fetched successfully.',
+    data: result.data,
+    meta: result.meta,
   });
 });
 
@@ -19,7 +18,7 @@ const get_single_risk = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "Single risk fetched successfully.",
+    message: 'Single risk fetched successfully.',
     data: result,
     meta: {},
   });
@@ -30,7 +29,7 @@ const create_risk = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "risk created successfully.",
+    message: 'risk created successfully.',
     data: result,
     meta: {},
   });
@@ -41,7 +40,7 @@ const update_risk = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "risk updated successfully.",
+    message: 'risk updated successfully.',
     data: result,
     meta: {},
   });
@@ -52,7 +51,7 @@ const delete_risk = catchAsync(async (req, res) => {
   manageResponse(res, {
     success: true,
     statusCode: 200,
-    message: "risk deleted successfully.",
+    message: 'risk deleted successfully.',
     data: result,
     meta: {},
   });
@@ -65,4 +64,3 @@ export const risk_controller = {
   update_risk,
   delete_risk,
 };
-    
