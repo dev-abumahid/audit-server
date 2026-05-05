@@ -1,7 +1,7 @@
 import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
 
-const get_all_action_from_db = async (req: Request) => {
+const get_all_action_from_db = async () => {
   // define your own login here
   const result = await prisma.action.findMany();
   return result;

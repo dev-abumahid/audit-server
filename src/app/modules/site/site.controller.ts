@@ -8,8 +8,8 @@ const get_all_site = catchAsync(async (req, res) => {
     success: true,
     statusCode: 200,
     message: 'All site fetched successfully.',
-    data: result,
-    meta: {},
+    data: result.data,
+    meta: result.meta,
   });
 });
 

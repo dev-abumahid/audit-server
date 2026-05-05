@@ -58,6 +58,7 @@ const get_all_risk_from_db = async (req: Request) => {
         status: true,
         ai_generated: true,
         is_edited: true,
+        velocity: true,
         site: {
           select: {
             id: true,

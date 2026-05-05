@@ -5,8 +5,8 @@ import { accountSwaggerDocs } from './app/modules/account/account.swagger.js';
 import { profileSwaggerDocs } from './app/modules/profile/profile.swagger.js';
 import { templateSwaggerDocs } from './app/modules/template/template.swagger.js';
 import { siteSwaggerDocs } from './app/modules/site/site.swagger.js';
-import { actionSwaggerDocs } from './app/modules/action/action.swagger';
-import { riskSwaggerDocs } from './app/modules/risk/risk.swagger';
+import { actionSwaggerDocs } from './app/modules/action/action.swagger.js';
+import { riskSwaggerDocs } from './app/modules/risk/risk.swagger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

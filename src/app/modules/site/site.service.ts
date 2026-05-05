@@ -43,7 +43,9 @@ const get_all_site_from_db = async (req: Request) => {
         name: true,
         activity: true,
         location: true,
+        country: true,
         createdAt: true,
+        updatedAt: true,
       },
     }),
     prisma.site.count({

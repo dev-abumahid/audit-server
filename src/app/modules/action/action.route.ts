@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import RequestValidator from '../../middlewares/request_validator';
-import { action_controller } from './action.controller';
-import { action_validations } from './action.validation';
+import RequestValidator from '../../middlewares/request_validator.js';
+import { action_controller } from './action.controller.js';
+import { action_validations } from './action.validation.js';
 
 const router = Router();
 

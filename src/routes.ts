@@ -3,8 +3,8 @@ import accountRouter from './app/modules/account/account.route.js';
 import profileRoute from './app/modules/profile/profile.route.js';
 import templateRoute from './app/modules/template/template.route.js';
 import siteRoute from './app/modules/site/site.route.js';
-import actionRoute from './app/modules/action/action.route';
-import riskRoute from './app/modules/risk/risk.route';
+import actionRoute from './app/modules/action/action.route.js';
+import riskRoute from './app/modules/risk/risk.route.js';
 
 const appRouter = Router();
 

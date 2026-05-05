@@ -17,7 +17,7 @@ model Risk {
     ai_generated          Boolean  @default(false)
     is_edited             Boolean  @default(false)
     site_id               String
-    site                  Site     @relation(fields: [site_id], references: [id])
+    site                  Site     @relation(fields: [site_id], references: [id], onDelete: Cascade)
     source_info           String?
     control_design_eff    Int?
     control_operating_eff Int?

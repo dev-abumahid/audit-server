@@ -1,9 +1,9 @@
-import catchAsync from '../../utils/catch_async';
-import manageResponse from '../../utils/manage_response';
-import { action_service } from './action.service';
+import catchAsync from '../../utils/catch_async.js';
+import manageResponse from '../../utils/manage_response.js';
+import { action_service } from './action.service.js';
 
 const get_all_action = catchAsync(async (req, res) => {
-  const result = await action_service.get_all_action_from_db(req);
+  const result = await action_service.get_all_action_from_db();
   manageResponse(res, {
     success: true,
     statusCode: 200,
