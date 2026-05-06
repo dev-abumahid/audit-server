@@ -31,6 +31,8 @@ export const configs = {
   redis_config: {
     hosted_redis_connection: process.env.HOSTED_REDIS_CONNECTION,
     hosted_redis_db_url: process.env.HOSTED_REDIS_DB_URL,
+    host: process.env.REDIS_HOST,
+    port: process.env.REDIS_PORT,
   },
   google_login_config: {
     is_google_login: process.env.IS_GOOGLE_LOGIN === 'true',
