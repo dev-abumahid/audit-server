@@ -44,6 +44,8 @@ const get_all_site_from_db = async (req: Request) => {
         activity: true,
         location: true,
         country: true,
+        employees_count: true,
+        revenue: true,
         createdAt: true,
         updatedAt: true,
       },

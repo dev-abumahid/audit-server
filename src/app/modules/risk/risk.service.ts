@@ -46,26 +46,13 @@ const get_all_risk_from_db = async (req: Request) => {
       orderBy: {
         createdAt: 'desc',
       },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        category: true,
-        residual_score: true,
-        pagerank_score: true,
-        financial_impact_min: true,
-        financial_impact_max: true,
-        status: true,
-        ai_generated: true,
-        is_edited: true,
-        velocity: true,
+      include: {
         site: {
           select: {
             id: true,
             name: true,
           },
         },
-        updatedAt: true,
       },
     }),
 

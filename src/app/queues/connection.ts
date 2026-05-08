@@ -24,7 +24,7 @@ function createRedisConnection() {
       console.log('🔗 Connecting to local Redis (docker service)');
 
       redis = new Redis({
-        host: configs.redis_config.host || 'server_redis', 
+        host: configs.redis_config.host || 'server_redis',
         port: Number(configs.redis_config.port || 6379),
         maxRetriesPerRequest: null,
       });

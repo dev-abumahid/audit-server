@@ -8,13 +8,12 @@ async function main() {
   try {
     // 1. FIRST connect DB
     await prisma.$connect();
-    logger.info("Database connected");
+    logger.info('Database connected');
 
     // 2. THEN start server
     app.listen(configs.port, '0.0.0.0', () => {
       logger.info(`Server is running on port ${configs.port}`);
     });
-
   } catch (error) {
     logger.error(error, 'Startup failed');
     process.exit(1);
@@ -22,10 +21,10 @@ async function main() {
 }
 
 main();
-process.on("uncaughtException", (err) => {
-  console.error("UNCAUGHT EXCEPTION:", err);
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err);
 });
 
-process.on("unhandledRejection", (err) => {
-  console.error("UNHANDLED REJECTION:", err);
+process.on('unhandledRejection', (err) => {
+  console.error('UNHANDLED REJECTION:', err);
 });

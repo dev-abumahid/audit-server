@@ -40,6 +40,8 @@ const login_user = catchAsync(async (req, res) => {
   res.cookie('access_token', accessToken, {
     secure: configs.env === 'production',
     httpOnly: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: '/',
   });
 
   manageResponse(res, {

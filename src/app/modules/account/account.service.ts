@@ -30,6 +30,7 @@ const create_account_into_db = async (req: Request) => {
         email: payload.email,
         password: hashPassword,
         role: 'ORGANIZATION',
+        isAccountVerified: true,
       },
     });
 
