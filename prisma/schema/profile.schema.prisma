@@ -6,4 +6,5 @@ model Profile {
     fullName     String
     profilePhoto String?
     templateAccesses TemplateAccess[]
+    inspections      Inspection[]
 }

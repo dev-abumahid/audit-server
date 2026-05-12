@@ -24,8 +24,7 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          topic: prompt,
-          organization_username: user.email,
+          topic: prompt
         }),
       }
     );
@@ -74,8 +73,6 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
     const formData = new FormData();
 
     formData.append("file", blob, file.originalname);
-    formData.append("organization_username", user.email);
-
     const aiResponse = await fetch(
       `${configs.ai_server_end_point}/template_from_pdf`,
       {
@@ -158,7 +155,6 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
     );
 
     const data = await aiResponse.json();
-    console.log(data)
     // verify with schema
     const parseData =
       await template_validations.create_template.parseAsync(
@@ -177,8 +173,6 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
 
     return result;
   } catch (error: any) {
-    console.error("generate_template_with_risk_with_ai:", error);
-
     throw new AppError(
       error?.message || "Failed to generate template from risk",
       error?.statusCode || 500

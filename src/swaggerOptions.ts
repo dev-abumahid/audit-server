@@ -8,6 +8,7 @@ import { siteSwaggerDocs } from './app/modules/site/site.swagger.js';
 import { actionSwaggerDocs } from './app/modules/action/action.swagger.js';
 import { riskSwaggerDocs } from './app/modules/risk/risk.swagger.js';
 import { aiSwaggerDocs } from "./app/modules/ai/ai.swagger.js";
+import { inspectionSwaggerDocs } from "./app/modules/inspection/inspection.swagger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +29,7 @@ export const swaggerOptions = {
       ...actionSwaggerDocs,
       ...riskSwaggerDocs,
           ...aiSwaggerDocs,
+          ...inspectionSwaggerDocs,
     },
     servers:
       configs.env === 'production'

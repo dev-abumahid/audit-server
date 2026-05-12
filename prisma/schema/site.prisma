@@ -14,5 +14,6 @@ model Site {
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 
-    risks Risk[]
+    risks       Risk[]
+    inspections Inspection[]
 }

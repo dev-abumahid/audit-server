@@ -3,27 +3,27 @@ import { z } from 'zod';
 const AnswerTypeSchema = z.discriminatedUnion('answerType', [
   z.object({
     answerType: z.literal('input'),
-    value: z.string(),
+    value: z.string().optional(),
   }),
   z.object({
     answerType: z.literal('multipleSelect'),
-    value: z.string(),
+    value: z.union([z.array(z.string()), z.string()]).optional(),
   }),
   z.object({
     answerType: z.literal('date'),
-    value: z.string(),
+    value: z.string().optional(),
   }),
   z.object({
     answerType: z.literal('media'),
-    value: z.string(),
+    value: z.string().optional(),
   }),
   z.object({
     answerType: z.literal('checkbox'),
-    value: z.string(),
+    value: z.union([z.boolean(), z.string()]).optional(),
   }),
   z.object({
     answerType: z.literal('slider'),
-    value: z.string(),
+    value: z.union([z.number(), z.string()]).optional(),
   }),
 ]);
 const QuestionSchema = z.object({
