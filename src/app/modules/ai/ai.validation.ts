@@ -1,5 +1,4 @@
-
-import { z } from "zod";
+import { z } from 'zod';
 
 const generate_with_prompt = z.object({
   prompt: z.string(),
@@ -11,5 +10,5 @@ const generate_with_risk = z.object({
 
 export const ai_validations = {
   generate_with_prompt,
-  generate_with_risk
+  generate_with_risk,
 };

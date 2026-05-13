@@ -3,8 +3,8 @@ model Profile {
     accountId String  @unique
     account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-    fullName     String
-    profilePhoto String?
+    fullName         String
+    profilePhoto     String?
     templateAccesses TemplateAccess[]
     inspections      Inspection[]
 }

@@ -1,40 +1,40 @@
 export const aiSwaggerDocs = {
-  "/api/ai/generate-with-prompt": {
+  '/api/ai/generate-with-prompt': {
     post: {
-      tags: ["ai"],
-      summary: "Generate template with prompt",
-      description: "",
+      tags: ['ai'],
+      summary: 'Generate template with prompt',
+      description: '',
       requestBody: {
         required: true,
         content: {
-          "application/json": {
+          'application/json': {
             example: JSON.stringify({
-              prompt: "Generate a template for a risk assessment report.",
+              prompt: 'Generate a template for a risk assessment report.',
             }),
           },
         },
       },
       responses: {
-        201: { description: "Template generated successfully" },
-        500: { description: "Validation error or internal server error" },
+        201: { description: 'Template generated successfully' },
+        500: { description: 'Validation error or internal server error' },
       },
     },
   },
-  "/api/ai/generate-with-pdf": {
+  '/api/ai/generate-with-pdf': {
     post: {
-      tags: ["ai"],
-      summary: "Generate template with PDF",
-      description: "",
+      tags: ['ai'],
+      summary: 'Generate template with PDF',
+      description: '',
       requestBody: {
         required: true,
         content: {
-          "multipart/form-data": {
+          'multipart/form-data': {
             schema: {
-              type: "object",
+              type: 'object',
               properties: {
                 file: {
-                  type: "string",
-                  format: "binary",
+                  type: 'string',
+                  format: 'binary',
                 },
               },
             },
@@ -42,25 +42,25 @@ export const aiSwaggerDocs = {
         },
       },
       responses: {
-        201: { description: "Template generated successfully" },
-        500: { description: "Validation error or internal server error" },
+        201: { description: 'Template generated successfully' },
+        500: { description: 'Validation error or internal server error' },
       },
     },
   },
-  "/api/ai/generate-with-risk": {
+  '/api/ai/generate-with-risk': {
     post: {
-      tags: ["ai"],
-      summary: "Generate template with risk",
-      description: "",
+      tags: ['ai'],
+      summary: 'Generate template with risk',
+      description: '',
       requestBody: {
         required: true,
         content: {
-          "application/json": {
+          'application/json': {
             schema: {
-              type: "object",
+              type: 'object',
               properties: {
                 riskId: {
-                  type: "string",
+                  type: 'string',
                 },
               },
             },
@@ -68,11 +68,9 @@ export const aiSwaggerDocs = {
         },
       },
       responses: {
-        201: { description: "Template generated successfully" },
-        500: { description: "Validation error or internal server error" },
+        201: { description: 'Template generated successfully' },
+        500: { description: 'Validation error or internal server error' },
       },
     },
   },
 };
-
-

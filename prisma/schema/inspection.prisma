@@ -1,37 +1,44 @@
+enum Status {
+    IN_PROGRESS
+    COMPLETED
+    CANCELLED
+    DRAFT
+}
+
 model Inspection {
-    id           String @id @default(uuid())
+    id String @id @default(uuid())
 
     // meta key
-    orgAccountId String
-    templateId   String
-    siteId       String
-    inspectorProfileId String
+    orgAccountId       String
+    templateId         String
+    siteId             String
+    inspectorProfileId String?
 
     // main data set
     questionAnswers QuestionAnswer[]
 
     // Relations
-    account  Account  @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
-    template Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
-    site     Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
-    inspector Profile @relation(fields: [inspectorProfileId], references: [id], onDelete: Cascade)
+    account   Account  @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
+    template  Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+    site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+    inspector Profile? @relation(fields: [inspectorProfileId], references: [id], onDelete: Cascade)
+    status    Status   @default(IN_PROGRESS)
 
     // Time State
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
-
 }
 
 model QuestionAnswer {
-    id String @id @default(uuid())
+    id           String @id @default(uuid())
     inspectionId String
-    questionId String
+    questionId   String
 
-    answer Json
-    note String?
+    answer     Json
+    note       String?
     mediaFiles Json
 
     // Relations
     inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
-    question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+    question   Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
 }
