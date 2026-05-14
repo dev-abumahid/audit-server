@@ -3,7 +3,7 @@ export const QuestionAnswerSchema = z.object({
   questionId: z.string().uuid(),
   answer: z.any(),
   note: z.string().optional().nullable(),
-  mediaFiles: z.any(),
+  mediaFiles: z.any().optional(),
 });
 
 const create_inspection = z.object({

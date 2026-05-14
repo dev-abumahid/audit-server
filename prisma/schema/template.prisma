@@ -4,10 +4,13 @@ model Template {
     templateLogo String?
     templateName String
     templateDisc String?
+    riskId       String?
 
-    pages  Page[]
-    access TemplateAccess[]
+    pages       Page[]
+    access      TemplateAccess[]
     inspections Inspection[]
+
+    risk Risk? @relation(fields: [riskId], references: [id], onDelete: Cascade)
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
@@ -35,7 +38,7 @@ model Question {
     answerType String
     value      Json
 
-    page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+    page            Page             @relation(fields: [pageId], references: [id], onDelete: Cascade)
     questionAnswers QuestionAnswer[]
 
     @@index([pageId, index])

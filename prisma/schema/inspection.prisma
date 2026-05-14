@@ -13,6 +13,7 @@ model Inspection {
     templateId         String
     siteId             String
     inspectorProfileId String?
+    riskId             String?
 
     // main data set
     questionAnswers QuestionAnswer[]
@@ -22,6 +23,7 @@ model Inspection {
     template  Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
     site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
     inspector Profile? @relation(fields: [inspectorProfileId], references: [id], onDelete: Cascade)
+    risk      Risk?    @relation(fields: [riskId], references: [id], onDelete: Cascade)
     status    Status   @default(IN_PROGRESS)
 
     // Time State
@@ -36,7 +38,7 @@ model QuestionAnswer {
 
     answer     Json
     note       String?
-    mediaFiles Json
+    mediaFiles Json?
 
     // Relations
     inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)

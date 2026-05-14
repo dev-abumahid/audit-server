@@ -23,4 +23,7 @@ model Risk {
     control_operating_eff Int?
     createdAt             DateTime @default(now())
     updatedAt             DateTime @updatedAt
+
+    inspections Inspection[]
+    templates   Template[]
 }

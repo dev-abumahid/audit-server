@@ -107,6 +107,21 @@ const get_single_inspection_from_db = async (req: Request) => {
           },
         },
       },
+      template: {
+        include: {
+          pages: {
+            include: {
+              questions: true
+            }
+          }
+        }
+      },
+      site: {
+        select: {
+          id: true,
+          name: true,
+        }
+      }
     },
   });
   return result;
