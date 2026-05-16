@@ -1,6 +1,8 @@
 import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
+import { AppError } from '../../utils/app_error.js';
+import uploadCloud from '../../utils/cloudinary.js';
 
 const get_all_inspection_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
@@ -198,6 +200,14 @@ const update_inspection_question_into_db = async (req: Request) => {
   return result;
 };
 
+const upload_any_file_into_aws_for_inspection = async (req: Request) => {
+  const file = req.file;
+  if (!file) {
+    throw new AppError("File is required", 400)
+  }
+  const result = await uploadCloud(file);
+  return result.secure_url;
+}
 export const inspection_service = {
   get_all_inspection_from_db,
   get_single_inspection_from_db,
@@ -205,4 +215,5 @@ export const inspection_service = {
   update_inspection_into_db,
   delete_inspection_from_db,
   update_inspection_question_into_db,
+  upload_any_file_into_aws_for_inspection
 };

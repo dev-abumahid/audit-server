@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import RequestValidator from '../../middlewares/request_validator.js';
+import uploader from '../../middlewares/uploader.js';
 import { inspection_controller } from './inspection.controller.js';
 import { inspection_validations } from './inspection.validation.js';
 
@@ -26,6 +27,12 @@ router.put(
   auth('ORGANIZATION'),
   RequestValidator(inspection_validations.update_question_answer),
   inspection_controller.update_inspection_question,
+);
+router.post(
+  '/upload-file-aws',
+  auth('ORGANIZATION', "ADMIN", "USER"),
+  uploader.single("file"),
+  inspection_controller.upload_any_file_into_aws,
 );
 
 export default router;

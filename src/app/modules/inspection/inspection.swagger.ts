@@ -181,4 +181,34 @@ export const inspectionSwaggerDocs = {
       },
     },
   },
+  '/api/inspection/upload-file-aws': {
+    post: {
+      tags: ['Upload'],
+      summary: 'Upload file',
+      description: 'Upload file',
+      requestBody: {
+        required: true,
+        content: {
+          'multipart/form-data': {
+            schema: {
+              type: 'object',
+              properties: {
+                file: {
+                  type: 'string',
+                  format: 'binary',
+                  description: 'Any file upload (image/pdf/etc)',
+                },
+              },
+              required: ['file'],
+            },
+          },
+        },
+      },
+      responses: {
+        201: { description: 'File uploaded successfully' },
+        400: { description: 'Validation error' },
+        500: { description: 'Internal server error' },
+      },
+    }
+  },
 };

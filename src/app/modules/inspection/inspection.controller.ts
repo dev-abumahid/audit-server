@@ -66,6 +66,16 @@ const update_inspection_question = catchAsync(async (req, res) => {
     meta: {},
   });
 });
+const upload_any_file_into_aws = catchAsync(async (req, res) => {
+  const result = await inspection_service.upload_any_file_into_aws_for_inspection(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'File upload successful',
+    data: result,
+    meta: {},
+  });
+});
 
 export const inspection_controller = {
   get_all_inspection,
@@ -74,4 +84,5 @@ export const inspection_controller = {
   update_inspection,
   delete_inspection,
   update_inspection_question,
+  upload_any_file_into_aws
 };
