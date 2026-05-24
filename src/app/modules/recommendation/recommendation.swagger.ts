@@ -63,31 +63,6 @@ export const recommendationSwaggerDocs = {
         401: { description: "unauthorized" },
       },
     },
-    patch: {
-      tags: ["recommendation"],
-      summary: "Update recommendation",
-      description: "",
-      parameters: [
-        {
-          name: "id",
-          in: "path",
-          required: true,
-          schema: { type: "string" },
-        },
-      ],
-      requestBody: {
-        required: true,
-        content: {
-          "application/json": {
-            example: JSON.stringify({}), // put your request body
-          },
-        },
-      },
-      responses: {
-        200: { description: "recommendation updated successfully" },
-        500: { description: "Validation error or internal server error" },
-      },
-    },
     delete: {
       tags: ["recommendation"],
       summary: "Delete recommendation",
@@ -109,7 +84,7 @@ export const recommendationSwaggerDocs = {
   "/api/recommendation/update-question/{recQuestionId}": {
     patch: {
       tags: ["recommendation"],
-      summary: "Update recommendation",
+      summary: "Update recommendation Question",
       description: "",
       parameters: [
         {
@@ -123,7 +98,40 @@ export const recommendationSwaggerDocs = {
         required: true,
         content: {
           "application/json": {
-            example: JSON.stringify({}), // put your request body
+            example: JSON.stringify({
+              observation: "",
+              standard: "",
+              recommendation: "",
+            }),
+          },
+        },
+      },
+      responses: {
+        200: { description: "recommendation updated successfully" },
+        500: { description: "Validation error or internal server error" },
+      },
+    }
+  },
+  "/api/recommendation/update-summary/{recommendationId}": {
+    patch: {
+      tags: ["recommendation"],
+      summary: "Update recommendation Summary",
+      description: "",
+      parameters: [
+        {
+          name: "recommendationId",
+          in: "path",
+          required: true,
+          schema: { type: "string" },
+        },
+      ],
+      requestBody: {
+        required: true,
+        content: {
+          "application/json": {
+            example: JSON.stringify({
+              summary: ""
+            }),
           },
         },
       },

@@ -12,9 +12,14 @@ router.get("/", auth("ORGANIZATION"), recommendation_controller.get_all_recommen
 
 router.get("/:id", auth("ORGANIZATION"), recommendation_controller.get_single_recommendation);
 router.patch(
-  "/:recQuestionId", auth("ORGANIZATION"),
-  RequestValidator(recommendation_validations.update_recommendation),
+  "/update-question/:recQuestionId", auth("ORGANIZATION"),
+  RequestValidator(recommendation_validations.update_recommendation_question),
   recommendation_controller.update_recommendation_answer,
+);
+router.patch(
+  "/update-summary/:recommendationId", auth("ORGANIZATION"),
+  RequestValidator(recommendation_validations.update_recommendation_summary),
+  recommendation_controller.update_recommendation_summary,
 );
 router.delete("/:id", auth("ORGANIZATION"), recommendation_controller.delete_recommendation);
 

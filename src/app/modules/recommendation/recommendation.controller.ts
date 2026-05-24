@@ -35,6 +35,16 @@ const update_recommendation_answer = catchAsync(async (req, res) => {
     meta: {},
   });
 });
+const update_recommendation_summary = catchAsync(async (req, res) => {
+  const result = await recommendation_service.update_recommendation_summary_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: "recommendation updated successfully.",
+    data: result,
+    meta: {},
+  });
+});
 
 const delete_recommendation = catchAsync(async (req, res) => {
   const result = await recommendation_service.delete_recommendation_from_db(req);
@@ -62,5 +72,6 @@ export const recommendation_controller = {
   get_single_recommendation,
   update_recommendation_answer,
   delete_recommendation,
-  get_recommendation_by_inspectionId
+  get_recommendation_by_inspectionId,
+  update_recommendation_summary
 };

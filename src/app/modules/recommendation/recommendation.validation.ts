@@ -14,11 +14,20 @@ const create_recommendation = z.object({
   orgAccountId: z.string(),
   inspectionId: z.string(),
   riskId: z.string().optional(),
-  siteId:z.string().optional()
+  siteId: z.string().optional()
 });
-const update_recommendation = create_recommendation.partial()
+const update_recommendation_summary = z.object({
+  summary: z.string().optional()
+})
+
+const update_recommendation_question = z.object({
+  observation: z.string().optional(),
+  standard: z.string().optional(),
+  recommendation: z.string().optional(),
+})
 
 export const recommendation_validations = {
   create_recommendation,
-  update_recommendation,
+  update_recommendation_summary,
+  update_recommendation_question
 };
