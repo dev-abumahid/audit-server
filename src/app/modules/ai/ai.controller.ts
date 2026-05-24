@@ -32,9 +32,20 @@ const generate_template_with_risk = catchAsync(async (req, res) => {
     meta: {},
   });
 });
+const generate_recommendation_with_inspection = catchAsync(async (req, res) => {
+  const result = await ai_service.generate_recommendation_with_inspection_from_ai(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Recommendation generated successfully.',
+    data: result,
+    meta: {},
+  });
+});
 
 export const ai_controller = {
   generate_template_with_prompt,
   generate_template_with_pdf,
   generate_template_with_risk,
+  generate_recommendation_with_inspection
 };

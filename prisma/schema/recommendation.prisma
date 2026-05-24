@@ -1,0 +1,43 @@
+model Recommendation {
+    id String @id @default(uuid())
+
+    // FK
+    orgAccountId String
+    inspectionId String
+    riskId       String?
+    siteId       String?
+
+    // Body
+    summary   String
+    questions RecommendationResult[]
+
+    // Time stamp
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    // Relations
+    account    Account    @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
+    inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+    risk       Risk?      @relation(fields: [riskId], references: [id], onDelete: Cascade)
+    site       Site?      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+}
+
+model RecommendationResult {
+    id String @id @default(uuid())
+
+    // FK
+    recommendationId String
+
+    // Body
+    question       String
+    observation    String
+    standard       String
+    recommendation String
+
+    // Time stamp
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    // Relations
+    recommendationAi Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+}

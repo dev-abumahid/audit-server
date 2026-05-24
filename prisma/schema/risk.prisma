@@ -24,6 +24,8 @@ model Risk {
     createdAt             DateTime @default(now())
     updatedAt             DateTime @updatedAt
 
-    inspections Inspection[]
-    templates   Template[]
+    // Relations
+    inspections     Inspection[]
+    templates       Template[]
+    recommendations Recommendation[]
 }

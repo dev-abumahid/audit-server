@@ -32,4 +32,6 @@ model Account {
     sites               Site[]
     risks               Risk[]
     inspections         Inspection[]
+    recommendations     Recommendation[]
+    actionMessages      ActionMessage[]
 }

@@ -1,7 +1,7 @@
 export const aiSwaggerDocs = {
   '/api/ai/generate-with-prompt': {
     post: {
-      tags: ['ai'],
+      tags: ['AI Routes'],
       summary: 'Generate template with prompt',
       description: '',
       requestBody: {
@@ -22,7 +22,7 @@ export const aiSwaggerDocs = {
   },
   '/api/ai/generate-with-pdf': {
     post: {
-      tags: ['ai'],
+      tags: ['AI Routes'],
       summary: 'Generate template with PDF',
       description: '',
       requestBody: {
@@ -49,7 +49,7 @@ export const aiSwaggerDocs = {
   },
   '/api/ai/generate-with-risk': {
     post: {
-      tags: ['ai'],
+      tags: ['AI Routes'],
       summary: 'Generate template with risk',
       description: '',
       requestBody: {
@@ -60,6 +60,32 @@ export const aiSwaggerDocs = {
               type: 'object',
               properties: {
                 riskId: {
+                  type: 'string',
+                },
+              },
+            },
+          },
+        },
+      },
+      responses: {
+        201: { description: 'Template generated successfully' },
+        500: { description: 'Validation error or internal server error' },
+      },
+    },
+  },
+  '/api/ai/generate-recommendation': {
+    post: {
+      tags: ['AI Routes'],
+      summary: 'Generate recommendation with inspection',
+      description: '',
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                inspectionId: {
                   type: 'string',
                 },
               },

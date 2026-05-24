@@ -29,6 +29,9 @@ model Inspection {
     // Time State
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
+
+    // Relations
+    recommendations Recommendation[]
 }
 
 model QuestionAnswer {

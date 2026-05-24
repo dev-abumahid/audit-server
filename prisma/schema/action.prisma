@@ -1,5 +1,51 @@
+enum PRIORITY {
+    Low
+    Medium
+    High
+}
+
+enum STATUS {
+    TO_DO
+    IN_PROGRESS
+    COMPLETE
+    CANT_DO
+}
+
 model Action {
-    id        String   @id @default(uuid())
+    id           String @id @default(uuid())
+    //FK
+    orgAccountId String
+    inspectionId String
+    siteId       String
+    questionId   String
+
+    // Main body
+    actionTitle String
+    actionDisc  String
+    priority    PRIORITY
+    dueDate     DateTime
+    status      STATUS          @default(TO_DO)
+    messages    ActionMessage[]
+
+    // Date time
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
+
+    // Relations
+}
+
+model ActionMessage {
+    id              String @id @default(uuid())
+    // Main body
+    message         String
+    // Fk
+    senderAccountId String
+
+    // Date time
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    // Relations
+    action Action @relation(fields: [id], references: [id], onDelete: Cascade)
+    account Account @relation(fields: [senderAccountId], references: [id], onDelete: Cascade)
 }

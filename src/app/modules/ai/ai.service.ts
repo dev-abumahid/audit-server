@@ -4,6 +4,7 @@ import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
+import { recommendation_validations } from '../recommendation/recommendation.validation.js';
 import { mapTemplateData } from '../template/template.utils.js';
 import { template_validations } from '../template/template.validation.js';
 
@@ -157,8 +158,113 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
   }
 };
 
+const generate_recommendation_with_inspection_from_ai = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const inspectionId = req?.body?.inspectionId as string;
+
+  // check inspection exist or not
+  const isInspectionExist = await prisma.inspection.findFirst({
+    where: {
+      id: inspectionId
+    },
+    include: {
+      questionAnswers: {
+        include: {
+          question: {
+            select: {
+              question: true,
+            }
+          }
+        }
+      }
+    }
+  })
+
+  if (!isInspectionExist) {
+    throw new AppError("Inspection Not found !!", 404)
+  }
+  if (isInspectionExist.orgAccountId !== user.accountId) {
+    throw new AppError("You are not authorized to access this inspection !!", 403)
+  }
+
+  // make ai payload
+  const questions = isInspectionExist.questionAnswers?.map(item => ({
+    question: item.question.question,
+    answer: item.answer,
+    note: item.note
+  }))
+
+  const aiPayload = {
+    organization_username: user.accountId,
+    questions: questions
+  }
+
+  // Call ai api for generating recommendation
+  try {
+    const aiResponse = await fetch(`${configs.ai_server_end_point}/generate_recommendations_from_answer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(aiPayload),
+    });
+    const data = await aiResponse.json();
+
+    if (data) {
+      const results = data.results.map((item: any) => ({
+        question: item.question || " ",
+        observation: item.observation || " ",
+        standard: item.standard || " ",
+        recommendation: item.recommendation || " ",
+      }))
+      const final_payload = {
+        results,
+        summary: data.all_over_recommendation,
+        orgAccountId: user?.accountId,
+        inspectionId,
+        ...(isInspectionExist.riskId && {
+          riskId: isInspectionExist.riskId
+        }),
+        ...(isInspectionExist.siteId && {
+          siteId: isInspectionExist.siteId
+        })
+      }
+      const validateDate = await recommendation_validations.create_recommendation.parseAsync(final_payload);
+      const result = await prisma.recommendation.create({
+        data: {
+          summary: validateDate.summary,
+          orgAccountId: validateDate.orgAccountId,
+          inspectionId: validateDate.inspectionId,
+          riskId: validateDate.riskId,
+          siteId: validateDate.siteId,
+
+          questions: {
+            create: validateDate.results.map((item: any) => ({
+              question: item.question,
+              observation: item.observation,
+              standard: item.standard,
+              recommendation: item.recommendation
+            }))
+          }
+        },
+        include: {
+          questions: true
+        }
+      })
+      return result
+    }
+  } catch (error: any) {
+    console.log(error)
+    throw new AppError(
+      error?.message || 'Failed to generate recommendation from inspection',
+      error?.statusCode || 500,
+    );
+  }
+}
+
 export const ai_service = {
   generate_template_with_prompt_with_ai,
   generate_template_with_pdf_with_ai,
   generate_template_with_risk_with_ai,
+  generate_recommendation_with_inspection_from_ai
 };

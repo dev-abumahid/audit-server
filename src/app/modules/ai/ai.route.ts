@@ -25,5 +25,11 @@ router.post(
   RequestValidator(ai_validations.generate_with_risk),
   ai_controller.generate_template_with_risk,
 );
+router.post(
+  '/generate-recommendation',
+  auth('ORGANIZATION'),
+  RequestValidator(ai_validations.generate_recommendation_payload),
+  ai_controller.generate_recommendation_with_inspection,
+);
 
 export default router;
