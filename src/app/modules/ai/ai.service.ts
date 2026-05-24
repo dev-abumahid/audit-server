@@ -187,6 +187,16 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
     throw new AppError("You are not authorized to access this inspection !!", 403)
   }
 
+  // check recommendation exist or not
+  const isRecommendationExist = await prisma.recommendation.findFirst({
+    where: {
+      inspectionId: inspectionId
+    }
+  })
+  if (isRecommendationExist) {
+    throw new AppError("Recommendation already exist !!", 400)
+  }
+
   // make ai payload
   const questions = isInspectionExist.questionAnswers?.map(item => ({
     question: item.question.question,
