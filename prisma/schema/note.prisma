@@ -1,0 +1,18 @@
+model Note {
+    id String @id @default(uuid())
+
+    // body data
+    title          String
+    extracted_text String
+
+    // foreign key
+    orgAccountId String
+    inspectionId String @unique
+
+    // Relation
+    orgAccount Account    @relation(fields: [orgAccountId], references: [id])
+    inspection Inspection @relation(fields: [inspectionId], references: [id])
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+}

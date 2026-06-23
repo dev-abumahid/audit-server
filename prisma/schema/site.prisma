@@ -18,4 +18,5 @@ model Site {
     risks           Risk[]
     inspections     Inspection[]
     recommendations Recommendation[]
+    action          Action[]
 }

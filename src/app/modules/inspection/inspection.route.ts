@@ -30,9 +30,14 @@ router.put(
 );
 router.post(
   '/upload-file-aws',
-  auth('ORGANIZATION', "ADMIN", "USER"),
-  uploader.single("file"),
+  auth('ORGANIZATION', 'ADMIN', 'USER'),
+  uploader.single('file'),
   inspection_controller.upload_any_file_into_aws,
+);
+router.post(
+  '/split-note-into-inspection/:inspectionId',
+  auth('ORGANIZATION'),
+  inspection_controller.split_note_into_inspection,
 );
 
 export default router;

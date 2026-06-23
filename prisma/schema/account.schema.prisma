@@ -34,4 +34,7 @@ model Account {
     inspections         Inspection[]
     recommendations     Recommendation[]
     actionMessages      ActionMessage[]
+    actions             Action[]
+    pineconeDocuments   PineconeDocument[]
+    notes               Note[]
 }

@@ -31,5 +31,21 @@ router.post(
   RequestValidator(ai_validations.generate_recommendation_payload),
   ai_controller.generate_recommendation_with_inspection,
 );
+router.post(
+  '/upload-pdf-into-pinecone',
+  auth('ORGANIZATION'),
+  uploader.single('file'),
+  ai_controller.upload_pdf_into_pinecone,
+);
+router.get(
+  '/get-all-files-from-pinecone',
+  auth('ORGANIZATION'),
+  ai_controller.get_all_pinecone_data,
+);
+router.delete(
+  '/delete-file-from-pinecone',
+  auth('ORGANIZATION'),
+  ai_controller.delete_pinecone_data,
+);
 
 export default router;

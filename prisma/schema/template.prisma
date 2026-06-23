@@ -40,6 +40,7 @@ model Question {
 
     page            Page             @relation(fields: [pageId], references: [id], onDelete: Cascade)
     questionAnswers QuestionAnswer[]
+    actions         Action[]
 
     @@index([pageId, index])
 }

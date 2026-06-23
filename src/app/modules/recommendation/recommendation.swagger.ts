@@ -1,146 +1,143 @@
-
 export const recommendationSwaggerDocs = {
-  "/api/recommendation/inspection/{inspectionId}": {
+  '/api/recommendation/inspection/{inspectionId}': {
     get: {
-      tags: ["recommendation"],
-      summary: "Get recommendation by inspectionId",
-      description: "",
+      tags: ['recommendation'],
+      summary: 'Get recommendation by inspectionId',
+      description: '',
       parameters: [
         {
-          name: "inspectionId",
-          in: "path",
+          name: 'inspectionId',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
-        }
+          schema: { type: 'string' },
+        },
       ],
       responses: {
-        200: { description: "recommendation fetched successfully" },
-        401: { description: "unauthorized" },
+        200: { description: 'recommendation fetched successfully' },
+        401: { description: 'unauthorized' },
       },
     },
   },
-  "/api/recommendation": {
+  '/api/recommendation': {
     get: {
-      tags: ["recommendation"],
-      summary: "Get all recommendation",
-      description: "",
+      tags: ['recommendation'],
+      summary: 'Get all recommendation',
+      description: '',
       parameters: [
         {
-          name: "page",
-          in: "query",
+          name: 'page',
+          in: 'query',
           required: false,
-          schema: { type: "number" },
+          schema: { type: 'number' },
         },
         {
-          name: "limit",
-          in: "query",
+          name: 'limit',
+          in: 'query',
           required: false,
-          schema: { type: "number" },
+          schema: { type: 'number' },
         },
       ],
       responses: {
-        200: { description: "recommendation fetched successfully" },
-        401: { description: "unauthorized" },
+        200: { description: 'recommendation fetched successfully' },
+        401: { description: 'unauthorized' },
       },
     },
   },
 
-  "/api/recommendation/{id}": {
+  '/api/recommendation/{id}': {
     get: {
-      tags: ["recommendation"],
-      summary: "Get single recommendation",
-      description: "",
+      tags: ['recommendation'],
+      summary: 'Get single recommendation',
+      description: '',
       parameters: [
         {
-          name: "id",
-          in: "path",
+          name: 'id',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
+          schema: { type: 'string' },
         },
       ],
       responses: {
-        200: { description: "recommendation fetched successfully" },
-        401: { description: "unauthorized" },
+        200: { description: 'recommendation fetched successfully' },
+        401: { description: 'unauthorized' },
       },
     },
     delete: {
-      tags: ["recommendation"],
-      summary: "Delete recommendation",
-      description: "",
+      tags: ['recommendation'],
+      summary: 'Delete recommendation',
+      description: '',
       parameters: [
         {
-          name: "id",
-          in: "path",
+          name: 'id',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
+          schema: { type: 'string' },
         },
       ],
       responses: {
-        200: { description: "recommendation delete successfully" },
-        401: { description: "unauthorized" },
+        200: { description: 'recommendation delete successfully' },
+        401: { description: 'unauthorized' },
       },
     },
   },
-  "/api/recommendation/update-question/{recQuestionId}": {
+  '/api/recommendation/update-question/{recQuestionId}': {
     patch: {
-      tags: ["recommendation"],
-      summary: "Update recommendation Question",
-      description: "",
+      tags: ['recommendation'],
+      summary: 'Update recommendation Question',
+      description: '',
       parameters: [
         {
-          name: "recQuestionId",
-          in: "path",
+          name: 'recQuestionId',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
+          schema: { type: 'string' },
         },
       ],
       requestBody: {
         required: true,
         content: {
-          "application/json": {
+          'application/json': {
             example: JSON.stringify({
-              observation: "",
-              standard: "",
-              recommendation: "",
+              observation: '',
+              standard: '',
+              recommendation: '',
             }),
           },
         },
       },
       responses: {
-        200: { description: "recommendation updated successfully" },
-        500: { description: "Validation error or internal server error" },
+        200: { description: 'recommendation updated successfully' },
+        500: { description: 'Validation error or internal server error' },
       },
-    }
+    },
   },
-  "/api/recommendation/update-summary/{recommendationId}": {
+  '/api/recommendation/update-summary/{recommendationId}': {
     patch: {
-      tags: ["recommendation"],
-      summary: "Update recommendation Summary",
-      description: "",
+      tags: ['recommendation'],
+      summary: 'Update recommendation Summary',
+      description: '',
       parameters: [
         {
-          name: "recommendationId",
-          in: "path",
+          name: 'recommendationId',
+          in: 'path',
           required: true,
-          schema: { type: "string" },
+          schema: { type: 'string' },
         },
       ],
       requestBody: {
         required: true,
         content: {
-          "application/json": {
+          'application/json': {
             example: JSON.stringify({
-              summary: ""
+              summary: '',
             }),
           },
         },
       },
       responses: {
-        200: { description: "recommendation updated successfully" },
-        500: { description: "Validation error or internal server error" },
+        200: { description: 'recommendation updated successfully' },
+        500: { description: 'Validation error or internal server error' },
       },
-    }
+    },
   },
 };
-
-

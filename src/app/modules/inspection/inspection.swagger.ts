@@ -209,6 +209,25 @@ export const inspectionSwaggerDocs = {
         400: { description: 'Validation error' },
         500: { description: 'Internal server error' },
       },
-    }
+    },
+  },
+  '/api/inspection/split-note-into-inspection/{inspectionId}': {
+    post: {
+      tags: ['inspection'],
+      summary: 'Split note into inspection',
+      description: '',
+      parameters: [
+        {
+          name: 'inspectionId',
+          in: 'path',
+          required: true,
+          schema: { type: 'string' },
+        },
+      ],
+      responses: {
+        201: { description: 'Note split into inspection successfully' },
+        500: { description: 'Validation error or internal server error' },
+      },
+    },
   },
 };

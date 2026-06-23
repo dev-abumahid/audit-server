@@ -1,0 +1,2 @@
+-- AddForeignKey
+ALTER TABLE "Action" ADD CONSTRAINT "Action_siteId_fkey" FOREIGN KEY ("siteId") REFERENCES "Site"("id") ON DELETE CASCADE ON UPDATE CASCADE;

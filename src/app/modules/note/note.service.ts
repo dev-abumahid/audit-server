@@ -1,0 +1,129 @@
+import { Request } from 'express';
+import * as fs from 'fs';
+import { configs } from '../../configs/index.js';
+import { prisma } from '../../lib/prisma.js';
+import { JwtPayloadType } from '../../utils/JWT.js';
+import { AppError } from '../../utils/app_error.js';
+
+const get_all_note_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  // define your own logic here
+  const result = await prisma.note.findMany({
+    where: {
+      orgAccountId: user.accountId,
+    },
+  });
+  return result;
+};
+
+const get_single_note_from_db = async (req: Request) => {
+  // define your own logic here
+  const { id } = req.params as { id: string };
+  const result = await prisma.note.findUnique({ where: { id } });
+  return result;
+};
+const get_note_by_inspection_id_from_db = async (req: Request) => {
+  const { inspectionId } = req.params as { inspectionId: string };
+  const result = await prisma.note.findUnique({
+    where: {
+      inspectionId,
+    },
+  });
+  return result;
+};
+
+const save_raw_note_into_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const body = req?.body;
+  // check note exist or not
+  const isNoteExist = await prisma.note.findFirst({
+    where: { inspectionId: body.inspectionId },
+  });
+  if (isNoteExist) {
+    throw new AppError('Note already exist', 400);
+  }
+
+  // db payload
+  const payload = {
+    ...body,
+    orgAccountId: user.accountId,
+  };
+  const result = await prisma.note.create({ data: payload });
+  return result;
+};
+
+const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const body = req?.body;
+  const file = req?.file;
+
+  // check note exist or not
+  const isNoteExist = await prisma.note.findFirst({
+    where: { inspectionId: body.inspectionId },
+  });
+  if (isNoteExist) {
+    throw new AppError('Note already exist', 400);
+  }
+  // make ai Payload
+  if (!file) {
+    throw new AppError('File is required', 400);
+  }
+  const fileBuffer = fs.readFileSync(file.path);
+  const blob = new Blob([fileBuffer], {
+    type: file.mimetype,
+  });
+
+  const formData = new FormData();
+
+  formData.append('file', blob, file.originalname);
+
+  const aiResponse = await fetch(`${configs.ai_server_end_point}/extract-text`, {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await aiResponse.json();
+
+  // db payload
+  const payload = {
+    ...data,
+    orgAccountId: user.accountId,
+    inspectionId: body.inspectionId,
+  };
+
+  const result = await prisma.note.create({ data: payload });
+  return result;
+};
+
+const update_note_into_db = async (req: Request) => {
+  const body = req.body;
+  const { id } = req.params as { id: string };
+
+  const result = await prisma.note.update({
+    where: { id },
+    data: {
+      ...(body.title !== undefined && { title: body.title }),
+      ...(body.extracted_text !== undefined && {
+        extracted_text: body.extracted_text,
+      }),
+    },
+  });
+
+  return result;
+};
+
+const delete_note_from_db = async (req: Request) => {
+  // define your own logic here
+  const { id } = req.params as { id: string };
+  const result = await prisma.note.delete({ where: { id } });
+  return result;
+};
+
+export const note_service = {
+  get_all_note_from_db,
+  get_single_note_from_db,
+  save_raw_note_into_db,
+  update_note_into_db,
+  delete_note_from_db,
+  extract_note_from_any_file_or_image_and_save_into_db,
+  get_note_by_inspection_id_from_db,
+};

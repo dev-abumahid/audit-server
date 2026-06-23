@@ -76,6 +76,16 @@ const upload_any_file_into_aws = catchAsync(async (req, res) => {
     meta: {},
   });
 });
+const split_note_into_inspection = catchAsync(async (req, res) => {
+  const result = await inspection_service.split_note_into_inspection_using_ai(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Note split into inspection successfully.',
+    data: result,
+    meta: {},
+  });
+});
 
 export const inspection_controller = {
   get_all_inspection,
@@ -84,5 +94,6 @@ export const inspection_controller = {
   update_inspection,
   delete_inspection,
   update_inspection_question,
-  upload_any_file_into_aws
+  upload_any_file_into_aws,
+  split_note_into_inspection,
 };

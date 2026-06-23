@@ -17,6 +17,7 @@ model Inspection {
 
     // main data set
     questionAnswers QuestionAnswer[]
+    unSplitText     String?
 
     // Relations
     account   Account  @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
@@ -32,6 +33,8 @@ model Inspection {
 
     // Relations
     recommendations Recommendation[]
+    actions         Action[]
+    note            Note?
 }
 
 model QuestionAnswer {

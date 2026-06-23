@@ -1,18 +1,20 @@
 import { Router } from 'express';
 import accountRouter from './app/modules/account/account.route.js';
-import profileRoute from './app/modules/profile/profile.route.js';
-import templateRoute from './app/modules/template/template.route.js';
-import siteRoute from './app/modules/site/site.route.js';
 import actionRoute from './app/modules/action/action.route.js';
-import riskRoute from './app/modules/risk/risk.route.js';
 import aiRoute from './app/modules/ai/ai.route.js';
 import inspectionRoute from './app/modules/inspection/inspection.route.js';
-import recommendationRoute from "./app/modules/recommendation/recommendation.route.js";
+import noteRoute from './app/modules/note/note.route.js';
+import profileRoute from './app/modules/profile/profile.route.js';
+import recommendationRoute from './app/modules/recommendation/recommendation.route.js';
+import riskRoute from './app/modules/risk/risk.route.js';
+import siteRoute from './app/modules/site/site.route.js';
+import templateRoute from './app/modules/template/template.route.js';
 
 const appRouter = Router();
 
 const moduleRoutes = [
-  { path: "/recommendation", route: recommendationRoute },
+  { path: '/note', route: noteRoute },
+  { path: '/recommendation', route: recommendationRoute },
   { path: '/inspection', route: inspectionRoute },
   { path: '/ai', route: aiRoute },
   { path: '/risk', route: riskRoute },

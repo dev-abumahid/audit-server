@@ -8,7 +8,25 @@ export const actionSwaggerDocs = {
         required: true,
         content: {
           'application/json': {
-            example: JSON.stringify({}), // put your request body
+            example: JSON.stringify({
+              inspectionId: 'inspection_789012',
+              siteId: 'site_345678',
+              questionId: 'question_901234',
+              actionTitle: 'Repair damaged safety railing',
+              actionDisc:
+                'The safety railing near the loading dock is damaged and requires immediate repair to prevent workplace accidents.',
+              priority: 'High',
+              dueDate: new Date('2026-07-15'),
+              status: 'TO_DO',
+              messages: [
+                {
+                  message: 'Issue identified during inspection.',
+                },
+                {
+                  message: 'Assigned maintenance team to investigate.',
+                },
+              ],
+            }),
           },
         },
       },
@@ -22,6 +40,18 @@ export const actionSwaggerDocs = {
       summary: 'Get all action',
       description: '',
       parameters: [
+        {
+          name: 'searchTerm',
+          in: 'query',
+          required: false,
+          schema: { type: 'string' },
+        },
+        {
+          name: 'siteId',
+          in: 'query',
+          required: false,
+          schema: { type: 'string' },
+        },
         {
           name: 'page',
           in: 'query',

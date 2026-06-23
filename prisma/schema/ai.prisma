@@ -1,7 +1,15 @@
-
 model Ai {
-    id        String  @id @default(uuid())
+    id        String   @id @default(uuid())
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 }
- 
+
+model PineconeDocument {
+    id           String   @id @default(uuid())
+    fileName     String?
+    fileId       String?
+    fileSize     String?
+    orgAccountId String
+    account      Account  @relation(fields: [orgAccountId], references: [id])
+    createdAt    DateTime @default(now())
+}

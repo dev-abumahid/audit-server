@@ -1,4 +1,5 @@
 import { Request } from 'express';
+import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
@@ -113,17 +114,22 @@ const get_single_inspection_from_db = async (req: Request) => {
         include: {
           pages: {
             include: {
-              questions: true
-            }
-          }
-        }
+              questions: true,
+            },
+          },
+        },
       },
       site: {
         select: {
           id: true,
           name: true,
-        }
-      }
+        },
+      },
+      note: {
+        select: {
+          id: true,
+        },
+      },
     },
   });
   return result;
@@ -203,11 +209,109 @@ const update_inspection_question_into_db = async (req: Request) => {
 const upload_any_file_into_aws_for_inspection = async (req: Request) => {
   const file = req.file;
   if (!file) {
-    throw new AppError("File is required", 400)
+    throw new AppError('File is required', 400);
   }
   const result = await uploadCloud(file);
   return result.secure_url;
-}
+};
+
+const split_note_into_inspection_using_ai = async (req: Request) => {
+  const { inspectionId } = req.params as { inspectionId: string };
+
+  // checking note available or not
+  const isNoteExist = await prisma.note.findUnique({
+    where: {
+      inspectionId,
+    },
+    select: {
+      extracted_text: true,
+    },
+  });
+
+  // find inspection
+  const isInspectionExist = await prisma.inspection.findUnique({
+    where: {
+      id: inspectionId,
+    },
+    select: {
+      questionAnswers: {
+        select: {
+          id: true,
+          question: {
+            select: {
+              question: true,
+              answerType: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!isInspectionExist || !isNoteExist) {
+    throw new AppError('Inspection or Note not found', 404);
+  }
+
+  // make ai payload
+  const aiPayload = {
+    extracted_text: isNoteExist.extracted_text,
+    pages: [
+      {
+        questions: isInspectionExist.questionAnswers.map((item) => ({
+          question: item.question.question,
+          answerType: item.question.answerType,
+          qestionAnswerId: item.id,
+        })),
+      },
+    ],
+  };
+
+  // call ai api
+  const aiResponse = await fetch(`${configs.ai_server_end_point}/extract-survey-answers`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(aiPayload),
+  });
+  const data = await aiResponse.json();
+
+  if (data?.question?.length) {
+    await Promise.all(
+      data.question.map((item: any) =>
+        prisma.questionAnswer.update({
+          where: {
+            id: item.qestionAnswerId,
+          },
+          data: {
+            ...(item?.answer !== undefined &&
+              item?.answer !== null && {
+                answer: item.answer,
+              }),
+            ...(item?.note !== undefined &&
+              item?.note !== null && {
+                note: item.note,
+              }),
+          },
+        }),
+      ),
+    );
+  }
+
+  if (data?.unsplited_text) {
+    await prisma.inspection.update({
+      where: {
+        id: inspectionId,
+      },
+      data: {
+        unSplitText: data?.unsplited_text,
+      },
+    });
+  }
+
+  return 'success fully splitted';
+};
+
 export const inspection_service = {
   get_all_inspection_from_db,
   get_single_inspection_from_db,
@@ -215,5 +319,6 @@ export const inspection_service = {
   update_inspection_into_db,
   delete_inspection_from_db,
   update_inspection_question_into_db,
-  upload_any_file_into_aws_for_inspection
+  upload_any_file_into_aws_for_inspection,
+  split_note_into_inspection_using_ai,
 };

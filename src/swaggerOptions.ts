@@ -9,7 +9,8 @@ import { actionSwaggerDocs } from './app/modules/action/action.swagger.js';
 import { riskSwaggerDocs } from './app/modules/risk/risk.swagger.js';
 import { aiSwaggerDocs } from './app/modules/ai/ai.swagger.js';
 import { inspectionSwaggerDocs } from './app/modules/inspection/inspection.swagger.js';
-import { recommendationSwaggerDocs } from "./app/modules/recommendation/recommendation.swagger.js";
+import { recommendationSwaggerDocs } from './app/modules/recommendation/recommendation.swagger.js';
+import { noteSwaggerDocs } from './app/modules/note/note.swagger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,7 +32,8 @@ export const swaggerOptions = {
       ...riskSwaggerDocs,
       ...aiSwaggerDocs,
       ...inspectionSwaggerDocs,
-          ...recommendationSwaggerDocs,
+      ...recommendationSwaggerDocs,
+      ...noteSwaggerDocs,
     },
     servers:
       configs.env === 'production'

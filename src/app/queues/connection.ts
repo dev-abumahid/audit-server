@@ -27,20 +27,20 @@ function createRedisConnection() {
     }
 
     redis.on('connect', () => {
-      console.log('✅ Redis connected');
+      logger.info('Redis connected');
     });
 
     redis.on('error', (err) => {
-      console.error('❌ Redis error:', err);
+      logger.error({ err }, 'Redis error');
     });
 
     redis.on('close', () => {
-      console.warn('⚠️ Redis connection closed');
+      logger.warn('Redis connection closed');
     });
 
     return redis;
   } catch (err) {
-    console.error('❌ Failed to create Redis connection:', err);
+    logger.error({ err }, 'Failed to create Redis connection');
     throw err;
   }
 }

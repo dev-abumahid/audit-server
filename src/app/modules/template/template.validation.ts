@@ -25,6 +25,10 @@ const AnswerTypeSchema = z.discriminatedUnion('answerType', [
     answerType: z.literal('slider'),
     value: z.union([z.number(), z.string()]).optional(),
   }),
+  z.object({
+    answerType: z.literal('number'),
+    value: z.union([z.number(), z.string()]).optional(),
+  }),
 ]);
 const QuestionSchema = z.object({
   index: z.number().int().nonnegative(),

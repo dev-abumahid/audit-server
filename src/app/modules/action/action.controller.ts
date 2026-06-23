@@ -3,13 +3,13 @@ import manageResponse from '../../utils/manage_response.js';
 import { action_service } from './action.service.js';
 
 const get_all_action = catchAsync(async (req, res) => {
-  const result = await action_service.get_all_action_from_db();
+  const result = await action_service.get_all_action_from_db(req);
   manageResponse(res, {
     success: true,
     statusCode: 200,
     message: 'All action fetched successfully.',
-    data: result,
-    meta: {},
+    data: result.data,
+    meta: result.meta,
   });
 });
 
