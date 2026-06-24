@@ -6,6 +6,6 @@ export type TResetEmailQueue = {
   resetLink: string;
 };
 
-export const resetEmailQueue = new Queue<TResetEmailQueue>('reset-email-queue', {
-  connection: redisConnection,
+export const resetEmailQueue = new Queue<TResetEmailQueue, void, string>('reset-email-queue', {
+  connection: redisConnection as any,
 });

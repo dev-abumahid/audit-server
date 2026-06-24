@@ -7,6 +7,6 @@ export type TOtpEmailQueue = {
   verificationLink: string;
 };
 
-export const otpEmailQueue = new Queue<TOtpEmailQueue>('otp-email-queue', {
-  connection: redisConnection,
+export const otpEmailQueue = new Queue<TOtpEmailQueue, void, string>('otp-email-queue', {
+  connection: redisConnection as any,
 });
