@@ -1,15 +1,23 @@
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { Request, Response } from 'express';
+import { rateLimit } from 'express-rate-limit';
 import session from 'express-session';
+import { RedisStore, type RedisReply } from 'rate-limit-redis';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
+import { configs } from './app/configs/index.js';
 import globalErrorHandler from './app/middlewares/global_error_handler.js';
 import notFound from './app/middlewares/not_found_api.js';
 import { passportConfig } from './app/passport-js/config.js';
+import { redisConnection } from './app/queues/connection.js';
 import manageResponse from './app/utils/manage_response.js';
 import appRouter from './routes.js';
 import { swaggerOptions } from './swaggerOptions.js';
+
+if (!configs.session_secret) {
+  throw new Error('SESSION_SECRET environment variable is required');
+}
 
 // define app
 const app = express();
@@ -36,12 +44,12 @@ app.use(express.urlencoded({ extended: true }));
 // express session
 app.use(
   session({
-    secret: 'temp_secret_form_twitter_oauth_1.0',
+    secret: configs.session_secret as string,
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: false,
+      secure: configs.env === 'production',
       maxAge: 1000 * 60 * 10,
     },
   }),
@@ -57,6 +65,32 @@ passportConfig.serializeUser((user: any, done) => {
 passportConfig.deserializeUser((obj: any, done) => {
   done(null, obj);
 });
+
+// rate limiting
+const redisStore = () =>
+  new RedisStore({
+    sendCommand: (command: string, ...args: string[]) =>
+      redisConnection.call(command, ...args) as Promise<RedisReply>,
+  });
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: redisStore(),
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: redisStore(),
+});
+
+app.use('/api/auth', authLimiter);
+app.use('/api', apiLimiter);
 
 // Main router
 app.use('/api', appRouter);

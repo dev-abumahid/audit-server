@@ -1,4 +1,5 @@
 import { ErrorRequestHandler } from 'express';
+import multer from 'multer';
 import { ZodError } from 'zod';
 import { configs } from '../configs/index.js';
 import handleZodError from '../errors/zodError.js';
@@ -15,7 +16,11 @@ const globalErrorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     },
   ];
 
-  if (err instanceof ZodError) {
+  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+    statusCode = 400;
+    message = 'File exceeds the 10 MB size limit.';
+    errorSources = [{ path: 'file', message }];
+  } else if (err instanceof ZodError) {
     const simplifiedError = handleZodError(err);
     statusCode = simplifiedError?.statusCode;
     message = simplifiedError?.message;
@@ -43,7 +48,6 @@ const globalErrorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     success: false,
     message,
     errorSources,
-    err,
     stack: configs.env === 'development' ? err?.stack : null,
   });
 };

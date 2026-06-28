@@ -93,10 +93,10 @@ const get_all_inspection_from_db = async (req: Request) => {
 };
 
 const get_single_inspection_from_db = async (req: Request) => {
-  // define your own logic here
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as { id: string };
-  const result = await prisma.inspection.findUnique({
-    where: { id },
+  const result = await prisma.inspection.findFirst({
+    where: { id, orgAccountId: user.accountId },
     include: {
       questionAnswers: {
         include: {
@@ -132,6 +132,7 @@ const get_single_inspection_from_db = async (req: Request) => {
       },
     },
   });
+  if (!result) throw new AppError('Inspection not found', 404);
   return result;
 };
 
@@ -165,7 +166,12 @@ const create_inspection_into_db = async (req: Request) => {
 };
 
 const update_inspection_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as { id: string };
+  const existing = await prisma.inspection.findFirst({
+    where: { id, orgAccountId: user.accountId },
+  });
+  if (!existing) throw new AppError('Inspection not found', 404);
   const result = await prisma.inspection.update({
     where: { id },
     data: {
@@ -177,21 +183,28 @@ const update_inspection_into_db = async (req: Request) => {
 };
 
 const delete_inspection_from_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as { id: string };
+  const existing = await prisma.inspection.findFirst({
+    where: { id, orgAccountId: user.accountId },
+  });
+  if (!existing) throw new AppError('Inspection not found', 404);
   const result = await prisma.inspection.delete({ where: { id } });
   return result;
 };
 
 const update_inspection_question_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as { id: string };
   const { answer, note, mediaFiles } = req.body;
 
   const existing = await prisma.questionAnswer.findUnique({
     where: { id },
+    select: { inspection: { select: { orgAccountId: true } } },
   });
 
-  if (!existing) {
-    throw new Error('Question answer not found');
+  if (!existing || existing.inspection.orgAccountId !== user.accountId) {
+    throw new AppError('Question answer not found', 404);
   }
 
   const result = await prisma.questionAnswer.update({

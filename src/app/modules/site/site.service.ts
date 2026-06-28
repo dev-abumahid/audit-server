@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
+import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 
 const get_all_site_from_db = async (req: Request) => {
@@ -82,7 +83,10 @@ const create_site_into_db = async (req: Request) => {
 };
 
 const update_site_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const id = req.params.id as string;
+  const existing = await prisma.site.findFirst({ where: { id, org_account_id: user.accountId } });
+  if (!existing) throw new AppError('Site not found', 404);
   const result = await prisma.site.update({ where: { id }, data: req.body });
   return result;
 };

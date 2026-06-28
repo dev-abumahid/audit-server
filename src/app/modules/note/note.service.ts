@@ -17,18 +17,19 @@ const get_all_note_from_db = async (req: Request) => {
 };
 
 const get_single_note_from_db = async (req: Request) => {
-  // define your own logic here
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as { id: string };
-  const result = await prisma.note.findUnique({ where: { id } });
+  const result = await prisma.note.findFirst({ where: { id, orgAccountId: user.accountId } });
+  if (!result) throw new AppError('Note not found', 404);
   return result;
 };
 const get_note_by_inspection_id_from_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const { inspectionId } = req.params as { inspectionId: string };
-  const result = await prisma.note.findUnique({
-    where: {
-      inspectionId,
-    },
+  const result = await prisma.note.findFirst({
+    where: { inspectionId, orgAccountId: user.accountId },
   });
+  if (!result) throw new AppError('Note not found', 404);
   return result;
 };
 
@@ -98,8 +99,12 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
 };
 
 const update_note_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const body = req.body;
   const { id } = req.params as { id: string };
+
+  const existing = await prisma.note.findFirst({ where: { id, orgAccountId: user.accountId } });
+  if (!existing) throw new AppError('Note not found', 404);
 
   const result = await prisma.note.update({
     where: { id },
@@ -115,8 +120,10 @@ const update_note_into_db = async (req: Request) => {
 };
 
 const delete_note_from_db = async (req: Request) => {
-  // define your own logic here
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as { id: string };
+  const existing = await prisma.note.findFirst({ where: { id, orgAccountId: user.accountId } });
+  if (!existing) throw new AppError('Note not found', 404);
   const result = await prisma.note.delete({ where: { id } });
   return result;
 };

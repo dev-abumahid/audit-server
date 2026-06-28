@@ -4,6 +4,7 @@ import { prisma } from '../../lib/prisma.js';
 import { TTemplateAccess } from '../../types/common.js';
 import uploadCloud from '../../utils/cloudinary.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
+import { AppError } from '../../utils/app_error.js';
 import { mapTemplateData } from './template.utils.js';
 
 const get_all_template_from_db = async (req: Request) => {
@@ -123,9 +124,17 @@ const delete_template_from_db = async (req: Request) => {
 // Upload par by part template section and question
 
 const update_or_create_new_page_into_db = async (req: Request) => {
+  const user = req?.user as JwtPayload;
   const body = req?.body;
   if (body.pageId) {
-    // UPDATE OLD ONE
+    // Verify page belongs to caller's org via parent template
+    const page = await prisma.page.findFirst({
+      where: { id: body.pageId },
+      select: { template: { select: { orgAccountId: true } } },
+    });
+    if (!page || page.template.orgAccountId !== user.accountId) {
+      throw new AppError('Page not found', 404);
+    }
     return await prisma.page.update({
       where: { id: body.pageId },
       data: {
@@ -134,7 +143,11 @@ const update_or_create_new_page_into_db = async (req: Request) => {
       },
     });
   } else {
-    // CREATE NEW ONE
+    // Verify the target template belongs to caller's org before creating a page
+    const template = await prisma.template.findFirst({
+      where: { id: body.templateId, orgAccountId: user.accountId },
+    });
+    if (!template) throw new AppError('Template not found', 404);
     return await prisma.page.create({
       data: {
         pageIndex: body.pageIndex,
@@ -146,15 +159,31 @@ const update_or_create_new_page_into_db = async (req: Request) => {
 };
 
 const delete_template_page_by_id_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayload;
   const id = req?.params?.id as string;
+  const page = await prisma.page.findFirst({
+    where: { id },
+    select: { template: { select: { orgAccountId: true } } },
+  });
+  if (!page || page.template.orgAccountId !== user.accountId) {
+    throw new Error('Page not found');
+  }
   return await prisma.page.delete({ where: { id } });
 };
 
 const update_or_delete_new_question_into_db = async (req: Request) => {
+  const user = req?.user as JwtPayload;
   const body = req?.body;
 
   // Update old question
   if (body.questionId) {
+    const question = await prisma.question.findFirst({
+      where: { id: body.questionId },
+      select: { page: { select: { template: { select: { orgAccountId: true } } } } },
+    });
+    if (!question || question.page.template.orgAccountId !== user.accountId) {
+      throw new AppError('Question not found', 404);
+    }
     return prisma.question.update({
       where: { id: body.questionId },
       data: {
@@ -166,7 +195,14 @@ const update_or_delete_new_question_into_db = async (req: Request) => {
       },
     });
   } else {
-    // create new question
+    // Verify target page belongs to caller's org
+    const page = await prisma.page.findFirst({
+      where: { id: body.pageId },
+      select: { template: { select: { orgAccountId: true } } },
+    });
+    if (!page || page.template.orgAccountId !== user.accountId) {
+      throw new AppError('Page not found', 404);
+    }
     return prisma.question.create({
       data: {
         index: body.index,
@@ -181,7 +217,15 @@ const update_or_delete_new_question_into_db = async (req: Request) => {
 };
 
 const delete_page_question_by_id_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayload;
   const id = req?.params?.id as string;
+  const question = await prisma.question.findFirst({
+    where: { id },
+    select: { page: { select: { template: { select: { orgAccountId: true } } } } },
+  });
+  if (!question || question.page.template.orgAccountId !== user.accountId) {
+    throw new Error('Question not found');
+  }
   return await prisma.question.delete({ where: { id } });
 };
 

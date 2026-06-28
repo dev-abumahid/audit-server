@@ -1,5 +1,6 @@
 import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
+import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 
 const get_all_risk_from_db = async (req: Request) => {
@@ -73,8 +74,10 @@ const get_all_risk_from_db = async (req: Request) => {
 };
 
 const get_single_risk_from_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as Record<string, string>;
-  const result = await prisma.risk.findUnique({ where: { id } });
+  const result = await prisma.risk.findFirst({ where: { id, org_account_id: user.accountId } });
+  if (!result) throw new AppError('Risk not found', 404);
   return result;
 };
 
@@ -87,13 +90,19 @@ const create_risk_into_db = async (req: Request) => {
 };
 
 const update_risk_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as Record<string, string>;
+  const existing = await prisma.risk.findFirst({ where: { id, org_account_id: user.accountId } });
+  if (!existing) throw new AppError('Risk not found', 404);
   const result = await prisma.risk.update({ where: { id }, data: req.body });
   return result;
 };
 
 const delete_risk_from_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
   const { id } = req.params as Record<string, string>;
+  const existing = await prisma.risk.findFirst({ where: { id, org_account_id: user.accountId } });
+  if (!existing) throw new AppError('Risk not found', 404);
   const result = await prisma.risk.delete({ where: { id } });
   return result;
 };
