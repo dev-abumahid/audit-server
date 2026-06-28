@@ -14,6 +14,17 @@ router.post(
   RequestValidator(inspection_validations.create_inspection),
   inspection_controller.create_inspection,
 );
+router.post(
+  '/upload-file-aws',
+  auth('ORGANIZATION', 'ADMIN', 'USER'),
+  uploader.single('file'),
+  inspection_controller.upload_any_file_into_aws,
+);
+router.post(
+  '/split-note-into-inspection/:inspectionId',
+  auth('ORGANIZATION'),
+  inspection_controller.split_note_into_inspection,
+);
 router.get('/:id', auth('ORGANIZATION'), inspection_controller.get_single_inspection);
 router.patch(
   '/:id',
@@ -27,17 +38,6 @@ router.put(
   auth('ORGANIZATION'),
   RequestValidator(inspection_validations.update_question_answer),
   inspection_controller.update_inspection_question,
-);
-router.post(
-  '/upload-file-aws',
-  auth('ORGANIZATION', 'ADMIN', 'USER'),
-  uploader.single('file'),
-  inspection_controller.upload_any_file_into_aws,
-);
-router.post(
-  '/split-note-into-inspection/:inspectionId',
-  auth('ORGANIZATION'),
-  inspection_controller.split_note_into_inspection,
 );
 
 export default router;

@@ -81,6 +81,9 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
     method: 'POST',
     body: formData,
   });
+  if (!aiResponse.ok) {
+    throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+  }
   const data = await aiResponse.json();
 
   // db payload

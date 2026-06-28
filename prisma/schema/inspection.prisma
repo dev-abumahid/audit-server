@@ -7,7 +7,6 @@ enum Status {
 
 model Inspection {
     id String @id @default(uuid())
-
     // meta key
     orgAccountId       String
     templateId         String

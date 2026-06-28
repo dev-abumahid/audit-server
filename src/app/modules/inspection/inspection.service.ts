@@ -274,6 +274,9 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
     },
     body: JSON.stringify(aiPayload),
   });
+  if (!aiResponse.ok) {
+    throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+  }
   const data = await aiResponse.json();
 
   if (data?.question?.length) {

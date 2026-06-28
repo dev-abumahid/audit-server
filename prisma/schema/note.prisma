@@ -10,8 +10,8 @@ model Note {
     inspectionId String @unique
 
     // Relation
-    orgAccount Account    @relation(fields: [orgAccountId], references: [id])
-    inspection Inspection @relation(fields: [inspectionId], references: [id])
+    orgAccount Account    @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
+    inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
