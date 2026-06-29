@@ -22,6 +22,9 @@ if (!configs.session_secret) {
 // define app
 const app = express();
 
+// trust nginx proxy so rate limiters key on real client IP, not proxy IP
+app.set('trust proxy', 1);
+
 // swagger docs
 const swaggerSpec = swaggerJSDoc(swaggerOptions);
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
@@ -67,29 +70,21 @@ passportConfig.deserializeUser((obj: any, done) => {
 });
 
 // rate limiting
-const redisStore = () =>
+const makeRedisStore = (prefix: string) =>
   new RedisStore({
+    prefix,
     sendCommand: (command: string, ...args: string[]) =>
       redisConnection.call(command, ...args) as Promise<RedisReply>,
   });
 
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  store: redisStore(),
-});
-
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore(),
+  store: makeRedisStore('rl:api:'),
 });
 
-app.use('/api/auth', authLimiter);
 app.use('/api', apiLimiter);
 
 // Main router
