@@ -12,10 +12,9 @@ const auth = (...roles: Role[]) => {
     try {
       const authHeader = req.headers.authorization;
 
-      const token =
-        authHeader?.startsWith("Bearer ")
-          ? authHeader.slice(7)
-          : authHeader || req.cookies.access_token;
+      const token = authHeader?.startsWith('Bearer ')
+        ? authHeader.slice(7)
+        : authHeader || req.cookies.access_token;
 
       if (!token) {
         throw new AppError('You are not authorize!!', 401);
