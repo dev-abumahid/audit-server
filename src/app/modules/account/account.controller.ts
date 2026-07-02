@@ -37,7 +37,7 @@ const login_user = catchAsync(async (req, res) => {
   const { accessToken, returnPayload } = await account_services.login_user_into_db(req);
 
   // set access token into cookie
-  res.cookie('access_token', accessToken, {
+  res.cookie('access_token', `Bearer ${accessToken}`, {
     secure: configs.env === 'production',
     httpOnly: true,
     maxAge: 7 * 24 * 60 * 60 * 1000,
