@@ -10,7 +10,13 @@ type Role = 'ADMIN' | 'USER' | 'ORGANIZATION';
 const auth = (...roles: Role[]) => {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const token = req.headers.authorization || req.cookies.access_token;
+      const authHeader = req.headers.authorization;
+
+      const token =
+        authHeader?.startsWith("Bearer ")
+          ? authHeader.slice(7)
+          : authHeader || req.cookies.access_token;
+
       if (!token) {
         throw new AppError('You are not authorize!!', 401);
       }
