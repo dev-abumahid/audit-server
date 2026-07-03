@@ -34,3 +34,6 @@ coverage/
 *.pid
 
 .temp
+
+# Local file uploads (created at runtime; Docker build creates it in the image)
+/uploads/
