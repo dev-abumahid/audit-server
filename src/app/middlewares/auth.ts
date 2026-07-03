@@ -12,9 +12,13 @@ const auth = (...roles: Role[]) => {
     try {
       const authHeader = req.headers.authorization;
 
+      // A non-Bearer-prefixed header is never a usable token (standard clients always
+      // send "Bearer <token>"); fall back to the cookie in every other case, not just
+      // when the header is fully absent — otherwise a stale/malformed header silently
+      // shadows a perfectly valid session cookie.
       const token = authHeader?.startsWith('Bearer ')
         ? authHeader.slice(7)
-        : authHeader || req.cookies.access_token;
+        : req.cookies.access_token;
 
       if (!token) {
         throw new AppError('You are not authorize!!', 401);

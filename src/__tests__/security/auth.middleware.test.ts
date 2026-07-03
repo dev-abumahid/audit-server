@@ -43,7 +43,7 @@ describe('auth middleware (ticket #8)', () => {
 
   it('calls next(AppError 401) when token is invalid / tampered', async () => {
     const req = {
-      headers: { authorization: 'invalid.token.here' },
+      headers: { authorization: 'Bearer invalid.token.here' },
       cookies: {},
     } as unknown as Request;
     const next = makeNext();
@@ -56,7 +56,7 @@ describe('auth middleware (ticket #8)', () => {
   it('calls next(AppError 401) when account is not yet verified', async () => {
     const token = makeToken({ accountId: 'acc-1', role: 'ORGANIZATION', email: 'a@test.com' });
     const req = {
-      headers: { authorization: token },
+      headers: { authorization: `Bearer ${token}` },
       cookies: {},
     } as unknown as Request;
     const next = makeNext();
@@ -76,7 +76,7 @@ describe('auth middleware (ticket #8)', () => {
   it('calls next(AppError 401) when role does not match', async () => {
     const token = makeToken({ accountId: 'acc-1', role: 'USER', email: 'u@test.com' });
     const req = {
-      headers: { authorization: token },
+      headers: { authorization: `Bearer ${token}` },
       cookies: {},
     } as unknown as Request;
     const next = makeNext();
@@ -93,7 +93,7 @@ describe('auth middleware (ticket #8)', () => {
     const payload = { accountId: 'acc-1', role: 'ORGANIZATION', email: 'org@test.com' };
     const token = makeToken(payload);
     const req = {
-      headers: { authorization: token },
+      headers: { authorization: `Bearer ${token}` },
       cookies: {},
     } as unknown as Request;
     const next = makeNext();
@@ -104,6 +104,25 @@ describe('auth middleware (ticket #8)', () => {
 
     expect(next).toHaveBeenCalledWith(); // next() with no args = success
     expect((req as any).user).toMatchObject({ accountId: 'acc-1', role: 'ORGANIZATION' });
+  });
+
+  it('strips the "Bearer " prefix before verifying (ticket #28)', async () => {
+    const payload = { accountId: 'acc-3', role: 'ORGANIZATION', email: 'org3@test.com' };
+    const token = makeToken(payload);
+    const req = {
+      headers: { authorization: `Bearer ${token}` },
+      cookies: {},
+    } as unknown as Request;
+    const next = makeNext();
+
+    mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
+
+    await auth('ORGANIZATION')(req, makeRes(), next);
+
+    // Would fail with a JsonWebTokenError (401) if the raw "Bearer <token>" string
+    // had been passed to jwt.verify instead of the extracted token.
+    expect(next).toHaveBeenCalledWith();
+    expect((req as any).user).toMatchObject({ accountId: 'acc-3' });
   });
 
   it('accepts a token from the access_token cookie when header is absent', async () => {
@@ -123,9 +142,42 @@ describe('auth middleware (ticket #8)', () => {
     expect((req as any).user).toMatchObject({ accountId: 'acc-2' });
   });
 
+  it('falls back to the cookie when the Authorization header is present but malformed', async () => {
+    const payload = { accountId: 'acc-4', role: 'ORGANIZATION', email: 'org4@test.com' };
+    const token = makeToken(payload);
+    const req = {
+      // A stale/non-standard header (no "Bearer " prefix) must not shadow a valid cookie
+      headers: { authorization: 'garbage-not-a-bearer-header' },
+      cookies: { access_token: token },
+    } as unknown as Request;
+    const next = makeNext();
+
+    mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
+
+    await auth('ORGANIZATION')(req, makeRes(), next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect((req as any).user).toMatchObject({ accountId: 'acc-4' });
+  });
+
+  it('calls next(AppError 401) when the header is malformed and no cookie exists', async () => {
+    const req = {
+      headers: { authorization: 'garbage-not-a-bearer-header' },
+      cookies: {},
+    } as unknown as Request;
+    const next = makeNext();
+
+    await auth('ORGANIZATION')(req, makeRes(), next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
+  });
+
   it('checks the DB exactly once per request (no N+1)', async () => {
     const token = makeToken({ accountId: 'acc-1', role: 'ORGANIZATION', email: 'o@test.com' });
-    const req = { headers: { authorization: token }, cookies: {} } as unknown as Request;
+    const req = {
+      headers: { authorization: `Bearer ${token}` },
+      cookies: {},
+    } as unknown as Request;
 
     mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
 
