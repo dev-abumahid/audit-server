@@ -4,16 +4,16 @@ Quick reference for AI coding assistants and new contributors.
 
 ## Stack
 
-| Layer | Tech |
-|-------|------|
-| Runtime | Node.js, Express 5, TypeScript |
-| ORM | Prisma 7 (multi-schema, `prisma/schema/`) |
-| DB | PostgreSQL (via `@prisma/adapter-pg`) |
-| Queues | BullMQ + ioredis (`src/app/queues/`) |
-| Auth | JWT (`src/app/utils/JWT.ts`) + Passport.js social |
-| Logging | pino (`src/app/lib/logger.ts`) |
-| Uploads | AWS S3 + Cloudinary |
-| Docs | Swagger (`/docs`) |
+| Layer   | Tech                                              |
+| ------- | ------------------------------------------------- |
+| Runtime | Node.js, Express 5, TypeScript                    |
+| ORM     | Prisma 7 (multi-schema, `prisma/schema/`)         |
+| DB      | PostgreSQL (via `@prisma/adapter-pg`)             |
+| Queues  | BullMQ + ioredis (`src/app/queues/`)              |
+| Auth    | JWT (`src/app/utils/JWT.ts`) + Passport.js social |
+| Logging | pino (`src/app/lib/logger.ts`)                    |
+| Uploads | AWS S3 + Cloudinary                               |
+| Docs    | Swagger (`/docs`)                                 |
 
 ## Dev commands
 
@@ -79,10 +79,10 @@ Every service query that touches tenant data **must** filter by the caller's org
 
 Field naming is inconsistent across models — check the schema before writing a query:
 
-| Models | Field name |
-|--------|-----------|
-| action, recommendation, template, inspection, note | `orgAccountId` (camelCase) |
-| site, risk | `org_account_id` (snake_case) |
+| Models                                             | Field name                    |
+| -------------------------------------------------- | ----------------------------- |
+| action, recommendation, template, inspection, note | `orgAccountId` (camelCase)    |
+| site, risk                                         | `org_account_id` (snake_case) |
 
 Missing org scope = cross-tenant data leak. PRs that add queries without org scoping will be rejected.
 
@@ -102,6 +102,7 @@ The global error handler in `src/app/middlewares/global_error_handler.ts` catche
 All vars are declared in `src/app/configs/index.ts`. Add new vars there — never read `process.env` directly in feature code.
 
 Required vars that cause a hard startup failure if missing:
+
 - `SESSION_SECRET` — express-session secret
 
 Copy `.env.example` to `.env` to get started.

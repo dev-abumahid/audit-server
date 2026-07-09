@@ -13,4 +13,5 @@ process.env.ACCESS_TOKEN = 'test-access-token-secret';
 process.env.ACCESS_EXPIRES = '15m';
 process.env.REFRESH_TOKEN = 'test-refresh-token-secret';
 process.env.VERIFIED_TOKEN = 'test-verified-token-secret';
+process.env.RESET_SECRET = 'test-reset-secret-distinct-from-verified';
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test_db';

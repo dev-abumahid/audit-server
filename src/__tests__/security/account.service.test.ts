@@ -26,12 +26,16 @@ vi.mock('../../app/queues/email/reset-password/reset.email.queue.js', () => ({
 }));
 
 import { otpEmailQueue } from '../../app/queues/email/otp/otp.email.queue.js';
+import { resetEmailQueue } from '../../app/queues/email/reset-password/reset.email.queue.js';
 import { prisma } from '../../app/lib/prisma.js';
 import { account_services } from '../../app/modules/account/account.service.js';
+import { configs } from '../../app/configs/index.js';
+import { jwtHelpers } from '../../app/utils/JWT.js';
 
 const db = prisma.account as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const mockTransaction = prisma.$transaction as unknown as ReturnType<typeof vi.fn>;
 const mockOtpQueueAdd = vi.mocked(otpEmailQueue.add);
+const mockResetQueueAdd = vi.mocked(resetEmailQueue.add);
 
 describe('account service', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -267,6 +271,58 @@ describe('account service', () => {
         where: { id: 'acc-1' },
         data: { isAccountVerified: true },
       });
+    });
+  });
+
+  describe('password reset uses a distinct signing secret from email verification (ticket #27)', () => {
+    it('forget_password_generate_reset_token_from_db signs with reset_secret, not verified_token', async () => {
+      db.findUnique.mockResolvedValue({ id: 'acc-1', email: 'a@test.com' });
+      mockResetQueueAdd.mockResolvedValue(undefined as never);
+
+      await account_services.forget_password_generate_reset_token_from_db(
+        makeReq({ body: { email: 'a@test.com' } }),
+      );
+
+      const [, payload] = mockResetQueueAdd.mock.calls[0];
+      const resetLink = (payload as { resetLink: string }).resetLink;
+      const token = resetLink.split('?=')[1];
+
+      // Must verify successfully against reset_secret...
+      expect(() => jwtHelpers.verifyToken(token, configs.jwt.reset_secret as string)).not.toThrow();
+      // ...and must NOT verify against verified_token (the email-verification secret).
+      expect(() => jwtHelpers.verifyToken(token, configs.jwt.verified_token as string)).toThrow();
+    });
+
+    it('reset_password_using_token_into_db rejects a token signed with verified_token (the email-verification secret)', async () => {
+      const emailVerificationToken = jwtHelpers.generateToken(
+        { email: 'a@test.com', accountId: 'acc-1' },
+        configs.jwt.verified_token as string,
+        '5m',
+      );
+
+      await expect(
+        account_services.reset_password_using_token_into_db(
+          makeReq({ body: { token: emailVerificationToken, newPass: 'new-password' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('reset_password_using_token_into_db accepts a token signed with reset_secret', async () => {
+      const resetToken = jwtHelpers.generateToken(
+        { email: 'a@test.com', accountId: 'acc-1' },
+        configs.jwt.reset_secret as string,
+        '5m',
+      );
+      db.findUnique.mockResolvedValue({ id: 'acc-1', email: 'a@test.com' });
+      db.update.mockResolvedValue({});
+
+      await account_services.reset_password_using_token_into_db(
+        makeReq({ body: { token: resetToken, newPass: 'new-password' } }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'acc-1' } }));
     });
   });
 });

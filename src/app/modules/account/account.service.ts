@@ -336,7 +336,7 @@ const forget_password_generate_reset_token_from_db = async (req: Request) => {
       email: email,
       accountId: account.id,
     },
-    configs.jwt.verified_token as string,
+    configs.jwt.reset_secret as string,
     '5m',
   );
   const verificationLink = `${configs.jwt.front_end_url}/verify/token?=${verificationToken}`;
@@ -352,7 +352,7 @@ const reset_password_using_token_into_db = async (req: Request) => {
   const newPass = req?.body?.newPass as string;
   let decodeToken: any;
   try {
-    decodeToken = jwtHelpers.verifyToken(token, configs.jwt.verified_token as string);
+    decodeToken = jwtHelpers.verifyToken(token, configs.jwt.reset_secret as string);
   } catch (error: any) {
     if (error?.message == 'invalid signature') {
       throw new AppError('Invalid Token', 403);

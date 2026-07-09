@@ -110,6 +110,7 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
     const risk = await prisma.risk.findUnique({
       where: {
         id: riskId,
+        org_account_id: user?.accountId,
       },
     });
 

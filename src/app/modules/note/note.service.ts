@@ -38,7 +38,7 @@ const save_raw_note_into_db = async (req: Request) => {
   const body = req?.body;
   // check note exist or not
   const isNoteExist = await prisma.note.findFirst({
-    where: { inspectionId: body.inspectionId },
+    where: { inspectionId: body.inspectionId, orgAccountId: user.accountId },
   });
   if (isNoteExist) {
     throw new AppError('Note already exist', 400);
@@ -60,7 +60,7 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
 
   // check note exist or not
   const isNoteExist = await prisma.note.findFirst({
-    where: { inspectionId: body.inspectionId },
+    where: { inspectionId: body.inspectionId, orgAccountId: user?.accountId },
   });
   if (isNoteExist) {
     throw new AppError('Note already exist', 400);

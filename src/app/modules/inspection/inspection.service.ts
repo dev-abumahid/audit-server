@@ -140,12 +140,21 @@ const create_inspection_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const body = req.body;
 
+  // verify ownership of template and site
+  const template = await prisma.template.findFirst({
+    where: { id: body.templateId, orgAccountId: user.accountId },
+  });
+  const site = await prisma.site.findFirst({
+    where: { id: body.siteId, org_account_id: user.accountId },
+  });
+  if (!template || !site) throw new AppError('Template or Site not found', 404);
+
   const result = await prisma.inspection.create({
     data: {
       orgAccountId: user.accountId,
 
-      templateId: body.templateId,
-      siteId: body.siteId,
+      templateId: template.id,
+      siteId: site.id,
       inspectorProfileId: body.inspectorProfileId,
 
       questionAnswers: {
@@ -229,12 +238,14 @@ const upload_any_file_into_aws_for_inspection = async (req: Request) => {
 };
 
 const split_note_into_inspection_using_ai = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
   const { inspectionId } = req.params as { inspectionId: string };
 
   // checking note available or not
   const isNoteExist = await prisma.note.findUnique({
     where: {
       inspectionId,
+      orgAccountId: user.accountId,
     },
     select: {
       extracted_text: true,
@@ -245,6 +256,7 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
   const isInspectionExist = await prisma.inspection.findUnique({
     where: {
       id: inspectionId,
+      orgAccountId: user?.accountId,
     },
     select: {
       questionAnswers: {

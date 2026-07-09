@@ -11,6 +11,12 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    template: {
+      findFirst: vi.fn(),
+    },
+    site: {
+      findFirst: vi.fn(),
+    },
     questionAnswer: {
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -22,6 +28,8 @@ import { prisma } from '../../app/lib/prisma.js';
 import { inspection_service } from '../../app/modules/inspection/inspection.service.js';
 
 const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const templateDb = prisma.template as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const qaDb = prisma.questionAnswer as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('inspection service — org scoping (ticket #6)', () => {
@@ -65,6 +73,16 @@ describe('inspection service — org scoping (ticket #6)', () => {
 
   describe('create_inspection_into_db', () => {
     it('injects orgAccountId into the created record', async () => {
+      templateDb.findFirst.mockResolvedValue({
+        id: 't1',
+        orgAccountId: ORG_A,
+      });
+
+      siteDb.findFirst.mockResolvedValue({
+        id: 's1',
+        org_account_id: ORG_A,
+      });
+
       inspectionDb.create.mockResolvedValue({});
 
       await inspection_service.create_inspection_into_db(

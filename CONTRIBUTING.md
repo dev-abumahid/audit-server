@@ -16,7 +16,7 @@ stepping on each other. Short on purpose. The companion web client is `aexa-fron
 - **One task → one short-lived branch → one small PR.** `feat/…`, `fix/…`, `chore/…`.
 - **Conventional commits** (e.g. `feat(risk): scope queries to org`).
 - **Rebase on `main` often**; merge daily.
-- **Claim before you code:** assign the ticket and move it to *In Progress* on [the board](https://github.com/orgs/Qiyrix/projects/1) first. This is how we avoid two people picking up the same task.
+- **Claim before you code:** assign the ticket and move it to _In Progress_ on [the board](https://github.com/orgs/Qiyrix/projects/1) first. This is how we avoid two people picking up the same task.
 
 ## 3. Definition of done
 
