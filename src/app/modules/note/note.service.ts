@@ -36,6 +36,13 @@ const get_note_by_inspection_id_from_db = async (req: Request) => {
 const save_raw_note_into_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const body = req?.body;
+
+  // verify caller owns the inspection this note is being attached to
+  const inspection = await prisma.inspection.findFirst({
+    where: { id: body.inspectionId, orgAccountId: user.accountId },
+  });
+  if (!inspection) throw new AppError('Inspection not found', 404);
+
   // check note exist or not
   const isNoteExist = await prisma.note.findFirst({
     where: { inspectionId: body.inspectionId, orgAccountId: user.accountId },
@@ -57,6 +64,12 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
   const user = req?.user as JwtPayloadType;
   const body = req?.body;
   const file = req?.file;
+
+  // verify caller owns the inspection this note is being attached to
+  const inspection = await prisma.inspection.findFirst({
+    where: { id: body.inspectionId, orgAccountId: user.accountId },
+  });
+  if (!inspection) throw new AppError('Inspection not found', 404);
 
   // check note exist or not
   const isNoteExist = await prisma.note.findFirst({

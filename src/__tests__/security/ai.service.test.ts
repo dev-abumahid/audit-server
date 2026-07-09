@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { makeReq } from '../helpers/makeReq.js';
+import { ORG_A, makeReq } from '../helpers/makeReq.js';
 
 vi.mock('fs', () => ({
   readFileSync: vi.fn(() => Buffer.from('')),
@@ -20,6 +20,8 @@ import { prisma } from '../../app/lib/prisma.js';
 import { ai_service } from '../../app/modules/ai/ai.service.js';
 
 const db = prisma as unknown as Record<string, Record<string, ReturnType<typeof vi.fn>>>;
+const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const templateDb = prisma.template as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 function mockAiResponse(ok: boolean, status = 502) {
   return { ok, status, json: vi.fn() } as unknown as Response;
@@ -116,6 +118,34 @@ describe('ai service — AI response error handling', () => {
       ).rejects.toMatchObject({ statusCode: 502 });
 
       expect(db.pineconeDocument.create).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('ai service — org scoping (ticket #24)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  describe('generate_template_with_risk_with_ai', () => {
+    it('scopes the risk lookup by org', async () => {
+      riskDb.findUnique.mockResolvedValue(null);
+
+      await expect(
+        ai_service.generate_template_with_risk_with_ai(makeReq({ body: { riskId: 'org-b-risk' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(riskDb.findUnique).toHaveBeenCalledWith({
+        where: { id: 'org-b-risk', org_account_id: ORG_A },
+      });
+    });
+
+    it('throws 404 and does NOT create a template when the risk belongs to another org', async () => {
+      riskDb.findUnique.mockResolvedValue(null);
+
+      await expect(
+        ai_service.generate_template_with_risk_with_ai(makeReq({ body: { riskId: 'org-b-risk' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(templateDb.create).not.toHaveBeenCalled();
     });
   });
 });

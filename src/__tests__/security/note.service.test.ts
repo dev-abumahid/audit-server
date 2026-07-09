@@ -11,6 +11,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       update: vi.fn(),
       delete: vi.fn(),
     },
+    inspection: {
+      findFirst: vi.fn(),
+    },
   },
 }));
 
@@ -18,6 +21,7 @@ import { prisma } from '../../app/lib/prisma.js';
 import { note_service } from '../../app/modules/note/note.service.js';
 
 const db = prisma.note as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('note service — org scoping', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -79,6 +83,7 @@ describe('note service — org scoping', () => {
 
   describe('save_raw_note_into_db', () => {
     it('injects orgAccountId into the created record', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
       db.findFirst.mockResolvedValue(null);
       db.create.mockResolvedValue({});
 
@@ -91,12 +96,50 @@ describe('note service — org scoping', () => {
     });
 
     it('throws 400 if note already exists for inspection', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
       db.findFirst.mockResolvedValue({ id: 'existing' });
 
       await expect(
         note_service.save_raw_note_into_db(makeReq({ body: { inspectionId: 'insp-1' } })),
       ).rejects.toMatchObject({ statusCode: 400 });
 
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT create a note when the inspectionId belongs to another org', async () => {
+      inspectionDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        note_service.save_raw_note_into_db(
+          makeReq({ body: { inspectionId: 'org-b-inspection', title: 'T', extracted_text: 'X' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(inspectionDb.findFirst).toHaveBeenCalledWith({
+        where: { id: 'org-b-inspection', orgAccountId: ORG_A },
+      });
+      expect(db.findFirst).not.toHaveBeenCalled();
+      expect(db.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('extract_note_from_any_file_or_image_and_save_into_db', () => {
+    it('throws 404 and does NOT proceed to file processing when the inspectionId belongs to another org', async () => {
+      inspectionDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        note_service.extract_note_from_any_file_or_image_and_save_into_db(
+          makeReq({
+            body: { inspectionId: 'org-b-inspection' },
+            file: { path: '/tmp/whatever', mimetype: 'application/pdf', originalname: 'a.pdf' },
+          } as never),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(inspectionDb.findFirst).toHaveBeenCalledWith({
+        where: { id: 'org-b-inspection', orgAccountId: ORG_A },
+      });
+      expect(db.findFirst).not.toHaveBeenCalled();
       expect(db.create).not.toHaveBeenCalled();
     });
   });

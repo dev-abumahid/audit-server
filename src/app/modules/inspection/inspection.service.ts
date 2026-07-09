@@ -256,7 +256,7 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
   const isInspectionExist = await prisma.inspection.findUnique({
     where: {
       id: inspectionId,
-      orgAccountId: user?.accountId,
+      orgAccountId: user.accountId,
     },
     select: {
       questionAnswers: {
