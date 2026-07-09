@@ -26,6 +26,9 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
         organization_username: user.accountId,
       }),
     });
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
     const data = await aiResponse.json();
     // verify with schema
     const parseData = await template_validations.create_template.parseAsync(data?.data);
@@ -69,6 +72,9 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
       method: 'POST',
       body: formData,
     });
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
     const data = await aiResponse.json();
 
     const parseData = await template_validations.create_template.parseAsync(data?.data);
@@ -138,6 +144,9 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
       }),
     });
 
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
     const data = await aiResponse.json();
     // verify with schema
     const parseData = await template_validations.create_template.parseAsync(data?.data);
@@ -218,6 +227,9 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
         body: JSON.stringify(aiPayload),
       },
     );
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
     const data = await aiResponse.json();
     if (data) {
       const results = data.results.map((item: any) => ({
@@ -295,6 +307,9 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
       method: 'POST',
       body: formData,
     });
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
     const data = await aiResponse.json();
 
     // database payload
