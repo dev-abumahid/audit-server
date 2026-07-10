@@ -59,5 +59,6 @@ export const configs = {
     callback_url: process.env.GITHUB_CALLBACK_URL,
   },
   ai_server_end_point: process.env.AI_SERVER_ENDPOINT as string,
+  ai_internal_secret: process.env.AI_INTERNAL_SECRET as string,
   session_secret: process.env.SESSION_SECRET,
 };

@@ -4,6 +4,7 @@ import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
+import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 
 const get_all_inspection_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
@@ -296,6 +297,7 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...AI_INTERNAL_SECRET_HEADER,
     },
     body: JSON.stringify(aiPayload),
   });

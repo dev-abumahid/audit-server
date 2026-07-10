@@ -104,6 +104,7 @@ All vars are declared in `src/app/configs/index.ts`. Add new vars there — neve
 Required vars that cause a hard startup failure if missing:
 
 - `SESSION_SECRET` — express-session secret
+- `AI_INTERNAL_SECRET` — shared secret sent as `X-Internal-Secret` on every outbound call to aexa-ai; must match aexa-ai's own `INTERNAL_SECRET`
 
 Copy `.env.example` to `.env` to get started.
 

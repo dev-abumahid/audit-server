@@ -4,6 +4,7 @@ import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
+import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 
 const get_all_note_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
@@ -93,6 +94,7 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
 
   const aiResponse = await fetch(`${configs.ai_server_end_point}/extract-text`, {
     method: 'POST',
+    headers: AI_INTERNAL_SECRET_HEADER,
     body: formData,
   });
   if (!aiResponse.ok) {

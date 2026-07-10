@@ -19,6 +19,10 @@ if (!configs.session_secret) {
   throw new Error('SESSION_SECRET environment variable is required');
 }
 
+if (!configs.ai_internal_secret) {
+  throw new Error('AI_INTERNAL_SECRET environment variable is required');
+}
+
 // define app
 const app = express();
 

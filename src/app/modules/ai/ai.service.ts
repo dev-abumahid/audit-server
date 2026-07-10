@@ -8,6 +8,14 @@ import { recommendation_validations } from '../recommendation/recommendation.val
 import { mapTemplateData } from '../template/template.utils.js';
 import { template_validations } from '../template/template.validation.js';
 
+// Every outbound call to aexa-ai must carry this — the AI service enforces
+// it as a global app-level auth dependency and rejects requests without it.
+// Exported so other modules calling aexa-ai directly (note, inspection) can
+// reuse the same header instead of each hand-rolling it.
+export const AI_INTERNAL_SECRET_HEADER = {
+  'X-Internal-Secret': configs.ai_internal_secret,
+};
+
 const generate_template_with_prompt_with_ai = async (req: Request) => {
   try {
     const user = req.user as JwtPayloadType;
@@ -20,6 +28,7 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...AI_INTERNAL_SECRET_HEADER,
       },
       body: JSON.stringify({
         topic: prompt,
@@ -70,6 +79,7 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
     formData.append('organization_username', user.accountId);
     const aiResponse = await fetch(`${configs.ai_server_end_point}/template_from_pdf`, {
       method: 'POST',
+      headers: AI_INTERNAL_SECRET_HEADER,
       body: formData,
     });
     if (!aiResponse.ok) {
@@ -122,6 +132,7 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...AI_INTERNAL_SECRET_HEADER,
       },
       body: JSON.stringify({
         name: risk.name,
@@ -224,6 +235,7 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...AI_INTERNAL_SECRET_HEADER,
         },
         body: JSON.stringify(aiPayload),
       },
@@ -306,6 +318,7 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
     formData.append('organization_username', user.accountId);
     const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-pdf-to-pinecone`, {
       method: 'POST',
+      headers: AI_INTERNAL_SECRET_HEADER,
       body: formData,
     });
     if (!aiResponse.ok) {
@@ -353,6 +366,7 @@ const delete_pinecone_data_from_database = async (req: Request) => {
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
+        ...AI_INTERNAL_SECRET_HEADER,
       },
     },
   );
