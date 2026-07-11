@@ -2,9 +2,10 @@ import { Request } from 'express';
 import { JwtPayload } from 'jsonwebtoken';
 import { prisma } from '../../lib/prisma.js';
 import { TTemplateAccess } from '../../types/common.js';
-import uploadCloud from '../../utils/cloudinary.js';
-import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { AppError } from '../../utils/app_error.js';
+import uploadCloud from '../../utils/cloudinary.js';
+import { JwtPayloadType } from '../../utils/JWT.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { mapTemplateData } from './template.utils.js';
 
 const get_all_template_from_db = async (req: Request) => {
@@ -230,7 +231,15 @@ const delete_page_question_by_id_from_db = async (req: Request) => {
 };
 
 const add_template_access_member_into_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
   const body = req?.body as TTemplateAccess;
+  // check template ownership
+  const template = await prisma.template.findFirst({
+    where: { id: body.templateId, orgAccountId: user.accountId },
+  });
+  if (!template) throw new AppError('Template Not found', 404);
+
+  // now assign member
   const res = await prisma.templateAccess.create({
     data: {
       templateId: body.templateId,
@@ -244,7 +253,16 @@ const add_template_access_member_into_db = async (req: Request) => {
 };
 
 const remove_template_access_member_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
   const body = req?.body as TTemplateAccess;
+
+  // check template ownership
+  const template = await prisma.template.findFirst({
+    where: { id: body.templateId, orgAccountId: user.accountId },
+  });
+  if (!template) throw new AppError('Template Not found', 404);
+
+  // Now remove member
   const res = await prisma.templateAccess.deleteMany({
     where: {
       userId: body.userId,
