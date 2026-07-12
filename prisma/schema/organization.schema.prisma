@@ -1,0 +1,168 @@
+// Slice 1 of issue #55 (team/org management). Additive-only: new models and
+// enums plus optional back-relations on existing models. No service/route
+// changes ship in this slice — see src/scripts/backfill-org-membership.ts
+// for the one-time data migration that populates these tables for existing
+// accounts.
+
+enum OrgRole {
+    ADMIN
+    LEAD_AUDITOR
+    LIGHT_USER
+    VIEWER
+}
+
+enum OrgMemberStatus {
+    ACTIVE
+    SUSPENDED
+}
+
+enum FindingAssignmentStatus {
+    PENDING_APPROVAL
+    ACTIVE
+    REJECTED
+}
+
+enum OrgInvitationStatus {
+    PENDING
+    ACCEPTED
+    EXPIRED
+}
+
+model Organization {
+    id   String @id @default(uuid())
+    name String
+    // The Account whose existing orgAccountId / org_account_id FKs represent
+    // this org's data today (see CLAUDE.md org-scoping table).
+    anchorAccountId String @unique
+
+    requireApprovalForSubAssignment Boolean @default(false)
+    // Configurable display label for the LEAD_AUDITOR role; the OrgRole enum
+    // value itself stays fixed.
+    leadAuditorRoleLabel String @default("Lead Auditor")
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    members         OrgMember[]
+    externalMembers ExternalOrgMember[]
+    invitations     OrgInvitation[]
+}
+
+model OrgMember {
+    id             String @id @default(uuid())
+    organizationId String
+    // One active org per account, enforced here.
+    accountId String @unique
+    role      OrgRole
+    status    OrgMemberStatus @default(ACTIVE)
+    // Optional time-boxed access; null = no expiry.
+    expiresAt DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    account      Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    inspectionAssignments        InspectionAssignment[]
+    findingAssignmentsAsAssignee FindingAssignment[]    @relation("FindingAssigneeMember")
+
+    @@index([organizationId])
+}
+
+// Reused for BOTH Lead Auditor's edit-scope assignment AND Viewer's optional
+// visibility-scope assignment. An empty set of rows for a Viewer means
+// org-wide visibility; a populated set means scoped-only. For Lead Auditor,
+// rows are always populated (they never get org-wide access by default).
+model InspectionAssignment {
+    id           String @id @default(uuid())
+    orgMemberId  String
+    inspectionId String
+    // accountId of whoever made the assignment.
+    assignedById String
+
+    createdAt DateTime @default(now())
+
+    orgMember  OrgMember  @relation(fields: [orgMemberId], references: [id], onDelete: Cascade)
+    inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+    @@unique([orgMemberId, inspectionId])
+    @@index([inspectionId])
+}
+
+model FindingAssignment {
+    id                  String @id @default(uuid())
+    actionId            String
+    orgMemberId         String?
+    externalOrgMemberId String?
+    assignedById        String
+    approvedById        String?
+    status              FindingAssignmentStatus @default(PENDING_APPROVAL)
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    action            Action             @relation(fields: [actionId], references: [id], onDelete: Cascade)
+    orgMember         OrgMember?         @relation("FindingAssigneeMember", fields: [orgMemberId], references: [id], onDelete: Cascade)
+    externalOrgMember ExternalOrgMember? @relation(fields: [externalOrgMemberId], references: [id], onDelete: Cascade)
+
+    @@index([actionId])
+    @@index([orgMemberId])
+    @@index([externalOrgMemberId])
+}
+
+model OrgInvitation {
+    id             String @id @default(uuid())
+    organizationId String
+    email          String
+    role           OrgRole
+    invitedById    String
+    token          String @unique
+    status         OrgInvitationStatus @default(PENDING)
+    expiresAt      DateTime
+    acceptedAt     DateTime?
+
+    createdAt DateTime @default(now())
+
+    organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+    @@index([email])
+}
+
+// Lightweight identity for external LIGHT_USER or VIEWER members — NOT an
+// Account row (no password, not in the ROLE enum, not part of the normal
+// JWT auth flow). Scoped to exactly one Organization.
+model ExternalOrgMember {
+    id             String  @id @default(uuid())
+    organizationId String
+    email          String
+    fullName       String?
+    // LIGHT_USER or VIEWER only; enforced in application code, not the DB.
+    role      OrgRole
+    isActive  Boolean @default(true)
+    expiresAt DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    organization       Organization                        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+    findingAssignments FindingAssignment[]
+    verificationCodes  ExternalOrgMemberVerificationCode[]
+
+    @@unique([organizationId, email])
+}
+
+model ExternalOrgMemberVerificationCode {
+    id                  String @id @default(uuid())
+    externalOrgMemberId String
+    // Hashed, never store plaintext.
+    codeHash   String
+    expiresAt  DateTime
+    consumedAt DateTime?
+
+    createdAt DateTime @default(now())
+
+    externalOrgMember ExternalOrgMember @relation(fields: [externalOrgMemberId], references: [id], onDelete: Cascade)
+
+    @@index([externalOrgMemberId])
+}
