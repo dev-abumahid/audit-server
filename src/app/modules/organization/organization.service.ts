@@ -1,4 +1,5 @@
 import bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
 import crypto from 'node:crypto';
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
@@ -13,6 +14,29 @@ const INVITATION_EXPIRY_DAYS = 7;
 const INVITATION_EXPIRY_MS = INVITATION_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
 
 const buildInviteLink = (token: string) => `${configs.jwt.front_end_url}/invite/${token}/accept`;
+
+/**
+ * accept_invitation_into_db does a check-then-act read of OrgMember.accountId
+ * (unique) and Account.email (unique) before its transaction, so a
+ * concurrent accept (double-click, retried request) can still race past that
+ * check and hit the DB constraint inside the transaction. Without this, that
+ * shows up as a raw, uncaught PrismaClientKnownRequestError (P2002) — a
+ * generic 500 — instead of the same clean AppError the non-race path
+ * already returns for the identical logical conflict.
+ */
+const runAcceptTransactionOrConflict = async <T>(
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+  conflictMessage: string,
+): Promise<T> => {
+  try {
+    return await prisma.$transaction(fn);
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw new AppError(conflictMessage, 409);
+    }
+    throw err;
+  }
+};
 
 /**
  * Resolves the caller's own org membership and enforces that it's an ADMIN
@@ -231,6 +255,23 @@ const accept_invitation_into_db = async (req: Request) => {
       );
     }
 
+    // Mirror login_user_into_db's guards (account.service.ts) exactly —
+    // this branch authenticates an existing account by password just like
+    // login does, so it needs the same provider/deleted/verified checks or
+    // it silently authenticates accounts login would reject.
+    if (existingAccount.provider !== 'LOCAL') {
+      throw new AppError(
+        `This email is already registered via ${existingAccount.provider}. Sign in with that method, then ask an admin to add you to the organization.`,
+        400,
+      );
+    }
+    if (existingAccount.isDeleted) {
+      throw new AppError('This account has been deleted.', 401);
+    }
+    if (!existingAccount.isAccountVerified) {
+      throw new AppError('Please verify your account before accepting this invitation.', 401);
+    }
+
     const isPasswordMatch = bcrypt.compareSync(
       payload.password,
       existingAccount.password as string,
@@ -239,7 +280,7 @@ const accept_invitation_into_db = async (req: Request) => {
       throw new AppError('Incorrect password.', 401);
     }
 
-    await prisma.$transaction(async (tx: any) => {
+    await runAcceptTransactionOrConflict(async (tx) => {
       await tx.orgMember.create({
         data: {
           organizationId: invitation.organizationId,
@@ -252,17 +293,13 @@ const accept_invitation_into_db = async (req: Request) => {
         where: { id: invitation.id },
         data: { status: 'ACCEPTED', acceptedAt: new Date() },
       });
-    });
+    }, 'This account already belongs to a different organization and cannot join another.');
 
-    const accessToken = jwtHelpers.generateToken(
-      {
-        email: existingAccount.email,
-        role: existingAccount.role,
-        accountId: existingAccount.id,
-      },
-      configs.jwt.access_token as string,
-      configs.jwt.access_expires as string,
-    );
+    const accessToken = jwtHelpers.generateAccessToken({
+      email: existingAccount.email,
+      role: existingAccount.role,
+      accountId: existingAccount.id,
+    });
 
     return { accessToken, accountId: existingAccount.id, isNewAccount: false };
   }
@@ -270,10 +307,11 @@ const accept_invitation_into_db = async (req: Request) => {
   if (!payload.fullName) {
     throw new AppError('Full name is required to create your account.', 400);
   }
+  const fullName = payload.fullName;
 
   const hashPassword = bcrypt.hashSync(payload.password, 10);
 
-  const newAccountId = await prisma.$transaction(async (tx: any) => {
+  const newAccountId = await runAcceptTransactionOrConflict(async (tx) => {
     const account = await tx.account.create({
       data: {
         email: invitation.email,
@@ -286,7 +324,7 @@ const accept_invitation_into_db = async (req: Request) => {
     await tx.profile.create({
       data: {
         accountId: account.id,
-        fullName: payload.fullName,
+        fullName,
       },
     });
 
@@ -305,17 +343,13 @@ const accept_invitation_into_db = async (req: Request) => {
     });
 
     return account.id;
-  });
+  }, 'This invitation has already been accepted or the account already exists.');
 
-  const accessToken = jwtHelpers.generateToken(
-    {
-      email: invitation.email,
-      role: 'ORGANIZATION',
-      accountId: newAccountId,
-    },
-    configs.jwt.access_token as string,
-    configs.jwt.access_expires as string,
-  );
+  const accessToken = jwtHelpers.generateAccessToken({
+    email: invitation.email,
+    role: 'ORGANIZATION',
+    accountId: newAccountId,
+  });
 
   return { accessToken, accountId: newAccountId, isNewAccount: true };
 };

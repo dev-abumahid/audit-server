@@ -237,6 +237,9 @@ describe('organization service — invitation acceptance', () => {
       email: 'already@test.com',
       password: bcrypt.hashSync('correct-password', 10),
       role: 'ORGANIZATION',
+      provider: 'LOCAL',
+      isDeleted: false,
+      isAccountVerified: true,
       orgMembership: null,
     });
 
@@ -279,6 +282,9 @@ describe('organization service — invitation acceptance', () => {
       email: 'already@test.com',
       password: bcrypt.hashSync('correct-password', 10),
       role: 'ORGANIZATION',
+      provider: 'LOCAL',
+      isDeleted: false,
+      isAccountVerified: true,
       orgMembership: null,
     });
 
@@ -289,6 +295,136 @@ describe('organization service — invitation acceptance', () => {
     ).rejects.toMatchObject({ statusCode: 401 });
 
     expect(mockTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects an existing OAuth account instead of crashing on a null password hash', async () => {
+    const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
+    orgInvitationDb.findUnique.mockResolvedValue({
+      id: 'inv-oauth',
+      organizationId: ORG_1,
+      email: 'oauth@test.com',
+      role: 'VIEWER',
+      status: 'PENDING',
+      expiresAt: futureExpiry,
+      token: 'tok-oauth',
+    });
+    accountDb.findUnique.mockResolvedValue({
+      id: 'existing-acc-oauth',
+      email: 'oauth@test.com',
+      password: null,
+      role: 'ORGANIZATION',
+      provider: 'GOOGLE',
+      isDeleted: false,
+      isAccountVerified: true,
+      orgMembership: null,
+    });
+
+    await expect(
+      organization_services.accept_invitation_into_db(
+        makeReq({ body: { token: 'tok-oauth', password: 'anything' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(mockTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects accepting into a deleted account', async () => {
+    const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
+    orgInvitationDb.findUnique.mockResolvedValue({
+      id: 'inv-deleted',
+      organizationId: ORG_1,
+      email: 'deleted@test.com',
+      role: 'VIEWER',
+      status: 'PENDING',
+      expiresAt: futureExpiry,
+      token: 'tok-deleted',
+    });
+    accountDb.findUnique.mockResolvedValue({
+      id: 'existing-acc-deleted',
+      email: 'deleted@test.com',
+      password: bcrypt.hashSync('correct-password', 10),
+      role: 'ORGANIZATION',
+      provider: 'LOCAL',
+      isDeleted: true,
+      isAccountVerified: true,
+      orgMembership: null,
+    });
+
+    await expect(
+      organization_services.accept_invitation_into_db(
+        makeReq({ body: { token: 'tok-deleted', password: 'correct-password' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 401 });
+
+    expect(mockTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects accepting into an unverified account', async () => {
+    const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
+    orgInvitationDb.findUnique.mockResolvedValue({
+      id: 'inv-unverified',
+      organizationId: ORG_1,
+      email: 'unverified@test.com',
+      role: 'VIEWER',
+      status: 'PENDING',
+      expiresAt: futureExpiry,
+      token: 'tok-unverified',
+    });
+    accountDb.findUnique.mockResolvedValue({
+      id: 'existing-acc-unverified',
+      email: 'unverified@test.com',
+      password: bcrypt.hashSync('correct-password', 10),
+      role: 'ORGANIZATION',
+      provider: 'LOCAL',
+      isDeleted: false,
+      isAccountVerified: false,
+      orgMembership: null,
+    });
+
+    await expect(
+      organization_services.accept_invitation_into_db(
+        makeReq({ body: { token: 'tok-unverified', password: 'correct-password' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 401 });
+
+    expect(mockTransaction).not.toHaveBeenCalled();
+  });
+
+  it('converts a concurrent-accept unique-constraint race into a clean 409 instead of a raw 500', async () => {
+    const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
+    orgInvitationDb.findUnique.mockResolvedValue({
+      id: 'inv-race',
+      organizationId: ORG_1,
+      email: 'race@test.com',
+      role: 'VIEWER',
+      status: 'PENDING',
+      expiresAt: futureExpiry,
+      token: 'tok-race',
+    });
+    accountDb.findUnique.mockResolvedValue({
+      id: 'existing-acc-race',
+      email: 'race@test.com',
+      password: bcrypt.hashSync('correct-password', 10),
+      role: 'ORGANIZATION',
+      provider: 'LOCAL',
+      isDeleted: false,
+      isAccountVerified: true,
+      orgMembership: null,
+    });
+
+    const { Prisma } = await import('@prisma/client');
+    mockTransaction.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
+
+    await expect(
+      organization_services.accept_invitation_into_db(
+        makeReq({ body: { token: 'tok-race', password: 'correct-password' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it('marks an expired invitation EXPIRED and rejects', async () => {

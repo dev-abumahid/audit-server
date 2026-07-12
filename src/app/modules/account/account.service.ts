@@ -206,15 +206,11 @@ const login_user_into_db = async (req: Request) => {
     throw new AppError('Account is not verified', 401);
   }
   // generate access
-  const accessToken = jwtHelpers.generateToken(
-    {
-      email: account.email,
-      role: account.role,
-      accountId: account.id,
-    },
-    configs.jwt.access_token as string,
-    configs.jwt.access_expires as string,
-  );
+  const accessToken = jwtHelpers.generateAccessToken({
+    email: account.email,
+    role: account.role,
+    accountId: account.id,
+  });
 
   // return payload
   const returnPayload = {

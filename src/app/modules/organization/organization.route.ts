@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
-import { sensitiveAuthLimiter } from '../../middlewares/rate_limiters.js';
+import { orgInviteAcceptLimiter } from '../../middlewares/rate_limiters.js';
 import RequestValidator from '../../middlewares/request_validator.js';
 import { organization_controller } from './organization.controller.js';
 import { organization_validations } from './organization.validation.js';
@@ -25,7 +25,7 @@ router.post('/invite/:id/resend', auth('ORGANIZATION'), organization_controller.
 // lands in server-side URL logging, APM traces, or a Referer header.
 router.post(
   '/invite/accept',
-  sensitiveAuthLimiter,
+  orgInviteAcceptLimiter,
   RequestValidator(organization_validations.accept_invitation),
   organization_controller.accept_invitation,
 );
