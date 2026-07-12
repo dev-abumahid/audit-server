@@ -7,6 +7,7 @@ import uploadCloud from '../../utils/cloudinary.js';
 import {
   applyInspectionScope,
   assertCanWriteToInspection,
+  CallerOrgContext,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
@@ -386,6 +387,117 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
   return 'success fully splitted';
 };
 
+/**
+ * Admin-only. Assigns an org member (any role — the assignment row is the
+ * same mechanism used for both Lead Auditor's edit scope and Viewer's
+ * optional visibility scope, see org_scope.ts) to an inspection.
+ *
+ * Without this endpoint, InspectionAssignment rows can never be created,
+ * which makes LEAD_AUDITOR and scoped VIEWER completely inert — every list
+ * comes back empty and every write 403s, since resolveCallerOrgContext +
+ * getAssignedInspectionIds always resolve to zero assignments. Found by
+ * independent code review of the read/write scoping added earlier in this
+ * slice; this is the piece that actually makes assignment-based access
+ * meaningful rather than a permanently-empty scope.
+ */
+/**
+ * Every assignment endpoint needs the caller's real Organization.id (not
+ * ctx.organizationId, which is the anchor Account.id used by the legacy
+ * orgAccountId columns) to scope which OrgMember rows they're allowed to
+ * assign. Requires ctx.orgMemberId to be set — an ADMIN with no OrgMember
+ * row at all (the backward-compat fallback for pre-multi-tenant accounts)
+ * has no real Organization to assign anyone into.
+ */
+const requireCallerOrganizationId = async (ctx: CallerOrgContext): Promise<string> => {
+  if (!ctx.orgMemberId) {
+    throw new AppError('You are not part of a multi-member organization.', 403);
+  }
+  const membership = await prisma.orgMember.findUnique({ where: { id: ctx.orgMemberId } });
+  if (!membership) {
+    throw new AppError('You are not part of a multi-member organization.', 403);
+  }
+  return membership.organizationId;
+};
+
+const assign_member_to_inspection = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  if (ctx.role !== 'ADMIN') {
+    throw new AppError('Only organization admins can assign inspections.', 403);
+  }
+  const organizationId = await requireCallerOrganizationId(ctx);
+
+  const { id: inspectionId } = req.params as { id: string };
+  const { orgMemberId } = req.body as { orgMemberId: string };
+
+  const inspection = await prisma.inspection.findFirst({
+    where: { id: inspectionId, orgAccountId: ctx.organizationId },
+  });
+  if (!inspection) throw new AppError('Inspection not found', 404);
+
+  const member = await prisma.orgMember.findFirst({
+    where: { id: orgMemberId, organizationId },
+  });
+  if (!member) throw new AppError('Organization member not found', 404);
+
+  const assignment = await prisma.inspectionAssignment.upsert({
+    where: { orgMemberId_inspectionId: { orgMemberId, inspectionId } },
+    create: { orgMemberId, inspectionId, assignedById: user.accountId },
+    update: {},
+  });
+
+  return assignment;
+};
+
+const unassign_member_from_inspection = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  if (ctx.role !== 'ADMIN') {
+    throw new AppError('Only organization admins can unassign inspections.', 403);
+  }
+
+  const { id: inspectionId, orgMemberId } = req.params as {
+    id: string;
+    orgMemberId: string;
+  };
+
+  const inspection = await prisma.inspection.findFirst({
+    where: { id: inspectionId, orgAccountId: ctx.organizationId },
+  });
+  if (!inspection) throw new AppError('Inspection not found', 404);
+
+  await prisma.inspectionAssignment.deleteMany({ where: { orgMemberId, inspectionId } });
+
+  return { orgMemberId, inspectionId };
+};
+
+const get_inspection_assignments = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  if (ctx.role !== 'ADMIN') {
+    throw new AppError('Only organization admins can view inspection assignments.', 403);
+  }
+
+  const { id: inspectionId } = req.params as { id: string };
+  const inspection = await prisma.inspection.findFirst({
+    where: { id: inspectionId, orgAccountId: ctx.organizationId },
+  });
+  if (!inspection) throw new AppError('Inspection not found', 404);
+
+  return prisma.inspectionAssignment.findMany({
+    where: { inspectionId },
+    include: {
+      orgMember: {
+        select: {
+          id: true,
+          role: true,
+          account: { select: { email: true, profile: { select: { fullName: true } } } },
+        },
+      },
+    },
+  });
+};
+
 export const inspection_service = {
   get_all_inspection_from_db,
   get_single_inspection_from_db,
@@ -395,4 +507,7 @@ export const inspection_service = {
   update_inspection_question_into_db,
   upload_any_file_into_aws_for_inspection,
   split_note_into_inspection_using_ai,
+  assign_member_to_inspection,
+  unassign_member_from_inspection,
+  get_inspection_assignments,
 };

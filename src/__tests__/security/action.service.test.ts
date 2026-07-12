@@ -212,6 +212,8 @@ describe('action service — org scoping (ticket #6)', () => {
         organizationId: ORG_ID,
         accountId: ORG_A,
         role,
+        status: 'ACTIVE',
+        expiresAt: null,
       });
       organizationDb.findUnique.mockResolvedValue({
         id: ORG_ID,

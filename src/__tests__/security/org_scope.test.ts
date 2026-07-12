@@ -51,6 +51,8 @@ describe('org_scope — resolveCallerOrgContext', () => {
       organizationId: ORG_ID,
       accountId: ACCOUNT,
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     organizationDb.findUnique.mockResolvedValue(null);
 
@@ -65,12 +67,57 @@ describe('org_scope — resolveCallerOrgContext', () => {
       organizationId: ORG_ID,
       accountId: ACCOUNT,
       role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
 
     const ctx = await resolveCallerOrgContext(ACCOUNT);
 
     expect(ctx).toEqual({ organizationId: ANCHOR, role: 'LEAD_AUDITOR', orgMemberId: MEMBER_ID });
+  });
+
+  it('rejects a SUSPENDED member even though their JWT is still valid', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(resolveCallerOrgContext(ACCOUNT)).rejects.toMatchObject({ statusCode: 403 });
+    expect(organizationDb.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('rejects a member whose time-boxed access has expired', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+    });
+
+    await expect(resolveCallerOrgContext(ACCOUNT)).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('allows a member whose expiresAt is in the future', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() + 1000 * 60 * 60),
+    });
+    organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+
+    const ctx = await resolveCallerOrgContext(ACCOUNT);
+
+    expect(ctx.role).toBe('VIEWER');
   });
 });
 

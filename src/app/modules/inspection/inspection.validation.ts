@@ -21,8 +21,13 @@ const update_question_answer = z.object({
   mediaFiles: z.any(),
 });
 
+const assign_inspection_member = z.object({
+  orgMemberId: z.string().min(1),
+});
+
 export const inspection_validations = {
   create_inspection,
   update_inspection,
   update_question_answer,
+  assign_inspection_member,
 };

@@ -43,6 +43,19 @@ export const resolveCallerOrgContext = async (accountId: string): Promise<Caller
     return { organizationId: accountId, role: 'ADMIN', orgMemberId: null };
   }
 
+  // A membership row existing is not the same as it being live: SUSPENDED
+  // (explicit offboarding) and an expired expiresAt (time-boxed access,
+  // e.g. an external Viewer's engagement window) must both revoke access
+  // even though the row — and the caller's JWT — are both still present.
+  // This is a hard deny, not the "no membership at all" fallback above:
+  // falling back to ADMIN-of-self here would hand a suspended/expired
+  // member of a real org full admin rights over their own now-disconnected
+  // slice, which is worse than denying them outright.
+  const isExpired = !!membership.expiresAt && membership.expiresAt.getTime() < Date.now();
+  if (membership.status !== 'ACTIVE' || isExpired) {
+    throw new AppError('Your access to this organization is no longer active.', 403);
+  }
+
   const organization = await prisma.organization.findUnique({
     where: { id: membership.organizationId },
   });
@@ -100,9 +113,17 @@ const restrictFieldToIds = (
     return { ...whereCondition, [field]: { in: existingIds.filter((id) => ids.includes(id)) } };
   }
 
-  // Unrecognized filter shape (e.g. `not`, `notIn`) — safest is to AND the
-  // assignment restriction on top rather than silently drop it.
-  return { ...whereCondition, [field]: { in: ids }, AND: [{ [field]: existing }] };
+  // Unrecognized filter shape (e.g. `not`, `notIn`). Neither current call
+  // site (Inspection.id, Action.inspectionId) ever passes anything but
+  // undefined/string/{in:[...]}, so this is deliberately unhandled rather
+  // than merged via a speculative, untested AND-clause construction that
+  // could silently clobber a whereCondition.AND a future caller sets for
+  // an unrelated filter. Fail loudly so a real caller with a richer filter
+  // gets a clear error instead of a quietly-wrong query.
+  throw new AppError(
+    `org_scope: unsupported existing filter shape on "${field}" — restrictFieldToIds only handles undefined, a plain id string, or {in: [...]}.`,
+    500,
+  );
 };
 
 /**

@@ -87,6 +87,39 @@ const split_note_into_inspection = catchAsync(async (req, res) => {
   });
 });
 
+const assign_inspection_member = catchAsync(async (req, res) => {
+  const result = await inspection_service.assign_member_to_inspection(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 201,
+    message: 'Member assigned to inspection successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const unassign_inspection_member = catchAsync(async (req, res) => {
+  const result = await inspection_service.unassign_member_from_inspection(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Member unassigned from inspection successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const get_inspection_assignments = catchAsync(async (req, res) => {
+  const result = await inspection_service.get_inspection_assignments(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Inspection assignments fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const inspection_controller = {
   get_all_inspection,
   get_single_inspection,
@@ -96,4 +129,7 @@ export const inspection_controller = {
   update_inspection_question,
   upload_any_file_into_aws,
   split_note_into_inspection,
+  assign_inspection_member,
+  unassign_inspection_member,
+  get_inspection_assignments,
 };
