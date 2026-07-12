@@ -287,7 +287,7 @@ export const templateSwaggerDocs = {
           'application/json': {
             example: JSON.stringify({
               templateId: '',
-              access: '',
+              userId: '',
             }),
           },
         },
@@ -308,7 +308,7 @@ export const templateSwaggerDocs = {
           'application/json': {
             example: JSON.stringify({
               templateId: '',
-              access: '',
+              userId: '',
             }),
           },
         },

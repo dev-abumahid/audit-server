@@ -81,3 +81,39 @@ describe('template service — access member ownership scoping (ticket #31)', ()
     });
   });
 });
+
+describe('template service — access invitation payload field name (ticket #57)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('passes the userId from the request body through to templateAccess.create, not undefined', async () => {
+    templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+    templateAccessDb.create.mockResolvedValue({});
+
+    await template_service.add_template_access_member_into_db(
+      makeReq({ body: { templateId: 't1', userId: 'u1' } }),
+    );
+
+    expect(templateAccessDb.create).toHaveBeenCalledWith({
+      data: {
+        templateId: 't1',
+        userId: 'u1',
+      },
+    });
+  });
+
+  it('passes a defined, non-undefined userId to templateAccess.deleteMany, not a blanket delete', async () => {
+    templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+    templateAccessDb.deleteMany.mockResolvedValue({ count: 1 });
+
+    await template_service.remove_template_access_member_from_db(
+      makeReq({ body: { templateId: 't1', userId: 'u1' } }),
+    );
+
+    expect(templateAccessDb.deleteMany).toHaveBeenCalledWith({
+      where: {
+        userId: 'u1',
+        templateId: 't1',
+      },
+    });
+  });
+});

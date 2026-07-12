@@ -76,8 +76,8 @@ const update_or_create_new_question = z.object({
 });
 
 const send_template_access_invitation = z.object({
-  templateId: z.string(),
-  access: z.string().min(1),
+  templateId: z.string().min(1),
+  userId: z.string().min(1),
 });
 export const template_validations = {
   create_template,
