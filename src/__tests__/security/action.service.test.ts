@@ -16,6 +16,15 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
+    orgMember: {
+      findUnique: vi.fn(),
+    },
+    organization: {
+      findUnique: vi.fn(),
+    },
+    inspectionAssignment: {
+      findMany: vi.fn(),
+    },
   },
 }));
 
@@ -24,9 +33,21 @@ import { action_service } from '../../app/modules/action/action.service.js';
 
 const db = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbInspection = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const assignmentDb = prisma.inspectionAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 
 describe('action service — org scoping (ticket #6)', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no OrgMember row — pre-slice-3 tests expect the
+    // backward-compat ADMIN-of-self fallback (org anchor === caller's own
+    // accountId).
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
 
   // ── getAll ───────────────────────────────────────────────────────────────
   describe('get_all_action_from_db', () => {
@@ -177,6 +198,237 @@ describe('action service — org scoping (ticket #6)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('role scoping (issue #55 slice 3)', () => {
+    const ANCHOR = 'anchor-account-00000000-0000-0000-0000-000000000009';
+    const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
+    const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
+
+    const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        id: MEMBER_ID,
+        organizationId: ORG_ID,
+        accountId: ORG_A,
+        role,
+      });
+      organizationDb.findUnique.mockResolvedValue({
+        id: ORG_ID,
+        anchorAccountId: ANCHOR,
+      });
+    };
+
+    it('ADMIN with a real OrgMember row still sees the whole org', async () => {
+      mockMembership('ADMIN');
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const [findArg] = db.findMany.mock.calls[0];
+      expect(findArg.where).toMatchObject({ orgAccountId: ANCHOR });
+      expect(findArg.where.inspectionId).toBeUndefined();
+      expect(assignmentDb.findMany).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR list is restricted via inspectionId to their assigned inspections', async () => {
+      mockMembership('LEAD_AUDITOR');
+      assignmentDb.findMany.mockResolvedValue([
+        { inspectionId: 'insp-assigned-1' },
+        { inspectionId: 'insp-assigned-2' },
+      ]);
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      expect(assignmentDb.findMany).toHaveBeenCalledWith({
+        where: { orgMemberId: MEMBER_ID },
+        select: { inspectionId: true },
+      });
+      const [findArg] = db.findMany.mock.calls[0];
+      expect(findArg.where).toMatchObject({
+        orgAccountId: ANCHOR,
+        inspectionId: { in: ['insp-assigned-1', 'insp-assigned-2'] },
+      });
+    });
+
+    it('LEAD_AUDITOR requesting an action from an unassigned inspection gets nothing back', async () => {
+      mockMembership('LEAD_AUDITOR');
+      assignmentDb.findMany.mockResolvedValue([]);
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.get_single_action_from_db(makeReq({ params: { id: 'action-1' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      const [findArg] = db.findFirst.mock.calls[0];
+      expect(findArg.where.inspectionId).toEqual({ in: [] });
+    });
+
+    it('VIEWER with zero InspectionAssignment rows sees the whole org', async () => {
+      mockMembership('VIEWER');
+      assignmentDb.findMany.mockResolvedValue([]);
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const [findArg] = db.findMany.mock.calls[0];
+      expect(findArg.where).toMatchObject({ orgAccountId: ANCHOR });
+      expect(findArg.where.inspectionId).toBeUndefined();
+    });
+
+    it('VIEWER with 1+ InspectionAssignment rows is scoped the same way Lead Auditor is', async () => {
+      mockMembership('VIEWER');
+      assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const [findArg] = db.findMany.mock.calls[0];
+      expect(findArg.where).toMatchObject({ inspectionId: { in: ['insp-assigned-1'] } });
+    });
+
+    it('LIGHT_USER gets nothing back (deny by default)', async () => {
+      mockMembership('LIGHT_USER');
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const [findArg] = db.findMany.mock.calls[0];
+      expect(findArg.where.inspectionId).toEqual({ in: [] });
+      expect(assignmentDb.findMany).not.toHaveBeenCalled();
+    });
+
+    it('a caller with no OrgMember row falls back to full ADMIN-equivalent access', async () => {
+      orgMemberDb.findUnique.mockResolvedValue(null);
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const [findArg] = db.findMany.mock.calls[0];
+      expect(findArg.where).toMatchObject({ orgAccountId: ORG_A });
+      expect(findArg.where.inspectionId).toBeUndefined();
+      expect(organizationDb.findUnique).not.toHaveBeenCalled();
+    });
+
+    describe('write-path scoping (create/update/delete)', () => {
+      it('LEAD_AUDITOR assigned to the parent inspection can create a finding on it', async () => {
+        mockMembership('LEAD_AUDITOR');
+        assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-assigned-1',
+          siteId: 'site-1',
+          orgAccountId: ANCHOR,
+        });
+        db.create.mockResolvedValue({});
+
+        await action_service.create_action_into_db(
+          makeReq({ body: { inspectionId: 'insp-assigned-1', title: 'Found it' } }),
+        );
+
+        expect(db.create).toHaveBeenCalled();
+      });
+
+      it('LEAD_AUDITOR NOT assigned to the parent inspection cannot create a finding on it', async () => {
+        mockMembership('LEAD_AUDITOR');
+        assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-not-assigned',
+          siteId: 'site-1',
+          orgAccountId: ANCHOR,
+        });
+
+        await expect(
+          action_service.create_action_into_db(
+            makeReq({ body: { inspectionId: 'insp-not-assigned', title: 'Nope' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+
+      it('VIEWER can never create a finding', async () => {
+        mockMembership('VIEWER');
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-1',
+          siteId: 'site-1',
+          orgAccountId: ANCHOR,
+        });
+
+        await expect(
+          action_service.create_action_into_db(
+            makeReq({ body: { inspectionId: 'insp-1', title: 'Nope' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+
+      it("LEAD_AUDITOR NOT assigned to the finding's parent inspection cannot update it", async () => {
+        mockMembership('LEAD_AUDITOR');
+        assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+        db.findFirst.mockResolvedValue({
+          id: 'a1',
+          inspectionId: 'insp-not-assigned',
+          orgAccountId: ANCHOR,
+        });
+
+        await expect(
+          action_service.update_action_into_db(
+            makeReq({ params: { id: 'a1' }, body: { actionTitle: 'Updated' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(db.update).not.toHaveBeenCalled();
+      });
+
+      it("LEAD_AUDITOR assigned to the finding's parent inspection can delete it", async () => {
+        mockMembership('LEAD_AUDITOR');
+        assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+        db.findFirst.mockResolvedValue({
+          id: 'a1',
+          inspectionId: 'insp-assigned-1',
+          orgAccountId: ANCHOR,
+        });
+        db.delete.mockResolvedValue({});
+
+        await action_service.delete_action_from_db(makeReq({ params: { id: 'a1' } }));
+
+        expect(db.delete).toHaveBeenCalled();
+      });
+
+      it('ADMIN can create/update/delete findings regardless of assignment', async () => {
+        mockMembership('ADMIN');
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-1',
+          siteId: 'site-1',
+          orgAccountId: ANCHOR,
+        });
+        db.create.mockResolvedValue({});
+        db.findFirst.mockResolvedValue({ id: 'a1', inspectionId: 'insp-1', orgAccountId: ANCHOR });
+        db.update.mockResolvedValue({});
+        db.delete.mockResolvedValue({});
+
+        await action_service.create_action_into_db(
+          makeReq({ body: { inspectionId: 'insp-1', title: 'Found it' } }),
+        );
+        expect(db.create).toHaveBeenCalled();
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { actionTitle: 'Updated' } }),
+        );
+        expect(db.update).toHaveBeenCalled();
+
+        await action_service.delete_action_from_db(makeReq({ params: { id: 'a1' } }));
+        expect(db.delete).toHaveBeenCalled();
+        expect(assignmentDb.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 });
