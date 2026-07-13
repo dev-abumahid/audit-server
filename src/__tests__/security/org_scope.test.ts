@@ -45,7 +45,13 @@ describe('org_scope — resolveCallerOrgContext', () => {
     expect(organizationDb.findUnique).not.toHaveBeenCalled();
   });
 
-  it('falls back to ADMIN-of-self when the OrgMember row points at a missing Organization', async () => {
+  it('fails closed (403) when a real OrgMember row points at a missing Organization, even for ADMIN', async () => {
+    // Was previously an ADMIN-of-self fallback — changed after independent
+    // review: falling back here (rather than the "no membership row at
+    // all" case above) would silently upgrade a non-ADMIN role to full
+    // ADMIN for this same defensive branch, a privilege escalation. Denying
+    // outright regardless of role is the safe default for a "should never
+    // happen" data-integrity case.
     orgMemberDb.findUnique.mockResolvedValue({
       id: MEMBER_ID,
       organizationId: ORG_ID,
@@ -56,9 +62,21 @@ describe('org_scope — resolveCallerOrgContext', () => {
     });
     organizationDb.findUnique.mockResolvedValue(null);
 
-    const ctx = await resolveCallerOrgContext(ACCOUNT);
+    await expect(resolveCallerOrgContext(ACCOUNT)).rejects.toMatchObject({ statusCode: 403 });
+  });
 
-    expect(ctx).toEqual({ organizationId: ACCOUNT, role: 'ADMIN', orgMemberId: null });
+  it('fails closed (403) for a non-ADMIN role too, not just ADMIN', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    organizationDb.findUnique.mockResolvedValue(null);
+
+    await expect(resolveCallerOrgContext(ACCOUNT)).rejects.toMatchObject({ statusCode: 403 });
   });
 
   it('resolves organizationId to the org anchorAccountId, not the caller accountId', async () => {

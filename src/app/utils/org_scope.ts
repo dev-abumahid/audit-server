@@ -37,6 +37,20 @@ export type CallerOrgContext = {
  * exactly what this fallback reproduces for accounts that aren't part of
  * a multi-member org yet.
  */
+/**
+ * True if an OrgMember row represents a caller who should still be let in:
+ * ACTIVE status and not past their (optional) time-boxed expiresAt. Shared
+ * by resolveCallerOrgContext and requireCallerIsOrgAdmin (organization.service.ts)
+ * so the two org-role gates in this codebase can't silently drift apart —
+ * that already happened once (requireCallerIsOrgAdmin shipped without this
+ * check, fixed in a follow-up once independent review caught it) precisely
+ * because the logic was duplicated instead of shared.
+ */
+export const isMembershipActive = (membership: { status: string; expiresAt: Date | null }) => {
+  const isExpired = !!membership.expiresAt && membership.expiresAt.getTime() < Date.now();
+  return membership.status === 'ACTIVE' && !isExpired;
+};
+
 export const resolveCallerOrgContext = async (accountId: string): Promise<CallerOrgContext> => {
   const membership = await prisma.orgMember.findUnique({ where: { accountId } });
   if (!membership) {
@@ -51,8 +65,7 @@ export const resolveCallerOrgContext = async (accountId: string): Promise<Caller
   // falling back to ADMIN-of-self here would hand a suspended/expired
   // member of a real org full admin rights over their own now-disconnected
   // slice, which is worse than denying them outright.
-  const isExpired = !!membership.expiresAt && membership.expiresAt.getTime() < Date.now();
-  if (membership.status !== 'ACTIVE' || isExpired) {
+  if (!isMembershipActive(membership)) {
     throw new AppError('Your access to this organization is no longer active.', 403);
   }
 
@@ -60,10 +73,14 @@ export const resolveCallerOrgContext = async (accountId: string): Promise<Caller
     where: { id: membership.organizationId },
   });
   // Defensive: the FK guarantees this row exists in practice. If it's ever
-  // missing (data corruption / racing delete), fail safe to the same
-  // backward-compat fallback rather than throwing.
+  // missing (data corruption / racing delete), fail closed rather than
+  // falling back to ADMIN-of-self — that fallback exists for the "no
+  // membership row at all" case above, where there's genuinely nothing to
+  // scope by; here a real (non-ADMIN) membership exists, so silently
+  // upgrading e.g. a VIEWER to full ADMIN would be a privilege escalation,
+  // not a reasonable default. Found by independent review.
   if (!organization) {
-    return { organizationId: accountId, role: 'ADMIN', orgMemberId: null };
+    throw new AppError('Your organization could not be found.', 403);
   }
 
   return {

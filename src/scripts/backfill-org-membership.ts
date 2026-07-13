@@ -17,9 +17,20 @@
  * partway through never leaves an Organization without its OrgMember, or
  * vice versa.
  *
+ * Per-account failures (including a real concurrent-signup race — a new
+ * account.service.ts signup now creates its own OrgMember row, so it's
+ * possible for one to appear between this script's initial findMany
+ * snapshot and that account's turn in the loop below) are caught and
+ * logged rather than aborting the whole run: this is a one-time migration
+ * over what could be a large accounts table, and one bad/racing row
+ * shouldn't block every account after it in iteration order. Found by
+ * independent review — the original version had no per-account try/catch,
+ * so a single P2002 crashed the entire script.
+ *
  * Run with:
  *   npm run backfill:org-membership
  */
+import { Prisma } from '@prisma/client';
 import { fileURLToPath } from 'node:url';
 import { prisma } from '../app/lib/prisma.js';
 
@@ -39,6 +50,7 @@ export async function backfillOrgMembership() {
 
   let processed = 0;
   let skipped = 0;
+  let failed = 0;
 
   for (const account of accounts) {
     if (account.orgMembership) {
@@ -48,30 +60,46 @@ export async function backfillOrgMembership() {
 
     const orgName = account.organizationProfile?.organizationName || account.email;
 
-    await prisma.$transaction(async (tx) => {
-      const organization = await tx.organization.create({
-        data: {
-          name: orgName,
-          anchorAccountId: account.id,
-        },
-      });
+    try {
+      await prisma.$transaction(async (tx) => {
+        const organization = await tx.organization.create({
+          data: {
+            name: orgName,
+            anchorAccountId: account.id,
+          },
+        });
 
-      await tx.orgMember.create({
-        data: {
-          organizationId: organization.id,
-          accountId: account.id,
-          role: 'ADMIN',
-          status: 'ACTIVE',
-        },
+        await tx.orgMember.create({
+          data: {
+            organizationId: organization.id,
+            accountId: account.id,
+            role: 'ADMIN',
+            status: 'ACTIVE',
+          },
+        });
       });
-    });
-
-    processed += 1;
+      processed += 1;
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        // A concurrent signup (or a second concurrent backfill run) beat
+        // this account to it — it now has an OrgMember row that the
+        // initial snapshot didn't know about. Not a failure, just stale
+        // information; count it as already-migrated.
+        skipped += 1;
+      } else {
+        failed += 1;
+        console.error(`[backfill-org-membership] failed for account ${account.id}:`, err);
+      }
+    }
   }
 
   console.log(
-    `[backfill-org-membership] done. accounts processed: ${processed}, accounts skipped (already migrated): ${skipped}, total accounts: ${accounts.length}`,
+    `[backfill-org-membership] done. accounts processed: ${processed}, accounts skipped (already migrated): ${skipped}, accounts failed: ${failed}, total accounts: ${accounts.length}`,
   );
+
+  if (failed > 0) {
+    process.exitCode = 1;
+  }
 }
 
 // Only auto-run when executed directly (`npm run backfill:org-membership`),
