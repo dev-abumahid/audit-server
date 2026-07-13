@@ -35,6 +35,17 @@ const get_org_members = catchAsync(async (req, res) => {
   });
 });
 
+const update_org_member = catchAsync(async (req, res) => {
+  const result = await organization_services.update_org_member_in_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Organization member updated successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 const resend_invitation = catchAsync(async (req, res) => {
   const result = await organization_services.resend_invitation_from_db(req);
   manageResponse(res, {
@@ -61,6 +72,7 @@ export const organization_controller = {
   invite_member,
   get_pending_invitations,
   get_org_members,
+  update_org_member,
   resend_invitation,
   accept_invitation,
 };

@@ -182,6 +182,61 @@ const get_org_members_from_db = async (req: Request) => {
   return members;
 };
 
+/**
+ * Admin-only. Updates an existing OrgMember's status and/or expiresAt —
+ * the only way to offboard (SUSPENDED) or time-box (expiresAt) a member.
+ * Both fields are hard-denied in resolveCallerOrgContext (org_scope.ts) once
+ * set, but until this endpoint existed nothing in the real API could ever
+ * set them: every OrgMember created via accept_invitation_into_db is always
+ * `status: 'ACTIVE'`, `expiresAt: null`, permanently.
+ */
+const update_org_member_in_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const memberId = req?.params?.id as string;
+  const payload: { status?: 'ACTIVE' | 'SUSPENDED'; expiresAt?: Date | null } = req?.body;
+  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+
+  // Org-scoped lookup: an admin can only update members that belong to their
+  // own org, never by guessing another org's OrgMember id.
+  const member = await prisma.orgMember.findFirst({
+    where: { id: memberId, organizationId: callerMembership.organizationId },
+  });
+  if (!member) {
+    throw new AppError('Organization member not found.', 404);
+  }
+
+  // Block self-service suspension/expiry: resolveCallerOrgContext hard-denies
+  // a SUSPENDED or expired caller with no fallback, so a sole admin doing
+  // this to themselves would be a permanent lockout with no other API path
+  // to undo it.
+  if (member.accountId === user.accountId) {
+    throw new AppError('You cannot change the status of your own membership.', 403);
+  }
+
+  const data: { status?: 'ACTIVE' | 'SUSPENDED'; expiresAt?: Date | null } = {};
+  if (payload.status !== undefined) data.status = payload.status;
+  if (payload.expiresAt !== undefined) data.expiresAt = payload.expiresAt;
+
+  const updated = await prisma.orgMember.update({
+    where: { id: member.id },
+    data,
+    select: {
+      id: true,
+      role: true,
+      status: true,
+      expiresAt: true,
+      account: {
+        select: {
+          email: true,
+          profile: { select: { fullName: true } },
+        },
+      },
+    },
+  });
+
+  return updated;
+};
+
 const resend_invitation_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const invitationId = req?.params?.id as string;
@@ -392,6 +447,7 @@ export const organization_services = {
   invite_member_into_db,
   get_pending_invitations_from_db,
   get_org_members_from_db,
+  update_org_member_in_db,
   resend_invitation_from_db,
   accept_invitation_into_db,
 };
