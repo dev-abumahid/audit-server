@@ -54,6 +54,8 @@ describe('organization service — invite creation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue(null);
     organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
@@ -97,6 +99,8 @@ describe('organization service — invite creation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-existing',
@@ -150,12 +154,56 @@ describe('organization service — invite creation', () => {
       organizationId: ORG_2,
       accountId: 'member-1',
       role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
 
     await expect(
       organization_services.invite_member_into_db(
         makeReq({
           user: { accountId: 'member-1' },
+          body: { email: 'x@test.com', role: 'VIEWER' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SUSPENDED admin — cannot keep managing the org after being suspended', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.invite_member_into_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          body: { email: 'x@test.com', role: 'VIEWER' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an admin whose time-boxed access has expired', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+    });
+
+    await expect(
+      organization_services.invite_member_into_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
           body: { email: 'x@test.com', role: 'VIEWER' },
         }),
       ),
@@ -512,6 +560,8 @@ describe('organization service — list org members', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     const members = [
       {
@@ -550,6 +600,8 @@ describe('organization service — list org members', () => {
       organizationId: ORG_1,
       accountId: 'lead-1',
       role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
 
     await expect(
@@ -568,6 +620,8 @@ describe('organization service — update org member', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgMemberDb.findFirst.mockResolvedValue({
       id: 'member-1',
@@ -611,6 +665,8 @@ describe('organization service — update org member', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgMemberDb.findFirst.mockResolvedValue({
       id: 'member-2',
@@ -649,6 +705,8 @@ describe('organization service — update org member', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgMemberDb.findFirst.mockResolvedValue({
       id: 'member-3',
@@ -687,6 +745,8 @@ describe('organization service — update org member', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgMemberDb.findFirst.mockResolvedValue(null);
 
@@ -708,6 +768,8 @@ describe('organization service — update org member', () => {
       organizationId: ORG_1,
       accountId: 'lead-1',
       role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
 
     await expect(
@@ -728,6 +790,8 @@ describe('organization service — update org member', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgMemberDb.findFirst.mockResolvedValue({
       id: 'member-self',
@@ -760,6 +824,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-7',
@@ -798,6 +864,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-8',
@@ -821,6 +889,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue(null);
 
