@@ -26,7 +26,26 @@ const accept_invitation = z.object({
   fullName: z.string().min(1).optional(),
 });
 
+// Admin-only member management (offboarding / time-boxing access). At least
+// one of the two fields must be present, or the request has nothing to do —
+// a bare `{}` body would otherwise silently succeed and no-op.
+const update_member = z
+  .object({
+    status: z
+      .enum(['ACTIVE', 'SUSPENDED'], {
+        message: 'Status must be either ACTIVE or SUSPENDED.',
+      })
+      .optional(),
+    // Explicit null clears an existing expiry; omitting the field leaves it
+    // untouched (see the optional-vs-null distinction in organization.service.ts).
+    expiresAt: z.coerce.date('expiresAt must be a valid date.').nullable().optional(),
+  })
+  .refine((data) => data.status !== undefined || data.expiresAt !== undefined, {
+    message: 'At least one of status or expiresAt must be provided.',
+  });
+
 export const organization_validations = {
   invite_member,
   accept_invitation,
+  update_member,
 };

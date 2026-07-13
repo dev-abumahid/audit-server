@@ -22,6 +22,15 @@ router.get('/invitations', auth('ORGANIZATION'), organization_controller.get_pen
 // tracing the real invite -> accept -> assign workflow end to end.
 router.get('/members', auth('ORGANIZATION'), organization_controller.get_org_members);
 
+// Admin-only (enforced in the service via requireCallerIsOrgAdmin). The only
+// way to set OrgMember.status/expiresAt at all — see organization.service.ts.
+router.patch(
+  '/members/:id',
+  auth('ORGANIZATION'),
+  RequestValidator(organization_validations.update_member),
+  organization_controller.update_org_member,
+);
+
 router.post('/invite/:id/resend', auth('ORGANIZATION'), organization_controller.resend_invitation);
 
 // Public — the invitation token itself is the credential that gets you to
