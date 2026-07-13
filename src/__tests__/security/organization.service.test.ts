@@ -177,15 +177,18 @@ describe('organization service — invitation acceptance', () => {
       token: 'tok-1',
     });
     accountDb.findUnique.mockResolvedValue(null);
+    organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
 
     const orgMemberCreate = vi.fn().mockResolvedValue({});
     const invitationUpdate = vi.fn().mockResolvedValue({});
     const accountCreate = vi.fn().mockResolvedValue({ id: 'new-acc-1' });
     const profileCreate = vi.fn().mockResolvedValue({});
+    const organizationProfileCreate = vi.fn().mockResolvedValue({});
     mockTransaction.mockImplementation(async (fn) =>
       fn({
         account: { create: accountCreate },
         profile: { create: profileCreate },
+        organizationProfile: { create: organizationProfileCreate },
         orgMember: { create: orgMemberCreate },
         orgInvitation: { update: invitationUpdate },
       }),
@@ -200,6 +203,11 @@ describe('organization service — invitation acceptance', () => {
     expect(accountCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ email: 'brandnew@test.com', isAccountVerified: true }),
+      }),
+    );
+    expect(organizationProfileCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ accountId: 'new-acc-1', organizationName: 'Acme' }),
       }),
     );
     expect(orgMemberCreate).toHaveBeenCalledWith(
@@ -540,6 +548,44 @@ describe('organization service — resend invitation', () => {
       }),
     );
     expect(mockQueueAdd).toHaveBeenCalled();
+  });
+
+  it('rotates the token, not just the expiry — invalidates a previously-leaked link', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+    });
+    orgInvitationDb.findFirst.mockResolvedValue({
+      id: 'inv-7',
+      organizationId: ORG_1,
+      email: 'pending@test.com',
+      status: 'PENDING',
+      token: 'old-token-7',
+    });
+    organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
+    orgInvitationDb.update.mockImplementation(({ data }) =>
+      Promise.resolve({
+        id: 'inv-7',
+        email: 'pending@test.com',
+        role: 'VIEWER',
+        status: 'PENDING',
+        ...data,
+      }),
+    );
+
+    await organization_services.resend_invitation_from_db(
+      makeReq({ user: { accountId: 'admin-1' }, params: { id: 'inv-7' } }),
+    );
+
+    const [updateArg] = orgInvitationDb.update.mock.calls[0];
+    expect(updateArg.data.token).toEqual(expect.any(String));
+    expect(updateArg.data.token).not.toBe('old-token-7');
+    expect(updateArg.data.token.length).toBeGreaterThanOrEqual(32);
+
+    const [, emailPayload] = mockQueueAdd.mock.calls[0];
+    // The link sent out must carry the new token, not the stale one.
+    expect(emailPayload.inviteLink).not.toContain('old-token-7');
   });
 
   it('rejects resending an invitation that is not PENDING', async () => {
