@@ -609,6 +609,53 @@ describe('inspection service — org scoping (ticket #6)', () => {
 
         expect(assignmentDb.deleteMany).not.toHaveBeenCalled();
       });
+
+      it('ADMIN can list assignments for an inspection in their org', async () => {
+        mockMembership('ADMIN');
+        inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+        const rows = [
+          {
+            orgMemberId: 'target-member',
+            inspectionId: 'insp-1',
+            orgMember: {
+              id: 'target-member',
+              role: 'LEAD_AUDITOR',
+              account: { email: 'auditor@test.com', profile: { fullName: 'Auditor One' } },
+            },
+          },
+        ];
+        assignmentDb.findMany.mockResolvedValue(rows);
+
+        const result = await inspection_service.get_inspection_assignments(
+          makeReq({ params: { id: 'insp-1' } }),
+        );
+
+        expect(assignmentDb.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { inspectionId: 'insp-1' } }),
+        );
+        expect(result).toEqual(rows);
+      });
+
+      it('non-ADMIN cannot list assignments', async () => {
+        mockMembership('LEAD_AUDITOR');
+
+        await expect(
+          inspection_service.get_inspection_assignments(makeReq({ params: { id: 'insp-1' } })),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(assignmentDb.findMany).not.toHaveBeenCalled();
+      });
+
+      it('ADMIN cannot list assignments for an inspection outside their org', async () => {
+        mockMembership('ADMIN');
+        inspectionDb.findFirst.mockResolvedValue(null);
+
+        await expect(
+          inspection_service.get_inspection_assignments(makeReq({ params: { id: 'org-b-insp' } })),
+        ).rejects.toMatchObject({ statusCode: 404 });
+
+        expect(assignmentDb.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 });
