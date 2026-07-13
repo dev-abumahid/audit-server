@@ -610,6 +610,91 @@ describe('organization service — list org members', () => {
 
     expect(orgMemberDb.findMany).not.toHaveBeenCalled();
   });
+
+  it('rejects a SUSPENDED admin', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'admin-1' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('organization service — list pending invitations', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('ADMIN lists pending invitations scoped to their own org', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    const invitations = [
+      {
+        id: 'inv-1',
+        email: 'x@test.com',
+        role: 'VIEWER',
+        status: 'PENDING',
+        expiresAt: new Date(),
+      },
+    ];
+    orgInvitationDb.findMany.mockResolvedValue(invitations);
+
+    const result = await organization_services.get_pending_invitations_from_db(
+      makeReq({ user: { accountId: 'admin-1' } }),
+    );
+
+    expect(orgInvitationDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organizationId: ORG_1, status: 'PENDING' } }),
+    );
+    expect(result).toEqual(invitations);
+  });
+
+  it('rejects a non-admin member', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'lead-1',
+      role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_pending_invitations_from_db(
+        makeReq({ user: { accountId: 'lead-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SUSPENDED admin', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_pending_invitations_from_db(
+        makeReq({ user: { accountId: 'admin-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.findMany).not.toHaveBeenCalled();
+  });
 });
 
 describe('organization service — update org member', () => {
@@ -814,6 +899,29 @@ describe('organization service — update org member', () => {
 
     expect(orgMemberDb.update).not.toHaveBeenCalled();
   });
+
+  it('rejects a SUSPENDED admin trying to update another member — the endpoint whose entire job is revoking access must actually revoke it', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'some-other-member' },
+          body: { status: 'ACTIVE' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findFirst).not.toHaveBeenCalled();
+    expect(orgMemberDb.update).not.toHaveBeenCalled();
+  });
 });
 
 describe('organization service — resend invitation', () => {
@@ -899,5 +1007,23 @@ describe('organization service — resend invitation', () => {
         makeReq({ user: { accountId: 'admin-1' }, params: { id: 'inv-other-org' } }),
       ),
     ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('rejects a SUSPENDED admin', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.resend_invitation_from_db(
+        makeReq({ user: { accountId: 'admin-1' }, params: { id: 'inv-7' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.findFirst).not.toHaveBeenCalled();
   });
 });
