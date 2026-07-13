@@ -24,7 +24,13 @@ import { fileURLToPath } from 'node:url';
 import { prisma } from '../app/lib/prisma.js';
 
 export async function backfillOrgMembership() {
+  // Soft-deleted accounts must never get a real Organization/OrgMember row:
+  // the backfill's own idempotency check (skip if orgMembership exists)
+  // means a deleted account processed once is never revisited, so this
+  // would otherwise be a one-way, unrecoverable pollution of the org
+  // tables for accounts that can't even log in to use them.
   const accounts = await prisma.account.findMany({
+    where: { isDeleted: false },
     include: {
       organizationProfile: true,
       orgMembership: true,
