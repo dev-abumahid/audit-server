@@ -587,6 +587,7 @@ describe('inspection service — org scoping (ticket #6)', () => {
       it('ADMIN can unassign a member from an inspection', async () => {
         mockMembership('ADMIN');
         inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+        orgMemberDb.findFirst.mockResolvedValue({ id: 'target-member', organizationId: ORG_ID });
         assignmentDb.deleteMany.mockResolvedValue({ count: 1 });
 
         await inspection_service.unassign_member_from_inspection(
@@ -596,6 +597,20 @@ describe('inspection service — org scoping (ticket #6)', () => {
         expect(assignmentDb.deleteMany).toHaveBeenCalledWith({
           where: { orgMemberId: 'target-member', inspectionId: 'insp-1' },
         });
+      });
+
+      it("rejects unassigning a member id that does not belong to the caller's org", async () => {
+        mockMembership('ADMIN');
+        inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+        orgMemberDb.findFirst.mockResolvedValue(null);
+
+        await expect(
+          inspection_service.unassign_member_from_inspection(
+            makeReq({ params: { id: 'insp-1', orgMemberId: 'someone-elses-member' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 404 });
+
+        expect(assignmentDb.deleteMany).not.toHaveBeenCalled();
       });
 
       it('non-ADMIN cannot unassign anyone', async () => {

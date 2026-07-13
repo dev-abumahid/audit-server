@@ -7,6 +7,7 @@ import { prisma } from '../../lib/prisma.js';
 import { orgInviteEmailQueue } from '../../queues/email/org-invite/org-invite.email.queue.js';
 import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
+import { isMembershipActive } from '../../utils/org_scope.js';
 
 // Named constant, not a magic number — invitations are valid for this long
 // after being (re)sent.
@@ -47,13 +48,16 @@ const runAcceptTransactionOrConflict = async <T>(
  * handled) is rejected the same way: they don't belong to an org, so there's
  * nothing for them to invite into.
  *
- * Also enforces status/expiresAt — mirrors resolveCallerOrgContext's guard
- * in org_scope.ts. Without this, a SUSPENDED (or time-boxed-expired) admin
- * could keep calling every endpoint in this file, including
- * update_org_member_status_into_db, letting them re-suspend whoever
- * suspended them or suspend every other admin in the org — the one
- * endpoint whose entire purpose is revoking admin access wouldn't actually
- * revoke it. Found by independent review of the status/expiresAt endpoint.
+ * Also enforces status/expiresAt via the shared isMembershipActive predicate
+ * (org_scope.ts) — the same one resolveCallerOrgContext uses. Without this,
+ * a SUSPENDED (or time-boxed-expired) admin could keep calling every
+ * endpoint in this file, including update_org_member_in_db, letting them
+ * re-suspend whoever suspended them or suspend every other admin in the
+ * org — the one endpoint whose entire purpose is revoking admin access
+ * wouldn't actually revoke it. Found by independent review, and the check
+ * was originally duplicated here rather than shared — which is exactly how
+ * it almost drifted out of sync with org_scope.ts's version. Sharing the
+ * predicate (not just the intent) is the actual fix for that class of bug.
  */
 const requireCallerIsOrgAdmin = async (accountId: string) => {
   const membership = await prisma.orgMember.findUnique({
@@ -62,8 +66,7 @@ const requireCallerIsOrgAdmin = async (accountId: string) => {
   if (!membership) {
     throw new AppError('You are not a member of any organization.', 403);
   }
-  const isExpired = !!membership.expiresAt && membership.expiresAt.getTime() < Date.now();
-  if (membership.status !== 'ACTIVE' || isExpired) {
+  if (!isMembershipActive(membership)) {
     throw new AppError('Your access to this organization is no longer active.', 403);
   }
   if (membership.role !== 'ADMIN') {
@@ -225,6 +228,34 @@ const update_org_member_in_db = async (req: Request) => {
     throw new AppError('You cannot change the status of your own membership.', 403);
   }
 
+  // Same lockout risk, one step removed: the self-check above only stops an
+  // admin from suspending themselves, not from suspending every OTHER admin
+  // down to zero. If that admin then loses access too (leaves, gets
+  // compromised, whatever), the org has no active admin left and — since
+  // this endpoint itself requires an ACTIVE admin caller — no API path to
+  // ever reactivate anyone. Found by independent review.
+  const isDeactivating =
+    payload.status === 'SUSPENDED' ||
+    (payload.expiresAt !== undefined &&
+      payload.expiresAt !== null &&
+      payload.expiresAt.getTime() <= Date.now());
+  if (member.role === 'ADMIN' && member.status === 'ACTIVE' && isDeactivating) {
+    const otherActiveAdmins = await prisma.orgMember.count({
+      where: {
+        organizationId: callerMembership.organizationId,
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        id: { not: member.id },
+      },
+    });
+    if (otherActiveAdmins === 0) {
+      throw new AppError(
+        'Cannot deactivate the last active admin — the organization would have no one left to manage it.',
+        409,
+      );
+    }
+  }
+
   const data: { status?: 'ACTIVE' | 'SUSPENDED'; expiresAt?: Date | null } = {};
   if (payload.status !== undefined) data.status = payload.status;
   if (payload.expiresAt !== undefined) data.expiresAt = payload.expiresAt;
@@ -346,8 +377,16 @@ const accept_invitation_into_db = async (req: Request) => {
     throw new AppError('This invitation has expired.', 400);
   }
 
-  const existingAccount = await prisma.account.findUnique({
-    where: { email: invitation.email },
+  // Case-insensitive: findUnique can't do mode: 'insensitive' on a unique
+  // field, so this uses findFirst instead. Without this, inviting
+  // 'Jane@Company.com' when Jane actually signed up as 'jane@company.com'
+  // (no email normalization anywhere in the signup/invite pipeline) would
+  // miss the existing account and fall into the brand-new-account branch,
+  // creating a second Account with the same email in different case and
+  // bypassing the one-account-one-org check below. Found by independent
+  // review.
+  const existingAccount = await prisma.account.findFirst({
+    where: { email: { equals: invitation.email, mode: 'insensitive' } },
     include: { orgMembership: true },
   });
 

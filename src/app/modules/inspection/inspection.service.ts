@@ -455,6 +455,7 @@ const unassign_member_from_inspection = async (req: Request) => {
   if (ctx.role !== 'ADMIN') {
     throw new AppError('Only organization admins can unassign inspections.', 403);
   }
+  const organizationId = await requireCallerOrganizationId(ctx);
 
   const { id: inspectionId, orgMemberId } = req.params as {
     id: string;
@@ -465,6 +466,17 @@ const unassign_member_from_inspection = async (req: Request) => {
     where: { id: inspectionId, orgAccountId: ctx.organizationId },
   });
   if (!inspection) throw new AppError('Inspection not found', 404);
+
+  // Org-scoped: mirrors assign_member_to_inspection's check on the way in.
+  // Assignment rows can't cross orgs today (assign already enforces this),
+  // so this is currently unreachable in practice, but without it an admin
+  // could delete-by-guessed-id across orgs the moment any other code path
+  // (a future bulk-assign, a migration, a bug) ever created a cross-org row.
+  // Found by independent review.
+  const member = await prisma.orgMember.findFirst({
+    where: { id: orgMemberId, organizationId },
+  });
+  if (!member) throw new AppError('Organization member not found', 404);
 
   await prisma.inspectionAssignment.deleteMany({ where: { orgMemberId, inspectionId } });
 
