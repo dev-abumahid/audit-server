@@ -13,6 +13,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findFirst: vi.fn(),
       update: vi.fn(),
     },
+    orgMember: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -21,9 +24,16 @@ import { recommendation_service } from '../../app/modules/recommendation/recomme
 
 const recDb = prisma.recommendation as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const resultDb = prisma.recommendationResult as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('recommendation service — org scoping (ticket #6)', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
+    // caller's own accountId), same as every pre-org-scoping-migration test
+    // in this file expects.
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
 
   describe('get_all_recommendation_from_db', () => {
     it('filters by caller org', async () => {

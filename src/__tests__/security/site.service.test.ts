@@ -12,6 +12,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    orgMember: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -19,9 +22,16 @@ import { prisma } from '../../app/lib/prisma.js';
 import { site_service } from '../../app/modules/site/site.service.js';
 
 const db = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('site service — org scoping (ticket #6)', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
+    // caller's own accountId), same as every pre-org-scoping-migration test
+    // in this file expects.
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
 
   describe('get_all_site_from_db', () => {
     it('filters by caller org', async () => {
