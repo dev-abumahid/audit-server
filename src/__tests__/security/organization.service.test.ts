@@ -980,6 +980,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-7',
