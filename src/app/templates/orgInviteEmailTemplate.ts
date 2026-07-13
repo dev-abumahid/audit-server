@@ -1,6 +1,14 @@
 import { TOrgInviteEmailQueue } from '../queues/email/org-invite/org-invite.email.queue.js';
+import { escapeHtml } from '../utils/escape_html.js';
 
 export const orgInviteEmailTemplate = (payload: TOrgInviteEmailQueue) => {
+  // organizationName is free-text, set by whoever signed up (every new
+  // account becomes an org's ADMIN, see account.service.ts) — must be
+  // escaped before landing in an HTML email sent to real invitees.
+  // inviteLink is server-generated (crypto.randomBytes token + configured
+  // front-end URL, see organization.service.ts's buildInviteLink), never
+  // user input, so it doesn't need escaping.
+  const organizationName = escapeHtml(payload.organizationName);
   return `
     <!DOCTYPE html>
 <html lang="en">
@@ -91,7 +99,7 @@ export const orgInviteEmailTemplate = (payload: TOrgInviteEmailQueue) => {
         <div class="content">
             <p class="title">Hello,</p>
             <p class="message">
-                You've been invited to join <strong>${payload.organizationName}</strong>. Click the button below to accept your invitation.
+                You've been invited to join <strong>${organizationName}</strong>. Click the button below to accept your invitation.
             </p>
             <a href="${payload.inviteLink}" class="btn">
                 Accept Invitation
