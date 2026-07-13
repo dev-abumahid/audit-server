@@ -46,6 +46,14 @@ const runAcceptTransactionOrConflict = async <T>(
  * row at all (shouldn't happen post-slice-1-backfill, but defensively
  * handled) is rejected the same way: they don't belong to an org, so there's
  * nothing for them to invite into.
+ *
+ * Also enforces status/expiresAt — mirrors resolveCallerOrgContext's guard
+ * in org_scope.ts. Without this, a SUSPENDED (or time-boxed-expired) admin
+ * could keep calling every endpoint in this file, including
+ * update_org_member_status_into_db, letting them re-suspend whoever
+ * suspended them or suspend every other admin in the org — the one
+ * endpoint whose entire purpose is revoking admin access wouldn't actually
+ * revoke it. Found by independent review of the status/expiresAt endpoint.
  */
 const requireCallerIsOrgAdmin = async (accountId: string) => {
   const membership = await prisma.orgMember.findUnique({
@@ -53,6 +61,10 @@ const requireCallerIsOrgAdmin = async (accountId: string) => {
   });
   if (!membership) {
     throw new AppError('You are not a member of any organization.', 403);
+  }
+  const isExpired = !!membership.expiresAt && membership.expiresAt.getTime() < Date.now();
+  if (membership.status !== 'ACTIVE' || isExpired) {
+    throw new AppError('Your access to this organization is no longer active.', 403);
   }
   if (membership.role !== 'ADMIN') {
     throw new AppError('Only organization admins can manage invitations.', 403);
