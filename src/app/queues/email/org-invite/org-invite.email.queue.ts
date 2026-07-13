@@ -11,5 +11,9 @@ export const orgInviteEmailQueue = new Queue<TOrgInviteEmailQueue, void, string>
   'org-invite-email-queue',
   {
     connection: redisConnection as any,
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+    },
   },
 );
