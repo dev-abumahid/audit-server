@@ -6,6 +6,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     orgMember: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
       create: vi.fn(),
     },
     orgInvitation: {
@@ -498,6 +499,62 @@ describe('organization service — invitation acceptance', () => {
     ).rejects.toMatchObject({ statusCode: 409 });
 
     expect(mockTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('organization service — list org members', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('ADMIN lists members scoped to their own org', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+    });
+    const members = [
+      {
+        id: 'member-1',
+        role: 'LEAD_AUDITOR',
+        status: 'ACTIVE',
+        expiresAt: null,
+        createdAt: new Date(),
+        account: { email: 'auditor@test.com', profile: { fullName: 'Auditor One' } },
+      },
+    ];
+    orgMemberDb.findMany.mockResolvedValue(members);
+
+    const result = await organization_services.get_org_members_from_db(
+      makeReq({ user: { accountId: 'admin-1' } }),
+    );
+
+    expect(orgMemberDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organizationId: ORG_1 } }),
+    );
+    expect(result).toEqual(members);
+  });
+
+  it('rejects a caller with no org membership at all', async () => {
+    orgMemberDb.findUnique.mockResolvedValue(null);
+
+    await expect(
+      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'nobody' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-admin member', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'lead-1',
+      role: 'LEAD_AUDITOR',
+    });
+
+    await expect(
+      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'lead-1' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
   });
 });
 

@@ -16,6 +16,12 @@ router.post(
 
 router.get('/invitations', auth('ORGANIZATION'), organization_controller.get_pending_invitations);
 
+// Admin-only (enforced in the service via requireCallerIsOrgAdmin). Without
+// this, an admin has no way to discover the OrgMember.id that
+// POST /inspection/:id/assignments requires — found by independent review
+// tracing the real invite -> accept -> assign workflow end to end.
+router.get('/members', auth('ORGANIZATION'), organization_controller.get_org_members);
+
 router.post('/invite/:id/resend', auth('ORGANIZATION'), organization_controller.resend_invitation);
 
 // Public — the invitation token itself is the credential that gets you to
