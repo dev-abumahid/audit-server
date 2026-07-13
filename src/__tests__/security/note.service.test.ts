@@ -14,6 +14,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
     inspection: {
       findFirst: vi.fn(),
     },
+    orgMember: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -22,9 +25,16 @@ import { note_service } from '../../app/modules/note/note.service.js';
 
 const db = prisma.note as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('note service — org scoping', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
+    // caller's own accountId), same as every pre-org-scoping-migration test
+    // in this file expects.
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
 
   describe('get_all_note_from_db', () => {
     it('filters findMany by caller org', async () => {

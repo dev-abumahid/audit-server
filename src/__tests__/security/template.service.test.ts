@@ -10,6 +10,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       create: vi.fn(),
       deleteMany: vi.fn(),
     },
+    orgMember: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -21,9 +24,16 @@ const templateAccessDb = prisma.templateAccess as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('template service — access member ownership scoping (ticket #31)', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
+    // caller's own accountId), same as every pre-org-scoping-migration test
+    // in this file expects.
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
 
   describe('add_template_access_member_into_db', () => {
     it('verifies template ownership before granting access', async () => {
@@ -83,7 +93,13 @@ describe('template service — access member ownership scoping (ticket #31)', ()
 });
 
 describe('template service — access invitation payload field name (ticket #57)', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
+    // caller's own accountId), same as every pre-org-scoping-migration test
+    // in this file expects.
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
 
   it('passes the userId from the request body through to templateAccess.create, not undefined', async () => {
     templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
