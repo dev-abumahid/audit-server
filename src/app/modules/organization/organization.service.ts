@@ -266,10 +266,18 @@ const resend_invitation_from_db = async (req: Request) => {
     throw new AppError('Only pending invitations can be resent.', 400);
   }
 
+  // Rotate the token, not just the expiry — this is what actually
+  // invalidates a stale/leaked previous invite link, matching the same
+  // "extend + re-send" behavior invite_member_into_db's refresh branch
+  // already does, and what this function's own callers document expecting
+  // (see the design note on invite_member_into_db). Previously this only
+  // extended expiresAt, so a resend left the OLD link (and OLD token) still
+  // fully valid — the exact opposite of the documented intent.
+  const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + INVITATION_EXPIRY_MS);
   const updated = await prisma.orgInvitation.update({
     where: { id: invitation.id },
-    data: { expiresAt },
+    data: { token, expiresAt },
   });
 
   const organization = await prisma.organization.findUniqueOrThrow({
@@ -412,6 +420,18 @@ const accept_invitation_into_db = async (req: Request) => {
 
   const hashPassword = bcrypt.hashSync(payload.password, 10);
 
+  // login_user_into_db reads Account.organizationProfile.organizationName
+  // for every login response — without creating this row, an invited
+  // member's organizationName would come back undefined on every login
+  // after acceptance, unlike a self-signed-up account (account.service.ts
+  // creates this row at signup time). Reuse the real org's name so an
+  // invited teammate's login response matches what their org is actually
+  // called, not a placeholder.
+  const organization = await prisma.organization.findUniqueOrThrow({
+    where: { id: invitation.organizationId },
+    select: { name: true },
+  });
+
   const newAccountId = await runAcceptTransactionOrConflict(async (tx) => {
     const account = await tx.account.create({
       data: {
@@ -426,6 +446,13 @@ const accept_invitation_into_db = async (req: Request) => {
       data: {
         accountId: account.id,
         fullName,
+      },
+    });
+
+    await tx.organizationProfile.create({
+      data: {
+        accountId: account.id,
+        organizationName: organization.name,
       },
     });
 
