@@ -153,6 +153,16 @@ describe('backfill-org-membership script (issue #55 slice 1)', () => {
     });
   });
 
+  it('excludes soft-deleted accounts from the query, so they never get an Organization row', async () => {
+    accountDb.findMany.mockResolvedValue([]);
+
+    await backfillOrgMembership();
+
+    expect(accountDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { isDeleted: false } }),
+    );
+  });
+
   it('wraps each account in its own prisma.$transaction call for per-account atomicity', async () => {
     // NOTE: with the mocked prisma client used across this repo's test suite
     // (see src/__tests__/security/account.service.test.ts), $transaction is
