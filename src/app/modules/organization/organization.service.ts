@@ -148,6 +148,40 @@ const get_pending_invitations_from_db = async (req: Request) => {
   return invitations;
 };
 
+/**
+ * Admin-only. Lists the caller's org members with their OrgMember.id —
+ * without this, there is no way for an admin to ever discover the
+ * orgMemberId that inspection.service.ts's assign_member_to_inspection
+ * requires, making that endpoint unreachable through the actual product
+ * surface despite being correctly implemented and scoped. Found by
+ * independent review tracing the real admin workflow (invite -> accept ->
+ * assign) end to end rather than testing each endpoint in isolation.
+ */
+const get_org_members_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+
+  const members = await prisma.orgMember.findMany({
+    where: { organizationId: callerMembership.organizationId },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      id: true,
+      role: true,
+      status: true,
+      expiresAt: true,
+      createdAt: true,
+      account: {
+        select: {
+          email: true,
+          profile: { select: { fullName: true } },
+        },
+      },
+    },
+  });
+
+  return members;
+};
+
 const resend_invitation_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const invitationId = req?.params?.id as string;
@@ -357,6 +391,7 @@ const accept_invitation_into_db = async (req: Request) => {
 export const organization_services = {
   invite_member_into_db,
   get_pending_invitations_from_db,
+  get_org_members_from_db,
   resend_invitation_from_db,
   accept_invitation_into_db,
 };
