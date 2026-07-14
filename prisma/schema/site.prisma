@@ -19,4 +19,6 @@ model Site {
     inspections     Inspection[]
     recommendations Recommendation[]
     action          Action[]
+
+    @@index([org_account_id])
 }

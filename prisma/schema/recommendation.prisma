@@ -20,6 +20,8 @@ model Recommendation {
     inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
     risk       Risk?      @relation(fields: [riskId], references: [id], onDelete: Cascade)
     site       Site?      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+    @@index([orgAccountId])
 }
 
 model RecommendationResult {

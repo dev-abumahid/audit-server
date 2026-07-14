@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../app/lib/prisma.js', () => ({
@@ -183,6 +184,58 @@ describe('backfill-org-membership script (issue #55 slice 1)', () => {
     await backfillOrgMembership();
 
     expect(mockTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues processing remaining accounts after one fails, instead of aborting the whole run', async () => {
+    accountDb.findMany.mockResolvedValue([
+      { id: 'acc-bad', email: 'bad@acme.com', organizationProfile: null, orgMembership: null },
+      { id: 'acc-good', email: 'good@acme.com', organizationProfile: null, orgMembership: null },
+    ]);
+    mockTransaction
+      .mockImplementationOnce(async () => {
+        throw new Error('connection reset');
+      })
+      .mockImplementationOnce(async (fn: (tx: unknown) => unknown) =>
+        fn({ organization: organizationDb, orgMember: orgMemberDb }),
+      );
+    organizationDb.create.mockResolvedValue({ id: 'org-good' });
+    orgMemberDb.create.mockResolvedValue({ id: 'member-good' });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await backfillOrgMembership();
+
+    // The second (good) account still got processed despite the first
+    // account's transaction throwing.
+    expect(mockTransaction).toHaveBeenCalledTimes(2);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('acc-bad'), expect.any(Error));
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = 0;
+    errorSpy.mockRestore();
+  });
+
+  it('treats a P2002 (concurrent signup raced this account) as skipped, not failed', async () => {
+    accountDb.findMany.mockResolvedValue([
+      { id: 'acc-raced', email: 'raced@acme.com', organizationProfile: null, orgMembership: null },
+    ]);
+    mockTransaction.mockImplementation(async () => {
+      throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      });
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await backfillOrgMembership();
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('skipped (already migrated): 1'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('failed: 0'));
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(process.exitCode).not.toBe(1);
+
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   it('logs a summary count of accounts processed vs skipped', async () => {

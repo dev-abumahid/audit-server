@@ -14,6 +14,15 @@ vi.mock('../../app/lib/prisma.js', () => ({
     inspection: {
       findFirst: vi.fn(),
     },
+    orgMember: {
+      findUnique: vi.fn(),
+    },
+    organization: {
+      findUnique: vi.fn(),
+    },
+    inspectionAssignment: {
+      findMany: vi.fn(),
+    },
   },
 }));
 
@@ -22,9 +31,106 @@ import { note_service } from '../../app/modules/note/note.service.js';
 
 const db = prisma.note as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const assignmentDb = prisma.inspectionAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+
+const ANCHOR = ORG_A;
+const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
+const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
+
+// Sets up a real (non-fallback) OrgMember row so role gating is actually
+// exercised, instead of the ADMIN-of-self backward-compat fallback every
+// other test in this file relies on.
+const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+  orgMemberDb.findUnique.mockResolvedValue({
+    id: MEMBER_ID,
+    organizationId: ORG_ID,
+    accountId: ORG_A,
+    role,
+    status: 'ACTIVE',
+    expiresAt: null,
+  });
+  organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+};
 
 describe('note service — org scoping', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
+    // caller's own accountId), same as every pre-org-scoping-migration test
+    // in this file expects.
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  describe('write-path role scoping (issue #55 slice 3)', () => {
+    it('VIEWER cannot create a note, even on an inspection in their org', async () => {
+      mockMembership('VIEWER');
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+
+      await expect(
+        note_service.save_raw_note_into_db(
+          makeReq({ body: { inspectionId: 'insp-1', title: 'T', extracted_text: 'X' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER cannot create a note', async () => {
+      mockMembership('LIGHT_USER');
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+
+      await expect(
+        note_service.save_raw_note_into_db(
+          makeReq({ body: { inspectionId: 'insp-1', title: 'T', extracted_text: 'X' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR not assigned to the inspection cannot update its note', async () => {
+      mockMembership('LEAD_AUDITOR');
+      assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-other' }]);
+      db.findFirst.mockResolvedValue({ id: 'n1', orgAccountId: ANCHOR, inspectionId: 'insp-1' });
+
+      await expect(
+        note_service.update_note_into_db(
+          makeReq({ params: { id: 'n1' }, body: { title: 'hack' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('VIEWER cannot delete a note', async () => {
+      mockMembership('VIEWER');
+      db.findFirst.mockResolvedValue({ id: 'n1', orgAccountId: ANCHOR, inspectionId: 'insp-1' });
+
+      await expect(
+        note_service.delete_note_from_db(makeReq({ params: { id: 'n1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can still create a note (role gate does not over-block)', async () => {
+      mockMembership('ADMIN');
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+      db.findFirst.mockResolvedValue(null);
+      db.create.mockResolvedValue({});
+
+      await note_service.save_raw_note_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'T', extracted_text: 'X' } }),
+      );
+
+      expect(db.create).toHaveBeenCalled();
+    });
+  });
 
   describe('get_all_note_from_db', () => {
     it('filters findMany by caller org', async () => {

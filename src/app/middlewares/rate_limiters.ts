@@ -1,4 +1,4 @@
-import { rateLimit } from 'express-rate-limit';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { RedisStore, type RedisReply } from 'rate-limit-redis';
 import { redisConnection } from '../queues/connection.js';
 
@@ -31,5 +31,18 @@ export const orgInviteAcceptLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   store: makeRedisStore('rl:org:invite-accept:'),
+  // Keyed by the invitation token, not IP: accept_invitation_into_db's
+  // existing-account branch checks `password` against that one account's
+  // stored hash, so this endpoint is a password-verification oracle
+  // against a *specific* target identified by the token in the request
+  // body. An IP-keyed limit gives an attacker with multiple source IPs
+  // (proxy pool, botnet) an effectively unbounded budget against one
+  // target — each IP gets its own fresh window. Falling back to IP (via
+  // the IPv6-safe helper) only for the rare malformed-body request that
+  // has no token to key by, so those still get *a* limit.
+  keyGenerator: (req) =>
+    typeof req.body?.token === 'string' && req.body.token
+      ? `token:${req.body.token}`
+      : ipKeyGenerator(req.ip ?? ''),
   message: { success: false, message: 'Too many attempts. Please try again later.' },
 });

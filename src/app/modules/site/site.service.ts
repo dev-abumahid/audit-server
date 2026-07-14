@@ -3,17 +3,19 @@ import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
+import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
 
 const get_all_site_from_db = async (req: Request) => {
   const { searchTerm, page = '1', limit = '10' } = req.query;
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
 
   const pageNumber = parseInt(page as string, 10) || 1;
   const limitNumber = parseInt(limit as string, 10) || 10;
   const skip = (pageNumber - 1) * limitNumber;
 
   const whereCondition: Prisma.SiteWhereInput = {
-    org_account_id: user.accountId,
+    org_account_id: ctx.organizationId,
     ...(searchTerm && {
       OR: [
         {
@@ -69,32 +71,52 @@ const get_all_site_from_db = async (req: Request) => {
 
 const get_single_site_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
   const id = req.params?.id as string;
-  const result = await prisma.site.findUnique({ where: { id, org_account_id: user.accountId } });
+  const result = await prisma.site.findUnique({
+    where: { id, org_account_id: ctx.organizationId },
+  });
   return result;
 };
 
 const create_site_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const payload = req.body;
-  payload.org_account_id = user.accountId;
+  payload.org_account_id = ctx.organizationId;
   const result = await prisma.site.create({ data: req.body });
   return result;
 };
 
 const update_site_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const id = req.params.id as string;
-  const existing = await prisma.site.findFirst({ where: { id, org_account_id: user.accountId } });
+  const existing = await prisma.site.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
   if (!existing) throw new AppError('Site not found', 404);
-  const result = await prisma.site.update({ where: { id }, data: req.body });
+  // Never trust org_account_id from the request body on an update — an
+  // authorized (ADMIN/LEAD_AUDITOR) caller could otherwise reassign a Site
+  // to a different org's anchor account id, a cross-tenant integrity issue
+  // even though ownership of the *existing* row was verified above. Found
+  // by independent review.
+  const { org_account_id: _ignored, ...safeBody } = req.body;
+  const result = await prisma.site.update({
+    where: { id },
+    data: { ...safeBody, org_account_id: ctx.organizationId },
+  });
   return result;
 };
 
 const delete_site_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const id = req.params.id as string;
-  const result = await prisma.site.delete({ where: { id, org_account_id: user.accountId } });
+  const result = await prisma.site.delete({ where: { id, org_account_id: ctx.organizationId } });
   return result;
 };
 

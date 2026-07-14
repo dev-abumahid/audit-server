@@ -46,6 +46,7 @@ model Organization {
     members         OrgMember[]
     externalMembers ExternalOrgMember[]
     invitations     OrgInvitation[]
+    auditLog        OrgAuditLog[]
 }
 
 model OrgMember {
@@ -80,14 +81,25 @@ model InspectionAssignment {
     inspectionId String
     // accountId of whoever made the assignment.
     assignedById String
+    // Soft-revoke instead of deleting the row: an auditor investigating a
+    // disputed finding needs to be able to answer "who was assigned to this
+    // inspection at the time, and who removed them, and when" — a hard
+    // delete on unassign destroys that history. null = still assigned.
+    revokedAt   DateTime?
+    revokedById String?
 
     createdAt DateTime @default(now())
 
     orgMember  OrgMember  @relation(fields: [orgMemberId], references: [id], onDelete: Cascade)
     inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
 
-    @@unique([orgMemberId, inspectionId])
+    // Only one *active* (non-revoked) assignment per member/inspection pair —
+    // a revoked one doesn't block re-assigning the same member later, so this
+    // can't be a plain @@unique on the base columns. Enforced via a partial
+    // unique index added by hand in the migration (see migration.sql);
+    // Prisma's schema DSL has no WHERE-clause syntax for @@unique.
     @@index([inspectionId])
+    @@index([orgMemberId])
 }
 
 model FindingAssignment {
@@ -159,10 +171,59 @@ model ExternalOrgMemberVerificationCode {
     codeHash   String
     expiresAt  DateTime
     consumedAt DateTime?
+    // Added ahead of slice 5's verify endpoint so the attempt-counter/lockout
+    // requirement can't be missed when that endpoint gets built: a short
+    // numeric OTP with no per-row attempt cap has no structural brute-force
+    // resistance beyond whatever rate limiter happens to be wired to the
+    // route. failedAttempts increments per wrong guess; lockedUntil is set
+    // once a threshold is hit, independent of IP-based rate limiting.
+    failedAttempts Int       @default(0)
+    lockedUntil    DateTime?
 
     createdAt DateTime @default(now())
 
     externalOrgMember ExternalOrgMember @relation(fields: [externalOrgMemberId], references: [id], onDelete: Cascade)
 
     @@index([externalOrgMemberId])
+}
+
+// Durable, append-only record of org-membership lifecycle events. OrgMember/
+// OrgInvitation only ever hold current-state columns (status, expiresAt) —
+// without this table, "who suspended member X, and when, and who invited
+// them in the first place beyond invitedById" is unanswerable once a status
+// change overwrites the previous one. Compliance/audit product, so this
+// matters beyond debugging convenience.
+enum OrgAuditAction {
+    MEMBER_INVITED
+    MEMBER_INVITE_RESENT
+    MEMBER_INVITE_ACCEPTED
+    MEMBER_STATUS_CHANGED
+    MEMBER_EXPIRY_CHANGED
+    MEMBER_REMOVED
+    INSPECTION_ASSIGNMENT_CREATED
+    INSPECTION_ASSIGNMENT_REVOKED
+}
+
+model OrgAuditLog {
+    id             String         @id @default(uuid())
+    organizationId String
+    action         OrgAuditAction
+    // accountId of whoever performed the action. Null for actions with no
+    // authenticated actor (e.g. a member accepting their own invitation is
+    // captured via the subject fields below, not actorAccountId).
+    actorAccountId String?
+    // The OrgMember/OrgInvitation this event is about, where applicable.
+    subjectOrgMemberId String?
+    subjectEmail       String?
+    // Freeform before/after snapshot for status/expiresAt-style changes —
+    // deliberately loose (Json, not typed columns) since the set of fields
+    // worth recording differs per action type.
+    metadata Json?
+
+    createdAt DateTime @default(now())
+
+    organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+    @@index([organizationId, createdAt])
+    @@index([subjectOrgMemberId])
 }

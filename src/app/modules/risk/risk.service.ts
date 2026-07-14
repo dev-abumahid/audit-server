@@ -2,6 +2,7 @@ import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
+import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
 
 const get_all_risk_from_db = async (req: Request) => {
   const {
@@ -13,12 +14,13 @@ const get_all_risk_from_db = async (req: Request) => {
   } = req.query as Record<string, string>;
 
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
   const pageNumber = parseInt(page) || 1;
   const limitNumber = parseInt(limit) || 10;
   const skip = (pageNumber - 1) * limitNumber;
 
   const whereCondition: any = {
-    org_account_id: user.accountId,
+    org_account_id: ctx.organizationId,
   };
 
   // search by name
@@ -75,33 +77,50 @@ const get_all_risk_from_db = async (req: Request) => {
 
 const get_single_risk_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
   const { id } = req.params as Record<string, string>;
-  const result = await prisma.risk.findFirst({ where: { id, org_account_id: user.accountId } });
+  const result = await prisma.risk.findFirst({ where: { id, org_account_id: ctx.organizationId } });
   if (!result) throw new AppError('Risk not found', 404);
   return result;
 };
 
 const create_risk_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const payload = req.body;
-  payload.org_account_id = user.accountId;
+  payload.org_account_id = ctx.organizationId;
   const result = await prisma.risk.create({ data: payload });
   return result;
 };
 
 const update_risk_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const { id } = req.params as Record<string, string>;
-  const existing = await prisma.risk.findFirst({ where: { id, org_account_id: user.accountId } });
+  const existing = await prisma.risk.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
   if (!existing) throw new AppError('Risk not found', 404);
-  const result = await prisma.risk.update({ where: { id }, data: req.body });
+  // Never trust org_account_id from the request body on an update — see the
+  // identical fix in site.service.ts's update_site_into_db for why.
+  const { org_account_id: _ignored, ...safeBody } = req.body;
+  const result = await prisma.risk.update({
+    where: { id },
+    data: { ...safeBody, org_account_id: ctx.organizationId },
+  });
   return result;
 };
 
 const delete_risk_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const { id } = req.params as Record<string, string>;
-  const existing = await prisma.risk.findFirst({ where: { id, org_account_id: user.accountId } });
+  const existing = await prisma.risk.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
   if (!existing) throw new AppError('Risk not found', 404);
   const result = await prisma.risk.delete({ where: { id } });
   return result;

@@ -10,9 +10,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     template: { create: vi.fn() },
     recommendation: { create: vi.fn(), findFirst: vi.fn() },
-    pineconeDocument: { create: vi.fn() },
+    pineconeDocument: { create: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
     risk: { findUnique: vi.fn() },
     inspection: { findFirst: vi.fn() },
+    orgMember: { findUnique: vi.fn() },
+    organization: { findUnique: vi.fn() },
   },
 }));
 
@@ -22,6 +24,24 @@ import { ai_service } from '../../app/modules/ai/ai.service.js';
 const db = prisma as unknown as Record<string, Record<string, ReturnType<typeof vi.fn>>>;
 const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const templateDb = prisma.template as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+const ANCHOR = ORG_A;
+const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
+const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
+
+const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+  orgMemberDb.findUnique.mockResolvedValue({
+    id: MEMBER_ID,
+    organizationId: ORG_ID,
+    accountId: ORG_A,
+    role,
+    status: 'ACTIVE',
+    expiresAt: null,
+  });
+  organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+};
 
 function mockAiResponse(ok: boolean, status = 502) {
   return { ok, status, json: vi.fn() } as unknown as Response;
@@ -31,6 +51,10 @@ describe('ai service — AI response error handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal('fetch', vi.fn());
+    // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
+    // caller's own accountId), same as every other org-anchor-scoped
+    // service's test file in this repo.
+    orgMemberDb.findUnique.mockResolvedValue(null);
   });
 
   describe('generate_template_with_prompt_with_ai', () => {
@@ -123,7 +147,10 @@ describe('ai service — AI response error handling', () => {
 });
 
 describe('ai service — org scoping (ticket #24)', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
 
   describe('generate_template_with_risk_with_ai', () => {
     it('scopes the risk lookup by org', async () => {
@@ -147,5 +174,80 @@ describe('ai service — org scoping (ticket #24)', () => {
 
       expect(templateDb.create).not.toHaveBeenCalled();
     });
+
+    it('an invited (non-anchor) member resolves the risk lookup to the org anchor id, not their own accountId', async () => {
+      mockMembership('LEAD_AUDITOR');
+      riskDb.findUnique.mockResolvedValue({ id: 'risk-1', name: 'Fire risk' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse(false, 502));
+
+      await expect(
+        ai_service.generate_template_with_risk_with_ai(makeReq({ body: { riskId: 'risk-1' } })),
+      ).rejects.toMatchObject({ statusCode: 502 });
+
+      expect(riskDb.findUnique).toHaveBeenCalledWith({
+        where: { id: 'risk-1', org_account_id: ANCHOR },
+      });
+    });
+  });
+});
+
+describe('ai service — Pinecone write-path role scoping (issue #55 slice 3)', () => {
+  const pineconeDb = prisma.pineconeDocument as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  it('VIEWER cannot upload a PDF into Pinecone', async () => {
+    mockMembership('VIEWER');
+
+    await expect(
+      ai_service.upload_pdf_into_pinecone_via_ai(
+        makeReq({
+          file: {
+            path: '/tmp/does-not-matter',
+            mimetype: 'application/pdf',
+            originalname: 'a.pdf',
+            size: 100,
+          },
+        } as never),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(pineconeDb.create).not.toHaveBeenCalled();
+  });
+
+  it('LIGHT_USER cannot delete a Pinecone document', async () => {
+    mockMembership('LIGHT_USER');
+
+    await expect(
+      ai_service.delete_pinecone_data_from_database(makeReq({ query: { fileName: 'a.pdf' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(pineconeDb.deleteMany).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN can still upload a PDF into Pinecone (role gate does not over-block)', async () => {
+    mockMembership('ADMIN');
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ file_id: 'f1' }),
+    });
+    pineconeDb.create.mockResolvedValue({});
+
+    await ai_service.upload_pdf_into_pinecone_via_ai(
+      makeReq({
+        file: {
+          path: '/tmp/does-not-matter',
+          mimetype: 'application/pdf',
+          originalname: 'a.pdf',
+          size: 100,
+        },
+      } as never),
+    );
+
+    expect(pineconeDb.create).toHaveBeenCalled();
   });
 });

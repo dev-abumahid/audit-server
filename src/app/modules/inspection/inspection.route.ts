@@ -40,4 +40,23 @@ router.put(
   inspection_controller.update_inspection_question,
 );
 
+// Org-role assignment (issue #55 slice 3) — admin-only, enforced inside the
+// service via resolveCallerOrgContext, same as the rest of this module.
+router.get(
+  '/:id/assignments',
+  auth('ORGANIZATION'),
+  inspection_controller.get_inspection_assignments,
+);
+router.post(
+  '/:id/assignments',
+  auth('ORGANIZATION'),
+  RequestValidator(inspection_validations.assign_inspection_member),
+  inspection_controller.assign_inspection_member,
+);
+router.delete(
+  '/:id/assignments/:orgMemberId',
+  auth('ORGANIZATION'),
+  inspection_controller.unassign_inspection_member,
+);
+
 export default router;

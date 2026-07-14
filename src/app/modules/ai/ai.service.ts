@@ -4,6 +4,11 @@ import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
+import {
+  assertCanWriteOrgResource,
+  assertCanWriteToInspection,
+  resolveCallerOrgContext,
+} from '../../utils/org_scope.js';
 import { recommendation_validations } from '../recommendation/recommendation.validation.js';
 import { mapTemplateData } from '../template/template.utils.js';
 import { template_validations } from '../template/template.validation.js';
@@ -19,6 +24,8 @@ export const AI_INTERNAL_SECRET_HEADER = {
 const generate_template_with_prompt_with_ai = async (req: Request) => {
   try {
     const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
     const { prompt } = req.body;
 
     if (!prompt) {
@@ -32,7 +39,7 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
       },
       body: JSON.stringify({
         topic: prompt,
-        organization_username: user.accountId,
+        organization_username: ctx.organizationId,
       }),
     });
     if (!aiResponse.ok) {
@@ -43,7 +50,7 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
     const parseData = await template_validations.create_template.parseAsync(data?.data);
 
     // make final payload
-    const finalPayload = mapTemplateData(parseData, user?.accountId);
+    const finalPayload = mapTemplateData(parseData, ctx.organizationId);
 
     const result = await prisma.template.create({
       data: finalPayload,
@@ -62,6 +69,8 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
   const file = req?.file;
   try {
     const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
 
     if (!file) {
       throw new AppError('File is required', 400);
@@ -76,7 +85,7 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
     const formData = new FormData();
 
     formData.append('file', blob, file.originalname);
-    formData.append('organization_username', user.accountId);
+    formData.append('organization_username', ctx.organizationId);
     const aiResponse = await fetch(`${configs.ai_server_end_point}/template_from_pdf`, {
       method: 'POST',
       headers: AI_INTERNAL_SECRET_HEADER,
@@ -89,7 +98,7 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
 
     const parseData = await template_validations.create_template.parseAsync(data?.data);
 
-    const finalPayload = mapTemplateData(parseData, user.accountId);
+    const finalPayload = mapTemplateData(parseData, ctx.organizationId);
 
     const result = await prisma.template.create({
       data: finalPayload,
@@ -111,6 +120,8 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
 const generate_template_with_risk_with_ai = async (req: Request) => {
   try {
     const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
     const riskId = req?.body?.riskId as string;
 
     if (!riskId) {
@@ -120,7 +131,7 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
     const risk = await prisma.risk.findUnique({
       where: {
         id: riskId,
-        org_account_id: user?.accountId,
+        org_account_id: ctx.organizationId,
       },
     });
 
@@ -163,7 +174,7 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
     // verify with schema
     const parseData = await template_validations.create_template.parseAsync(data?.data);
     // make final payload
-    const finalPayload = mapTemplateData(parseData, user?.accountId);
+    const finalPayload = mapTemplateData(parseData, ctx.organizationId);
 
     const result = await prisma.template.create({
       data: finalPayload,
@@ -180,6 +191,7 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
 
 const generate_recommendation_with_inspection_from_ai = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
   const inspectionId = req?.body?.inspectionId as string;
 
   // check inspection exist or not
@@ -203,9 +215,10 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
   if (!isInspectionExist) {
     throw new AppError('Inspection Not found !!', 404);
   }
-  if (isInspectionExist.orgAccountId !== user.accountId) {
+  if (isInspectionExist.orgAccountId !== ctx.organizationId) {
     throw new AppError('You are not authorized to access this inspection !!', 403);
   }
+  await assertCanWriteToInspection(ctx, inspectionId);
 
   // check recommendation exist or not
   const isRecommendationExist = await prisma.recommendation.findFirst({
@@ -223,7 +236,7 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
   }));
 
   const aiPayload = {
-    organization_username: user.accountId,
+    organization_username: ctx.organizationId,
     questions: questions,
   };
 
@@ -254,7 +267,7 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
       const final_payload = {
         results,
         summary: data.all_over_recommendation,
-        orgAccountId: user?.accountId,
+        orgAccountId: ctx.organizationId,
         inspectionId,
         ...(isInspectionExist.riskId && {
           riskId: isInspectionExist.riskId,
@@ -301,6 +314,8 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
   const file = req?.file;
   try {
     const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
 
     if (!file) {
       throw new AppError('File is required', 400);
@@ -315,7 +330,7 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
     const formData = new FormData();
 
     formData.append('file', blob, file.originalname);
-    formData.append('organization_username', user.accountId);
+    formData.append('organization_username', ctx.organizationId);
     const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-pdf-to-pinecone`, {
       method: 'POST',
       headers: AI_INTERNAL_SECRET_HEADER,
@@ -330,7 +345,7 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
     const databasePayload = {
       fileName: file.originalname,
       fileId: data.file_id,
-      orgAccountId: user.accountId,
+      orgAccountId: ctx.organizationId,
       fileSize: String(file.size),
     };
     const result = await prisma.pineconeDocument.create({
@@ -349,19 +364,22 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
 
 const get_all_pinecone_data_from_database = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
   const data = await prisma.pineconeDocument.findMany({
     where: {
-      orgAccountId: user.accountId,
+      orgAccountId: ctx.organizationId,
     },
   });
   return data;
 };
 const delete_pinecone_data_from_database = async (req: Request) => {
   const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const fileName = req.query.fileName as string;
 
   await fetch(
-    `${configs.ai_server_end_point}/delete-vectors-by-filename?file_name=${fileName}&organization_username=${user.accountId}`,
+    `${configs.ai_server_end_point}/delete-vectors-by-filename?file_name=${fileName}&organization_username=${ctx.organizationId}`,
     {
       method: 'DELETE',
       headers: {
@@ -374,7 +392,7 @@ const delete_pinecone_data_from_database = async (req: Request) => {
   const result = await prisma.pineconeDocument.deleteMany({
     where: {
       fileName,
-      orgAccountId: user.accountId,
+      orgAccountId: ctx.organizationId,
     },
   });
   return result;

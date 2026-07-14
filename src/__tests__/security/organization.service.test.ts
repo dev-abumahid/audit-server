@@ -6,7 +6,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     orgMember: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
       create: vi.fn(),
+      update: vi.fn(),
+      count: vi.fn(),
     },
     orgInvitation: {
       findFirst: vi.fn(),
@@ -20,6 +24,10 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     account: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
+    },
+    orgAuditLog: {
+      create: vi.fn(),
     },
     $transaction: vi.fn(),
   },
@@ -51,6 +59,8 @@ describe('organization service — invite creation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue(null);
     organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
@@ -89,11 +99,46 @@ describe('organization service — invite creation', () => {
     );
   });
 
+  it('converts a concurrent invite-creation race (partial unique index violation) into a clean 409', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    // Neither admin's findFirst sees the other's in-flight invite — both
+    // reach create(), and the DB's partial unique index on
+    // (organizationId, email) WHERE status='PENDING' rejects the loser.
+    orgInvitationDb.findFirst.mockResolvedValue(null);
+    organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
+    const { Prisma } = await import('@prisma/client');
+    orgInvitationDb.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
+
+    await expect(
+      organization_services.invite_member_into_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          body: { email: 'raced@test.com', role: 'VIEWER' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
   it('refreshes an existing PENDING invitation instead of creating a duplicate', async () => {
     orgMemberDb.findUnique.mockResolvedValue({
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-existing',
@@ -147,12 +192,56 @@ describe('organization service — invite creation', () => {
       organizationId: ORG_2,
       accountId: 'member-1',
       role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
 
     await expect(
       organization_services.invite_member_into_db(
         makeReq({
           user: { accountId: 'member-1' },
+          body: { email: 'x@test.com', role: 'VIEWER' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SUSPENDED admin — cannot keep managing the org after being suspended', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.invite_member_into_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          body: { email: 'x@test.com', role: 'VIEWER' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an admin whose time-boxed access has expired', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+    });
+
+    await expect(
+      organization_services.invite_member_into_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
           body: { email: 'x@test.com', role: 'VIEWER' },
         }),
       ),
@@ -176,7 +265,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-1',
     });
-    accountDb.findUnique.mockResolvedValue(null);
+    accountDb.findFirst.mockResolvedValue(null);
     organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
 
     const orgMemberCreate = vi.fn().mockResolvedValue({});
@@ -240,7 +329,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-2',
     });
-    accountDb.findUnique.mockResolvedValue({
+    accountDb.findFirst.mockResolvedValue({
       id: 'existing-acc-1',
       email: 'already@test.com',
       password: bcrypt.hashSync('correct-password', 10),
@@ -285,7 +374,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-3',
     });
-    accountDb.findUnique.mockResolvedValue({
+    accountDb.findFirst.mockResolvedValue({
       id: 'existing-acc-1',
       email: 'already@test.com',
       password: bcrypt.hashSync('correct-password', 10),
@@ -316,7 +405,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-oauth',
     });
-    accountDb.findUnique.mockResolvedValue({
+    accountDb.findFirst.mockResolvedValue({
       id: 'existing-acc-oauth',
       email: 'oauth@test.com',
       password: null,
@@ -336,6 +425,50 @@ describe('organization service — invitation acceptance', () => {
     expect(mockTransaction).not.toHaveBeenCalled();
   });
 
+  it('finds an existing account by case-insensitive email match', async () => {
+    const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
+    orgInvitationDb.findUnique.mockResolvedValue({
+      id: 'inv-case',
+      organizationId: ORG_1,
+      email: 'Jane@Company.com',
+      role: 'VIEWER',
+      status: 'PENDING',
+      expiresAt: futureExpiry,
+      token: 'tok-case',
+    });
+    accountDb.findFirst.mockResolvedValue({
+      id: 'existing-acc-jane',
+      email: 'jane@company.com',
+      password: bcrypt.hashSync('correct-password', 10),
+      role: 'ORGANIZATION',
+      provider: 'LOCAL',
+      isDeleted: false,
+      isAccountVerified: true,
+      orgMembership: null,
+    });
+
+    const orgMemberCreate = vi.fn().mockResolvedValue({});
+    const invitationUpdate = vi.fn().mockResolvedValue({});
+    mockTransaction.mockImplementation(async (fn) =>
+      fn({
+        orgMember: { create: orgMemberCreate },
+        orgInvitation: { update: invitationUpdate },
+      }),
+    );
+
+    const result = await organization_services.accept_invitation_into_db(
+      makeReq({ body: { token: 'tok-case', password: 'correct-password' } }),
+    );
+
+    expect(accountDb.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { email: { equals: 'Jane@Company.com', mode: 'insensitive' } },
+      }),
+    );
+    expect(result.isNewAccount).toBe(false);
+    expect(orgMemberCreate).toHaveBeenCalled();
+  });
+
   it('rejects accepting into a deleted account', async () => {
     const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
     orgInvitationDb.findUnique.mockResolvedValue({
@@ -347,7 +480,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-deleted',
     });
-    accountDb.findUnique.mockResolvedValue({
+    accountDb.findFirst.mockResolvedValue({
       id: 'existing-acc-deleted',
       email: 'deleted@test.com',
       password: bcrypt.hashSync('correct-password', 10),
@@ -378,7 +511,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-unverified',
     });
-    accountDb.findUnique.mockResolvedValue({
+    accountDb.findFirst.mockResolvedValue({
       id: 'existing-acc-unverified',
       email: 'unverified@test.com',
       password: bcrypt.hashSync('correct-password', 10),
@@ -409,7 +542,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-race',
     });
-    accountDb.findUnique.mockResolvedValue({
+    accountDb.findFirst.mockResolvedValue({
       id: 'existing-acc-race',
       email: 'race@test.com',
       password: bcrypt.hashSync('correct-password', 10),
@@ -491,7 +624,7 @@ describe('organization service — invitation acceptance', () => {
       expiresAt: futureExpiry,
       token: 'tok-6',
     });
-    accountDb.findUnique.mockResolvedValue({
+    accountDb.findFirst.mockResolvedValue({
       id: 'existing-acc-2',
       email: 'already@test.com',
       password: bcrypt.hashSync('correct-password', 10),
@@ -509,6 +642,565 @@ describe('organization service — invitation acceptance', () => {
   });
 });
 
+describe('organization service — list org members', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('ADMIN lists members scoped to their own org', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    const members = [
+      {
+        id: 'member-1',
+        role: 'LEAD_AUDITOR',
+        status: 'ACTIVE',
+        expiresAt: null,
+        createdAt: new Date(),
+        account: { email: 'auditor@test.com', profile: { fullName: 'Auditor One' } },
+      },
+    ];
+    orgMemberDb.findMany.mockResolvedValue(members);
+
+    const result = await organization_services.get_org_members_from_db(
+      makeReq({ user: { accountId: 'admin-1' } }),
+    );
+
+    expect(orgMemberDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organizationId: ORG_1 } }),
+    );
+    // isExpired is a derived field the service adds on top of the raw row —
+    // see the doc comment on get_org_members_from_db for why it's derived
+    // rather than written back to `status`.
+    expect(result).toEqual(members.map((m) => ({ ...m, isExpired: false })));
+  });
+
+  it('rejects a caller with no org membership at all', async () => {
+    orgMemberDb.findUnique.mockResolvedValue(null);
+
+    await expect(
+      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'nobody' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-admin member', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'lead-1',
+      role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'lead-1' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SUSPENDED admin', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'admin-1' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('organization service — list pending invitations', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('ADMIN lists pending invitations scoped to their own org', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    const invitations = [
+      {
+        id: 'inv-1',
+        email: 'x@test.com',
+        role: 'VIEWER',
+        status: 'PENDING',
+        expiresAt: new Date(),
+      },
+    ];
+    orgInvitationDb.findMany.mockResolvedValue(invitations);
+
+    const result = await organization_services.get_pending_invitations_from_db(
+      makeReq({ user: { accountId: 'admin-1' } }),
+    );
+
+    expect(orgInvitationDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organizationId: ORG_1, status: 'PENDING' } }),
+    );
+    expect(result).toEqual(invitations);
+  });
+
+  it('rejects a non-admin member', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'lead-1',
+      role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_pending_invitations_from_db(
+        makeReq({ user: { accountId: 'lead-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SUSPENDED admin', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_pending_invitations_from_db(
+        makeReq({ user: { accountId: 'admin-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('organization service — update org member', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The last-admin count-and-update is now wrapped in a Serializable
+    // prisma.$transaction — hand the callback a tx backed by the same
+    // orgMemberDb mock so existing assertions on orgMemberDb.count/update
+    // still see the calls made inside it.
+    mockTransaction.mockImplementation(async (fn: (tx: unknown) => unknown) =>
+      fn({ orgMember: orgMemberDb }),
+    );
+  });
+
+  it('ADMIN updates a member status scoped to their own org', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-1',
+      organizationId: ORG_1,
+      accountId: 'other-account',
+      role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.update.mockResolvedValue({
+      id: 'member-1',
+      role: 'LEAD_AUDITOR',
+      status: 'SUSPENDED',
+      expiresAt: null,
+      account: { email: 'auditor@test.com', profile: { fullName: 'Auditor One' } },
+    });
+
+    const result = await organization_services.update_org_member_in_db(
+      makeReq({
+        user: { accountId: 'admin-1' },
+        params: { id: 'member-1' },
+        body: { status: 'SUSPENDED' },
+      }),
+    );
+
+    expect(orgMemberDb.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'member-1', organizationId: ORG_1 } }),
+    );
+    expect(orgMemberDb.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'member-1' },
+        data: { status: 'SUSPENDED' },
+      }),
+    );
+    expect(result.status).toBe('SUSPENDED');
+  });
+
+  it('sets expiresAt (time-boxed access) without touching status when only expiresAt is provided', async () => {
+    const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-2',
+      organizationId: ORG_1,
+      accountId: 'other-account',
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.update.mockResolvedValue({
+      id: 'member-2',
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      expiresAt: futureExpiry,
+      account: { email: 'viewer@test.com', profile: { fullName: 'Viewer One' } },
+    });
+
+    await organization_services.update_org_member_in_db(
+      makeReq({
+        user: { accountId: 'admin-1' },
+        params: { id: 'member-2' },
+        body: { expiresAt: futureExpiry },
+      }),
+    );
+
+    expect(orgMemberDb.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'member-2' },
+        data: { expiresAt: futureExpiry },
+      }),
+    );
+  });
+
+  it('clears an existing expiry when expiresAt is explicitly null', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-3',
+      organizationId: ORG_1,
+      accountId: 'other-account',
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      expiresAt: new Date(),
+    });
+    orgMemberDb.update.mockResolvedValue({
+      id: 'member-3',
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      expiresAt: null,
+      account: { email: 'viewer@test.com', profile: { fullName: 'Viewer One' } },
+    });
+
+    await organization_services.update_org_member_in_db(
+      makeReq({
+        user: { accountId: 'admin-1' },
+        params: { id: 'member-3' },
+        body: { expiresAt: null },
+      }),
+    );
+
+    expect(orgMemberDb.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'member-3' },
+        data: { expiresAt: null },
+      }),
+    );
+  });
+
+  it('rejects (404, org-scoped) a member id belonging to a different org', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'member-other-org' },
+          body: { status: 'SUSPENDED' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(orgMemberDb.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-admin caller', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'lead-1',
+      role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'lead-1' },
+          params: { id: 'member-1' },
+          body: { status: 'SUSPENDED' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('rejects an admin trying to suspend/expire their own membership (self-lockout guard)', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-self',
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'member-self' },
+          body: { status: 'SUSPENDED' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects deactivating the last other active admin — would leave the org with zero active admins', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-other-admin',
+      organizationId: ORG_1,
+      accountId: 'admin-2',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.count.mockResolvedValue(0); // no OTHER active admin besides this target
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'member-other-admin' },
+          body: { status: 'SUSPENDED' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(orgMemberDb.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          organizationId: ORG_1,
+          role: 'ADMIN',
+          status: 'ACTIVE',
+          id: { not: 'member-other-admin' },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: expect.any(Date) } }],
+        },
+      }),
+    );
+    expect(orgMemberDb.update).not.toHaveBeenCalled();
+  });
+
+  it('allows deactivating an admin when another active admin remains', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-other-admin',
+      organizationId: ORG_1,
+      accountId: 'admin-2',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.count.mockResolvedValue(1); // a third admin exists
+    orgMemberDb.update.mockResolvedValue({
+      id: 'member-other-admin',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+      account: { email: 'admin2@test.com', profile: { fullName: 'Admin Two' } },
+    });
+
+    const result = await organization_services.update_org_member_in_db(
+      makeReq({
+        user: { accountId: 'admin-1' },
+        params: { id: 'member-other-admin' },
+        body: { status: 'SUSPENDED' },
+      }),
+    );
+
+    expect(orgMemberDb.update).toHaveBeenCalled();
+    expect(result.status).toBe('SUSPENDED');
+  });
+
+  it('does not count an admin whose own expiresAt has already lapsed as a valid "other admin"', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-other-admin',
+      organizationId: ORG_1,
+      accountId: 'admin-2',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+
+    // Simulate a real DB instead of a bare mocked count: a third admin row
+    // whose own time-boxed expiresAt lapsed an hour ago. count()'s
+    // implementation here actually applies the where-clause's OR semantics
+    // against this row, so the test fails if the code stops filtering out
+    // lapsed-but-still-status-ACTIVE admins.
+    const expiredThirdAdmin = {
+      id: 'member-expired-admin',
+      organizationId: ORG_1,
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+    };
+    orgMemberDb.count.mockImplementation(
+      ({ where }: { where: Record<string, unknown> }) =>
+        new Promise((resolve) => {
+          const row = expiredThirdAdmin;
+          const notExcluded = (where.id as { not: string })?.not !== row.id;
+          const orgMatches = where.organizationId === row.organizationId;
+          const roleMatches = where.role === row.role;
+          const statusMatches = where.status === row.status;
+          const orClauses = where.OR as Array<Record<string, unknown>> | undefined;
+          const passesOr = !!orClauses?.some((clause) => {
+            if (clause.expiresAt === null) return row.expiresAt === null;
+            const gt = (clause.expiresAt as { gt?: Date } | undefined)?.gt;
+            return !!gt && row.expiresAt.getTime() > gt.getTime();
+          });
+          resolve(orgMatches && roleMatches && statusMatches && notExcluded && passesOr ? 1 : 0);
+        }),
+    );
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'member-other-admin' },
+          body: { status: 'SUSPENDED' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(orgMemberDb.update).not.toHaveBeenCalled();
+  });
+
+  it('does not run the last-admin check when deactivating a non-admin', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-lead',
+      organizationId: ORG_1,
+      accountId: 'lead-1',
+      role: 'LEAD_AUDITOR',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.update.mockResolvedValue({
+      id: 'member-lead',
+      role: 'LEAD_AUDITOR',
+      status: 'SUSPENDED',
+      expiresAt: null,
+      account: { email: 'lead@test.com', profile: { fullName: 'Lead One' } },
+    });
+
+    await organization_services.update_org_member_in_db(
+      makeReq({
+        user: { accountId: 'admin-1' },
+        params: { id: 'member-lead' },
+        body: { status: 'SUSPENDED' },
+      }),
+    );
+
+    expect(orgMemberDb.count).not.toHaveBeenCalled();
+    expect(orgMemberDb.update).toHaveBeenCalled();
+  });
+
+  it('rejects a SUSPENDED admin trying to update another member — the endpoint whose entire job is revoking access must actually revoke it', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'some-other-member' },
+          body: { status: 'ACTIVE' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findFirst).not.toHaveBeenCalled();
+    expect(orgMemberDb.update).not.toHaveBeenCalled();
+  });
+});
+
 describe('organization service — resend invitation', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -517,6 +1209,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-7',
@@ -555,6 +1249,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-7',
@@ -593,6 +1289,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue({
       id: 'inv-8',
@@ -616,6 +1314,8 @@ describe('organization service — resend invitation', () => {
       organizationId: ORG_1,
       accountId: 'admin-1',
       role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
     });
     orgInvitationDb.findFirst.mockResolvedValue(null);
 
@@ -624,5 +1324,23 @@ describe('organization service — resend invitation', () => {
         makeReq({ user: { accountId: 'admin-1' }, params: { id: 'inv-other-org' } }),
       ),
     ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('rejects a SUSPENDED admin', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.resend_invitation_from_db(
+        makeReq({ user: { accountId: 'admin-1' }, params: { id: 'inv-7' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgInvitationDb.findFirst).not.toHaveBeenCalled();
   });
 });
