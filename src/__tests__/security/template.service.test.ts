@@ -5,12 +5,18 @@ vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     template: {
       findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
     },
     templateAccess: {
       create: vi.fn(),
       deleteMany: vi.fn(),
     },
     orgMember: {
+      findUnique: vi.fn(),
+    },
+    organization: {
       findUnique: vi.fn(),
     },
   },
@@ -25,6 +31,23 @@ const templateAccessDb = prisma.templateAccess as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+const ANCHOR = ORG_A;
+const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
+const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
+
+const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+  orgMemberDb.findUnique.mockResolvedValue({
+    id: MEMBER_ID,
+    organizationId: ORG_ID,
+    accountId: ORG_A,
+    role,
+    status: 'ACTIVE',
+    expiresAt: null,
+  });
+  organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+};
 
 describe('template service — access member ownership scoping (ticket #31)', () => {
   beforeEach(() => {
@@ -89,6 +112,99 @@ describe('template service — access member ownership scoping (ticket #31)', ()
 
       expect(templateAccessDb.deleteMany).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('template service — write/access-grant role scoping (issue #55 slice 3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  it('VIEWER cannot create a template', async () => {
+    mockMembership('VIEWER');
+
+    await expect(
+      template_service.create_template_into_db(
+        makeReq({ body: { templateName: 'Fire audit', pages: [] } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(templateDb.create).not.toHaveBeenCalled();
+  });
+
+  it('LIGHT_USER cannot update a template', async () => {
+    mockMembership('LIGHT_USER');
+
+    await expect(
+      template_service.update_template_into_db(
+        makeReq({ params: { id: 't1' }, body: { templateName: 'hack' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(templateDb.update).not.toHaveBeenCalled();
+  });
+
+  it('VIEWER cannot delete a template', async () => {
+    mockMembership('VIEWER');
+
+    await expect(
+      template_service.delete_template_from_db(makeReq({ params: { id: 't1' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(templateDb.delete).not.toHaveBeenCalled();
+  });
+
+  it('ignores an orgAccountId supplied in the body and always writes the caller org anchor on update', async () => {
+    mockMembership('ADMIN');
+    templateDb.update.mockResolvedValue({});
+
+    await template_service.update_template_into_db(
+      makeReq({
+        params: { id: 't1' },
+        body: { templateName: 'New name', orgAccountId: 'other-org' },
+      }),
+    );
+
+    const callArg = templateDb.update.mock.calls[0][0];
+    expect(callArg.data.orgAccountId).toBe(ANCHOR);
+  });
+
+  it('LIGHT_USER cannot grant template access (privilege-escalation gate)', async () => {
+    mockMembership('LIGHT_USER');
+
+    await expect(
+      template_service.add_template_access_member_into_db(
+        makeReq({ body: { templateId: 't1', userId: 'u1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(templateDb.findFirst).not.toHaveBeenCalled();
+    expect(templateAccessDb.create).not.toHaveBeenCalled();
+  });
+
+  it('LEAD_AUDITOR cannot revoke template access — grant/revoke is ADMIN-only, not the general write role gate', async () => {
+    mockMembership('LEAD_AUDITOR');
+
+    await expect(
+      template_service.remove_template_access_member_from_db(
+        makeReq({ body: { templateId: 't1', userId: 'u1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(templateAccessDb.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN can still grant template access (gate does not over-block)', async () => {
+    mockMembership('ADMIN');
+    templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ANCHOR });
+    templateAccessDb.create.mockResolvedValue({});
+
+    await template_service.add_template_access_member_into_db(
+      makeReq({ body: { templateId: 't1', userId: 'u1' } }),
+    );
+
+    expect(templateAccessDb.create).toHaveBeenCalled();
   });
 });
 

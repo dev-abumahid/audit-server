@@ -16,6 +16,12 @@ vi.mock('../../app/lib/prisma.js', () => ({
     orgMember: {
       findUnique: vi.fn(),
     },
+    organization: {
+      findUnique: vi.fn(),
+    },
+    inspectionAssignment: {
+      findMany: vi.fn(),
+    },
   },
 }));
 
@@ -25,6 +31,27 @@ import { recommendation_service } from '../../app/modules/recommendation/recomme
 const recDb = prisma.recommendation as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const resultDb = prisma.recommendationResult as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const assignmentDb = prisma.inspectionAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+
+const ANCHOR = ORG_A;
+const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
+const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
+
+const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+  orgMemberDb.findUnique.mockResolvedValue({
+    id: MEMBER_ID,
+    organizationId: ORG_ID,
+    accountId: ORG_A,
+    role,
+    status: 'ACTIVE',
+    expiresAt: null,
+  });
+  organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+};
 
 describe('recommendation service — org scoping (ticket #6)', () => {
   beforeEach(() => {
@@ -33,6 +60,72 @@ describe('recommendation service — org scoping (ticket #6)', () => {
     // caller's own accountId), same as every pre-org-scoping-migration test
     // in this file expects.
     orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  describe('write-path role scoping (issue #55 slice 3)', () => {
+    it('VIEWER cannot update a recommendation summary', async () => {
+      mockMembership('VIEWER');
+      recDb.findFirst.mockResolvedValue({
+        id: 'rec1',
+        orgAccountId: ANCHOR,
+        inspectionId: 'insp-1',
+      });
+
+      await expect(
+        recommendation_service.update_recommendation_summary_into_db(
+          makeReq({ params: { recommendationId: 'rec1' }, body: { summary: 'hack' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(recDb.update).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER cannot update a recommendation answer', async () => {
+      mockMembership('LIGHT_USER');
+      resultDb.findFirst.mockResolvedValue({
+        recommendationAi: { orgAccountId: ANCHOR, inspectionId: 'insp-1' },
+      });
+
+      await expect(
+        recommendation_service.update_recommendation_answer_into_db(
+          makeReq({ params: { recQuestionId: 'rq1' }, body: { observation: 'hack' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(resultDb.update).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR not assigned to the inspection cannot delete a recommendation', async () => {
+      mockMembership('LEAD_AUDITOR');
+      assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-other' }]);
+      recDb.findFirst.mockResolvedValue({
+        id: 'rec1',
+        orgAccountId: ANCHOR,
+        inspectionId: 'insp-1',
+      });
+
+      await expect(
+        recommendation_service.delete_recommendation_from_db(makeReq({ params: { id: 'rec1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(recDb.delete).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can still update a recommendation summary (role gate does not over-block)', async () => {
+      mockMembership('ADMIN');
+      recDb.findFirst.mockResolvedValue({
+        id: 'rec1',
+        orgAccountId: ANCHOR,
+        inspectionId: 'insp-1',
+      });
+      recDb.update.mockResolvedValue({});
+
+      await recommendation_service.update_recommendation_summary_into_db(
+        makeReq({ params: { recommendationId: 'rec1' }, body: { summary: 'fine' } }),
+      );
+
+      expect(recDb.update).toHaveBeenCalled();
+    });
   });
 
   describe('get_all_recommendation_from_db', () => {

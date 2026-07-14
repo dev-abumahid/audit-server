@@ -51,22 +51,37 @@ export const isMembershipActive = (membership: { status: string; expiresAt: Date
   return membership.status === 'ACTIVE' && !isExpired;
 };
 
-export const resolveCallerOrgContext = async (accountId: string): Promise<CallerOrgContext> => {
+/**
+ * Looks up an account's OrgMember row and enforces isMembershipActive,
+ * returning null only for "no membership row at all" (not a member of any
+ * org yet). Shared by resolveCallerOrgContext and organization.service.ts's
+ * requireCallerIsOrgAdmin so there's exactly one place doing this lookup —
+ * see isMembershipActive's docstring for why that matters (the two call
+ * sites already drifted apart once when each had its own copy of this
+ * query).
+ */
+export const findActiveMembership = async (accountId: string) => {
   const membership = await prisma.orgMember.findUnique({ where: { accountId } });
-  if (!membership) {
-    return { organizationId: accountId, role: 'ADMIN', orgMemberId: null };
-  }
+  if (!membership) return null;
 
   // A membership row existing is not the same as it being live: SUSPENDED
   // (explicit offboarding) and an expired expiresAt (time-boxed access,
   // e.g. an external Viewer's engagement window) must both revoke access
   // even though the row — and the caller's JWT — are both still present.
-  // This is a hard deny, not the "no membership at all" fallback above:
-  // falling back to ADMIN-of-self here would hand a suspended/expired
-  // member of a real org full admin rights over their own now-disconnected
-  // slice, which is worse than denying them outright.
+  // This is a hard deny, not the "no membership at all" case above: falling
+  // back to ADMIN-of-self there would hand a suspended/expired member of a
+  // real org full admin rights over their own now-disconnected slice, which
+  // is worse than denying them outright.
   if (!isMembershipActive(membership)) {
     throw new AppError('Your access to this organization is no longer active.', 403);
+  }
+  return membership;
+};
+
+export const resolveCallerOrgContext = async (accountId: string): Promise<CallerOrgContext> => {
+  const membership = await findActiveMembership(accountId);
+  if (!membership) {
+    return { organizationId: accountId, role: 'ADMIN', orgMemberId: null };
   }
 
   const organization = await prisma.organization.findUnique({
@@ -93,7 +108,10 @@ export const resolveCallerOrgContext = async (accountId: string): Promise<Caller
 const getAssignedInspectionIds = async (orgMemberId: string | null): Promise<string[]> => {
   if (!orgMemberId) return [];
   const rows = await prisma.inspectionAssignment.findMany({
-    where: { orgMemberId },
+    // revokedAt: null — a revoked assignment must stop counting for scope
+    // immediately, same as the row being deleted did before assignments
+    // became soft-revocable.
+    where: { orgMemberId, revokedAt: null },
     select: { inspectionId: true },
   });
   return rows.map((row) => row.inspectionId);
@@ -224,4 +242,34 @@ export const assertCanWriteToInspection = async (
   }
 
   throw new AppError('You do not have permission to modify this inspection.', 403);
+};
+
+/**
+ * Write gate for org-wide shared resources that aren't owned by a single
+ * inspection — Site and Template. Unlike assertCanWriteToInspection, there's
+ * no per-inspection assignment to check here (a Site/Template isn't scoped
+ * to one inspection), so this is a plain role gate: ADMIN and LEAD_AUDITOR
+ * may create/edit/delete; VIEWER (read + comment/flag only, never edit, per
+ * assertCanWriteToInspection's own docs) and LIGHT_USER may not. Found by
+ * independent review: create/update/delete on these two modules had no role
+ * check at all, only org-anchor scoping — any active member of any role
+ * could create, edit, or delete the whole org's Sites/Templates.
+ */
+export const assertCanWriteOrgResource = (ctx: CallerOrgContext): void => {
+  if (ctx.role === 'ADMIN' || ctx.role === 'LEAD_AUDITOR') return;
+  throw new AppError('You do not have permission to modify this resource.', 403);
+};
+
+/**
+ * Admin-only gate for privileged organization-wide actions that aren't
+ * "write to a resource" so much as "change who can access something" —
+ * currently just Template access grant/revoke. Found by independent review:
+ * add/remove_template_access_member_into_db had no role check whatsoever, so
+ * any active member (including LIGHT_USER) could grant or revoke *other
+ * users'* template access — a privilege-escalation path, not just an
+ * over-broad write.
+ */
+export const assertIsOrgAdmin = (ctx: CallerOrgContext): void => {
+  if (ctx.role === 'ADMIN') return;
+  throw new AppError('Only organization admins can perform this action.', 403);
 };

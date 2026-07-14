@@ -35,6 +35,8 @@ model Inspection {
     actions         Action[]
     note            Note?
     assignments     InspectionAssignment[]
+
+    @@index([orgAccountId])
 }
 
 model QuestionAnswer {

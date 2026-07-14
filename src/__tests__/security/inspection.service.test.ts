@@ -34,8 +34,12 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     inspectionAssignment: {
       findMany: vi.fn(),
-      upsert: vi.fn(),
-      deleteMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    orgAuditLog: {
+      create: vi.fn(),
     },
   },
 }));
@@ -353,7 +357,7 @@ describe('inspection service — org scoping (ticket #6)', () => {
       await inspection_service.get_all_inspection_from_db(makeReq({ query: {} }));
 
       expect(assignmentDb.findMany).toHaveBeenCalledWith({
-        where: { orgMemberId: MEMBER_ID },
+        where: { orgMemberId: MEMBER_ID, revokedAt: null },
         select: { inspectionId: true },
       });
       const [findArg] = inspectionDb.findMany.mock.calls[0];
@@ -537,7 +541,8 @@ describe('inspection service — org scoping (ticket #6)', () => {
         (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
           .fn()
           .mockResolvedValue({ id: 'target-member', organizationId: ORG_ID });
-        assignmentDb.upsert.mockResolvedValue({
+        assignmentDb.findFirst.mockResolvedValue(null);
+        assignmentDb.create.mockResolvedValue({
           orgMemberId: 'target-member',
           inspectionId: 'insp-1',
         });
@@ -546,14 +551,70 @@ describe('inspection service — org scoping (ticket #6)', () => {
           makeReq({ params: { id: 'insp-1' }, body: { orgMemberId: 'target-member' } }),
         );
 
-        expect(assignmentDb.upsert).toHaveBeenCalledWith(
+        expect(assignmentDb.findFirst).toHaveBeenCalledWith({
+          where: { orgMemberId: 'target-member', inspectionId: 'insp-1', revokedAt: null },
+        });
+        expect(assignmentDb.create).toHaveBeenCalledWith(
           expect.objectContaining({
-            where: {
-              orgMemberId_inspectionId: { orgMemberId: 'target-member', inspectionId: 'insp-1' },
-            },
+            data: expect.objectContaining({
+              orgMemberId: 'target-member',
+              inspectionId: 'insp-1',
+            }),
           }),
         );
         expect(result).toMatchObject({ orgMemberId: 'target-member', inspectionId: 'insp-1' });
+      });
+
+      it('re-assigning an already (actively) assigned member is a no-op that returns the existing row', async () => {
+        mockMembership('ADMIN');
+        inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+        (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+          .fn()
+          .mockResolvedValue({ id: 'target-member', organizationId: ORG_ID });
+        const existing = {
+          id: 'existing-assignment',
+          orgMemberId: 'target-member',
+          inspectionId: 'insp-1',
+        };
+        assignmentDb.findFirst.mockResolvedValue(existing);
+
+        const result = await inspection_service.assign_member_to_inspection(
+          makeReq({ params: { id: 'insp-1' }, body: { orgMemberId: 'target-member' } }),
+        );
+
+        expect(assignmentDb.create).not.toHaveBeenCalled();
+        expect(result).toEqual(existing);
+      });
+
+      it('converts a concurrent assign race (partial unique index violation) into the winning row, not a raw 500', async () => {
+        mockMembership('ADMIN');
+        inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
+        (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+          .fn()
+          .mockResolvedValue({ id: 'target-member', organizationId: ORG_ID });
+        const winner = {
+          id: 'winning-assignment',
+          orgMemberId: 'target-member',
+          inspectionId: 'insp-1',
+        };
+        // First findFirst (existingActive check) sees nothing; the create()
+        // then races against a concurrent request and loses to the DB's
+        // partial unique index; the second findFirst (inside the catch)
+        // picks up the row the other request just committed.
+        assignmentDb.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(winner);
+        const { Prisma } = await import('@prisma/client');
+        assignmentDb.create.mockRejectedValue(
+          new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+            code: 'P2002',
+            clientVersion: 'test',
+          }),
+        );
+
+        const result = await inspection_service.assign_member_to_inspection(
+          makeReq({ params: { id: 'insp-1' }, body: { orgMemberId: 'target-member' } }),
+        );
+
+        expect(result).toEqual(winner);
       });
 
       it('non-ADMIN cannot assign anyone to an inspection', async () => {
@@ -565,7 +626,7 @@ describe('inspection service — org scoping (ticket #6)', () => {
           ),
         ).rejects.toMatchObject({ statusCode: 403 });
 
-        expect(assignmentDb.upsert).not.toHaveBeenCalled();
+        expect(assignmentDb.create).not.toHaveBeenCalled();
       });
 
       it("rejects assigning a member who does not belong to the caller's org", async () => {
@@ -581,22 +642,25 @@ describe('inspection service — org scoping (ticket #6)', () => {
           ),
         ).rejects.toMatchObject({ statusCode: 404 });
 
-        expect(assignmentDb.upsert).not.toHaveBeenCalled();
+        expect(assignmentDb.create).not.toHaveBeenCalled();
       });
 
       it('ADMIN can unassign a member from an inspection', async () => {
         mockMembership('ADMIN');
         inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ANCHOR });
         orgMemberDb.findFirst.mockResolvedValue({ id: 'target-member', organizationId: ORG_ID });
-        assignmentDb.deleteMany.mockResolvedValue({ count: 1 });
+        assignmentDb.updateMany.mockResolvedValue({ count: 1 });
 
         await inspection_service.unassign_member_from_inspection(
           makeReq({ params: { id: 'insp-1', orgMemberId: 'target-member' } }),
         );
 
-        expect(assignmentDb.deleteMany).toHaveBeenCalledWith({
-          where: { orgMemberId: 'target-member', inspectionId: 'insp-1' },
-        });
+        expect(assignmentDb.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { orgMemberId: 'target-member', inspectionId: 'insp-1', revokedAt: null },
+            data: expect.objectContaining({ revokedAt: expect.any(Date) }),
+          }),
+        );
       });
 
       it("rejects unassigning a member id that does not belong to the caller's org", async () => {
@@ -610,7 +674,7 @@ describe('inspection service — org scoping (ticket #6)', () => {
           ),
         ).rejects.toMatchObject({ statusCode: 404 });
 
-        expect(assignmentDb.deleteMany).not.toHaveBeenCalled();
+        expect(assignmentDb.updateMany).not.toHaveBeenCalled();
       });
 
       it('non-ADMIN cannot unassign anyone', async () => {
@@ -622,7 +686,7 @@ describe('inspection service — org scoping (ticket #6)', () => {
           ),
         ).rejects.toMatchObject({ statusCode: 403 });
 
-        expect(assignmentDb.deleteMany).not.toHaveBeenCalled();
+        expect(assignmentDb.updateMany).not.toHaveBeenCalled();
       });
 
       it('ADMIN can list assignments for an inspection in their org', async () => {
@@ -646,7 +710,7 @@ describe('inspection service — org scoping (ticket #6)', () => {
         );
 
         expect(assignmentDb.findMany).toHaveBeenCalledWith(
-          expect.objectContaining({ where: { inspectionId: 'insp-1' } }),
+          expect.objectContaining({ where: { inspectionId: 'insp-1', revokedAt: null } }),
         );
         expect(result).toEqual(rows);
       });

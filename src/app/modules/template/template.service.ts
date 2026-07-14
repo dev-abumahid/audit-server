@@ -5,7 +5,11 @@ import { TTemplateAccess } from '../../types/common.js';
 import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
-import { resolveCallerOrgContext } from '../../utils/org_scope.js';
+import {
+  assertCanWriteOrgResource,
+  assertIsOrgAdmin,
+  resolveCallerOrgContext,
+} from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { mapTemplateData } from './template.utils.js';
 
@@ -92,6 +96,7 @@ const get_single_template_from_db = async (req: Request) => {
 const create_template_into_db = async (req: Request) => {
   const user = req?.user as JwtPayload;
   const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
   const body = req?.body;
   // check logo file
   if (req?.file) {
@@ -107,15 +112,22 @@ const update_template_into_db = async (req: Request) => {
   const { id } = req.params as { id: string };
   const user = req?.user as JwtPayload;
   const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
   const body = req?.body;
   if (req?.file) {
     const cloudRes = await uploadCloud(req?.file);
     body.templateLogo = cloudRes?.secure_url;
   }
 
+  // Never trust orgAccountId from the request body on an update — Prisma
+  // applies `data` as the SET clause independently of `where`, so a stray
+  // orgAccountId here would reassign the row to a different org's anchor
+  // account id regardless of the where-clause scoping above. Found by
+  // independent review (same class of bug fixed in site/risk services).
+  const { orgAccountId: _ignored, ...safeBody } = body;
   const result = await prisma.template.update({
     where: { id, orgAccountId: ctx.organizationId },
-    data: body,
+    data: { ...safeBody, orgAccountId: ctx.organizationId },
   });
   return result;
 };
@@ -123,6 +135,7 @@ const update_template_into_db = async (req: Request) => {
 const delete_template_from_db = async (req: Request) => {
   const user = req?.user as JwtPayload;
   const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
   const { id } = req.params as { id: string };
   const result = await prisma.template.delete({ where: { id, orgAccountId: ctx.organizationId } });
   return result;
@@ -133,6 +146,7 @@ const delete_template_from_db = async (req: Request) => {
 const update_or_create_new_page_into_db = async (req: Request) => {
   const user = req?.user as JwtPayload;
   const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
   const body = req?.body;
   if (body.pageId) {
     // Verify page belongs to caller's org via parent template
@@ -169,6 +183,7 @@ const update_or_create_new_page_into_db = async (req: Request) => {
 const delete_template_page_by_id_from_db = async (req: Request) => {
   const user = req?.user as JwtPayload;
   const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
   const id = req?.params?.id as string;
   const page = await prisma.page.findFirst({
     where: { id },
@@ -183,6 +198,7 @@ const delete_template_page_by_id_from_db = async (req: Request) => {
 const update_or_delete_new_question_into_db = async (req: Request) => {
   const user = req?.user as JwtPayload;
   const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
   const body = req?.body;
 
   // Update old question
@@ -229,6 +245,7 @@ const update_or_delete_new_question_into_db = async (req: Request) => {
 const delete_page_question_by_id_from_db = async (req: Request) => {
   const user = req?.user as JwtPayload;
   const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
   const id = req?.params?.id as string;
   const question = await prisma.question.findFirst({
     where: { id },
@@ -243,6 +260,7 @@ const delete_page_question_by_id_from_db = async (req: Request) => {
 const add_template_access_member_into_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
+  assertIsOrgAdmin(ctx);
   const body = req?.body as TTemplateAccess;
   // check template ownership
   const template = await prisma.template.findFirst({
@@ -266,6 +284,7 @@ const add_template_access_member_into_db = async (req: Request) => {
 const remove_template_access_member_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
+  assertIsOrgAdmin(ctx);
   const body = req?.body as TTemplateAccess;
 
   // check template ownership

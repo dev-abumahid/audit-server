@@ -28,4 +28,6 @@ model Risk {
     inspections     Inspection[]
     templates       Template[]
     recommendations Recommendation[]
+
+    @@index([org_account_id])
 }

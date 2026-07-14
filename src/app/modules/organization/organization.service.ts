@@ -3,11 +3,53 @@ import { Prisma } from '@prisma/client';
 import crypto from 'node:crypto';
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
+import { logger } from '../../lib/logger.js';
 import { prisma } from '../../lib/prisma.js';
 import { orgInviteEmailQueue } from '../../queues/email/org-invite/org-invite.email.queue.js';
 import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
-import { isMembershipActive } from '../../utils/org_scope.js';
+import { findActiveMembership } from '../../utils/org_scope.js';
+
+// New-account password minimum, enforced here (not in the zod schema) since
+// this same `password` field also authenticates an *existing* account's
+// already-stored password in the other accept_invitation_into_db branch,
+// where a min-length check would reject a legitimately correct password
+// for any account created before an 8-char minimum existed. Found by
+// independent review.
+const NEW_ACCOUNT_PASSWORD_MIN_LENGTH = 8;
+
+/**
+ * Writes an OrgAuditLog row for an org-membership lifecycle event. Fire-
+ * and-forget from the caller's perspective (awaited, but never allowed to
+ * fail the request it's logging) — an audit-log write failing shouldn't
+ * block the actual invite/status-change/accept it's recording, or every
+ * legitimate action becomes hostage to the audit table being healthy. Found
+ * by independent review: without a durable event log, "who suspended
+ * member X, and when, and who invited them" is unanswerable once a status
+ * change overwrites OrgMember's current-state columns.
+ */
+const recordAuditEvent = async (entry: {
+  organizationId: string;
+  action:
+    | 'MEMBER_INVITED'
+    | 'MEMBER_INVITE_RESENT'
+    | 'MEMBER_INVITE_ACCEPTED'
+    | 'MEMBER_STATUS_CHANGED'
+    | 'MEMBER_EXPIRY_CHANGED'
+    | 'MEMBER_REMOVED';
+  actorAccountId?: string | null;
+  subjectOrgMemberId?: string | null;
+  subjectEmail?: string | null;
+  metadata?: Record<string, unknown>;
+}) => {
+  try {
+    await prisma.orgAuditLog.create({
+      data: { ...entry, metadata: entry.metadata as Prisma.InputJsonValue },
+    });
+  } catch (err) {
+    logger.error({ err, entry }, 'Failed to write OrgAuditLog entry');
+  }
+};
 
 // Named constant, not a magic number — invitations are valid for this long
 // after being (re)sent.
@@ -60,19 +102,43 @@ const runAcceptTransactionOrConflict = async <T>(
  * predicate (not just the intent) is the actual fix for that class of bug.
  */
 const requireCallerIsOrgAdmin = async (accountId: string) => {
-  const membership = await prisma.orgMember.findUnique({
-    where: { accountId },
-  });
+  const membership = await findActiveMembership(accountId);
   if (!membership) {
     throw new AppError('You are not a member of any organization.', 403);
-  }
-  if (!isMembershipActive(membership)) {
-    throw new AppError('Your access to this organization is no longer active.', 403);
   }
   if (membership.role !== 'ADMIN') {
     throw new AppError('Only organization admins can manage invitations.', 403);
   }
   return membership;
+};
+
+/**
+ * Enqueues the org-invite email and turns a failure into a typed 502
+ * instead of letting a raw queue/Redis error bubble up, or — worse —
+ * silently returning a 200 to the admin while the invitee never gets an
+ * email. The DB write (invitation created/refreshed) and this enqueue call
+ * are still two separate steps with no shared transaction (BullMQ can't
+ * join a Postgres transaction), so a process crash in the narrow window
+ * between them is still possible and would strand the invitation exactly
+ * as before — this only closes the far more common failure mode, an
+ * enqueue-time exception (Redis unreachable, validation error), by making
+ * it visible instead of swallowed. Same residual gap the OTP/reset-password
+ * queues already have. Found by independent review.
+ */
+const enqueueInviteEmailOrThrow = async (params: {
+  email: string;
+  organizationName: string;
+  inviteLink: string;
+}) => {
+  try {
+    await orgInviteEmailQueue.add('org-invite-email-queue', params);
+  } catch (err) {
+    logger.error({ err, email: params.email }, 'Failed to enqueue org-invite email');
+    throw new AppError(
+      'The invitation was saved, but sending the email failed. Please try resending it.',
+      502,
+    );
+  }
 };
 
 const invite_member_into_db = async (req: Request) => {
@@ -96,36 +162,75 @@ const invite_member_into_db = async (req: Request) => {
   // working. `POST /invite/:id/resend` is a thin wrapper around the same
   // "extend + re-send" behavior for an admin working from an invitations
   // list instead of re-typing the email.
-  const existing = await prisma.orgInvitation.findFirst({
-    where: {
-      organizationId: callerMembership.organizationId,
-      email: payload.email,
-      status: 'PENDING',
-    },
+  //
+  // Neither of these two reads depends on the other's result — both only
+  // need callerMembership.organizationId — so they run concurrently instead
+  // of adding two serial round trips to every invite call.
+  const [existing, organization] = await Promise.all([
+    prisma.orgInvitation.findFirst({
+      where: {
+        organizationId: callerMembership.organizationId,
+        email: payload.email,
+        status: 'PENDING',
+      },
+    }),
+    prisma.organization.findUniqueOrThrow({
+      where: { id: callerMembership.organizationId },
+      select: { name: true },
+    }),
+  ]);
+
+  // The findFirst-then-create/update above is still a check-then-act: two
+  // concurrent invites for the same (org, email) can both miss each other's
+  // row and both attempt to create. A partial unique index on
+  // (organizationId, email) WHERE status = 'PENDING' (see migration
+  // 20260714030634) backs this at the DB level so the loser gets a clean
+  // conflict instead of a duplicate PENDING row. Found by independent
+  // review.
+  let invitation;
+  try {
+    invitation = existing
+      ? await prisma.orgInvitation.update({
+          where: { id: existing.id },
+          data: { role: payload.role, token, expiresAt },
+        })
+      : await prisma.orgInvitation.create({
+          data: {
+            organizationId: callerMembership.organizationId,
+            email: payload.email,
+            role: payload.role,
+            invitedById: user.accountId,
+            token,
+            expiresAt,
+          },
+        });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw new AppError(
+        'An invitation for this email is already pending — please try again.',
+        409,
+      );
+    }
+    throw err;
+  }
+
+  // Recorded before the email enqueue, not after: the invitation row above
+  // is already committed at this point, so the audit event should reflect
+  // that immediately. Recording it after enqueueInviteEmailOrThrow would
+  // mean a transient enqueue failure (502) drops this event entirely — and
+  // if the admin retries per the error message, the retry takes the
+  // `existing` branch, logging MEMBER_INVITE_RESENT instead of the true
+  // MEMBER_INVITED, mislabeling the actual creation event. Found by
+  // independent review.
+  await recordAuditEvent({
+    organizationId: callerMembership.organizationId,
+    action: existing ? 'MEMBER_INVITE_RESENT' : 'MEMBER_INVITED',
+    actorAccountId: user.accountId,
+    subjectEmail: invitation.email,
+    metadata: { role: invitation.role, invitationId: invitation.id },
   });
 
-  const organization = await prisma.organization.findUniqueOrThrow({
-    where: { id: callerMembership.organizationId },
-    select: { name: true },
-  });
-
-  const invitation = existing
-    ? await prisma.orgInvitation.update({
-        where: { id: existing.id },
-        data: { role: payload.role, token, expiresAt },
-      })
-    : await prisma.orgInvitation.create({
-        data: {
-          organizationId: callerMembership.organizationId,
-          email: payload.email,
-          role: payload.role,
-          invitedById: user.accountId,
-          token,
-          expiresAt,
-        },
-      });
-
-  await orgInviteEmailQueue.add('org-invite-email-queue', {
+  await enqueueInviteEmailOrThrow({
     email: invitation.email,
     organizationName: organization.name,
     inviteLink: buildInviteLink(token),
@@ -194,7 +299,21 @@ const get_org_members_from_db = async (req: Request) => {
     },
   });
 
-  return members;
+  // `status` alone stays ACTIVE indefinitely past a lapsed `expiresAt` —
+  // isMembershipActive (org_scope.ts) already denies these at the API-auth
+  // layer, but this list is what an admin or compliance export actually
+  // reads to answer "who currently has access." Without a derived field,
+  // that view silently lies: a time-boxed member who expired weeks ago
+  // still shows as plain "ACTIVE." Deliberately NOT written back to the
+  // `status` column itself — collapsing "expired" into the same SUSPENDED
+  // value used for explicit offboarding would erase the distinction between
+  // "this org revoked access" and "this person's time-boxed window lapsed
+  // on its own," which matters for exactly the same audit questions this
+  // fixes. Found by independent review.
+  return members.map((member) => ({
+    ...member,
+    isExpired: !!member.expiresAt && member.expiresAt.getTime() < Date.now(),
+  }));
 };
 
 /**
@@ -239,41 +358,84 @@ const update_org_member_in_db = async (req: Request) => {
     (payload.expiresAt !== undefined &&
       payload.expiresAt !== null &&
       payload.expiresAt.getTime() <= Date.now());
-  if (member.role === 'ADMIN' && member.status === 'ACTIVE' && isDeactivating) {
-    const otherActiveAdmins = await prisma.orgMember.count({
-      where: {
-        organizationId: callerMembership.organizationId,
-        role: 'ADMIN',
-        status: 'ACTIVE',
-        id: { not: member.id },
-      },
-    });
-    if (otherActiveAdmins === 0) {
-      throw new AppError(
-        'Cannot deactivate the last active admin — the organization would have no one left to manage it.',
-        409,
-      );
-    }
-  }
 
   const data: { status?: 'ACTIVE' | 'SUSPENDED'; expiresAt?: Date | null } = {};
   if (payload.status !== undefined) data.status = payload.status;
   if (payload.expiresAt !== undefined) data.expiresAt = payload.expiresAt;
 
-  const updated = await prisma.orgMember.update({
-    where: { id: member.id },
-    data,
-    select: {
-      id: true,
-      role: true,
-      status: true,
-      expiresAt: true,
-      account: {
-        select: {
-          email: true,
-          profile: { select: { fullName: true } },
-        },
+  // The last-admin check-then-act and the update itself are wrapped in one
+  // Serializable transaction: two concurrent requests each deactivating a
+  // *different* one of the org's last two admins could otherwise both read
+  // "1 other active admin" (each other) before either write commits, and
+  // both proceed — leaving zero active admins despite the guard. Under
+  // Serializable isolation, Postgres detects that overlap and aborts the
+  // loser with a serialization failure instead of letting both through.
+  // Also fixed here: the count now excludes admins whose time-boxed access
+  // has already lapsed (status still ACTIVE, expiresAt in the past) — the
+  // original check treated such a row as a valid "other admin", which could
+  // let the *real* last admin be deactivated even though the "other" one
+  // can no longer authenticate at all (resolveCallerOrgContext already
+  // hard-denies an expired membership). Both found by independent review.
+  const updated = await prisma
+    .$transaction(
+      async (tx) => {
+        if (member.role === 'ADMIN' && member.status === 'ACTIVE' && isDeactivating) {
+          const otherActiveAdmins = await tx.orgMember.count({
+            where: {
+              organizationId: callerMembership.organizationId,
+              role: 'ADMIN',
+              status: 'ACTIVE',
+              id: { not: member.id },
+              OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+            },
+          });
+          if (otherActiveAdmins === 0) {
+            throw new AppError(
+              'Cannot deactivate the last active admin — the organization would have no one left to manage it.',
+              409,
+            );
+          }
+        }
+
+        return tx.orgMember.update({
+          where: { id: member.id },
+          data,
+          select: {
+            id: true,
+            role: true,
+            status: true,
+            expiresAt: true,
+            account: {
+              select: {
+                email: true,
+                profile: { select: { fullName: true } },
+              },
+            },
+          },
+        });
       },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    )
+    .catch((err) => {
+      if (err instanceof AppError) throw err;
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2034') {
+        throw new AppError(
+          'This change conflicted with another update to the same organization — please try again.',
+          409,
+        );
+      }
+      throw err;
+    });
+
+  await recordAuditEvent({
+    organizationId: callerMembership.organizationId,
+    action: payload.status !== undefined ? 'MEMBER_STATUS_CHANGED' : 'MEMBER_EXPIRY_CHANGED',
+    actorAccountId: user.accountId,
+    subjectOrgMemberId: member.id,
+    subjectEmail: updated.account.email,
+    metadata: {
+      before: { status: member.status, expiresAt: member.expiresAt },
+      after: { status: updated.status, expiresAt: updated.expiresAt },
     },
   });
 
@@ -306,17 +468,29 @@ const resend_invitation_from_db = async (req: Request) => {
   // fully valid — the exact opposite of the documented intent.
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + INVITATION_EXPIRY_MS);
-  const updated = await prisma.orgInvitation.update({
-    where: { id: invitation.id },
-    data: { token, expiresAt },
+  const [updated, organization] = await Promise.all([
+    prisma.orgInvitation.update({
+      where: { id: invitation.id },
+      data: { token, expiresAt },
+    }),
+    prisma.organization.findUniqueOrThrow({
+      where: { id: callerMembership.organizationId },
+      select: { name: true },
+    }),
+  ]);
+
+  // Recorded before the email enqueue — see the matching comment in
+  // invite_member_into_db for why (the token rotation above is already
+  // committed, so a transient enqueue failure shouldn't drop this event).
+  await recordAuditEvent({
+    organizationId: callerMembership.organizationId,
+    action: 'MEMBER_INVITE_RESENT',
+    actorAccountId: user.accountId,
+    subjectEmail: updated.email,
+    metadata: { invitationId: updated.id },
   });
 
-  const organization = await prisma.organization.findUniqueOrThrow({
-    where: { id: callerMembership.organizationId },
-    select: { name: true },
-  });
-
-  await orgInviteEmailQueue.add('org-invite-email-queue', {
+  await enqueueInviteEmailOrThrow({
     email: updated.email,
     organizationName: organization.name,
     inviteLink: buildInviteLink(updated.token),
@@ -443,6 +617,13 @@ const accept_invitation_into_db = async (req: Request) => {
       });
     }, 'This account already belongs to a different organization and cannot join another.');
 
+    await recordAuditEvent({
+      organizationId: invitation.organizationId,
+      action: 'MEMBER_INVITE_ACCEPTED',
+      subjectEmail: existingAccount.email,
+      metadata: { invitationId: invitation.id, isNewAccount: false },
+    });
+
     const accessToken = jwtHelpers.generateAccessToken({
       email: existingAccount.email,
       role: existingAccount.role,
@@ -456,6 +637,16 @@ const accept_invitation_into_db = async (req: Request) => {
     throw new AppError('Full name is required to create your account.', 400);
   }
   const fullName = payload.fullName;
+
+  // Only enforced here, not in the zod schema — see the schema-side comment
+  // on organization_validations.accept_invitation for why. This is the
+  // branch that's actually choosing a brand-new password.
+  if (payload.password.length < NEW_ACCOUNT_PASSWORD_MIN_LENGTH) {
+    throw new AppError(
+      `Password must be at least ${NEW_ACCOUNT_PASSWORD_MIN_LENGTH} characters.`,
+      400,
+    );
+  }
 
   const hashPassword = bcrypt.hashSync(payload.password, 10);
 
@@ -511,6 +702,13 @@ const accept_invitation_into_db = async (req: Request) => {
 
     return account.id;
   }, 'This invitation has already been accepted or the account already exists.');
+
+  await recordAuditEvent({
+    organizationId: invitation.organizationId,
+    action: 'MEMBER_INVITE_ACCEPTED',
+    subjectEmail: invitation.email,
+    metadata: { invitationId: invitation.id, isNewAccount: true },
+  });
 
   const accessToken = jwtHelpers.generateAccessToken({
     email: invitation.email,

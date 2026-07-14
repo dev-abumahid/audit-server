@@ -1,5 +1,7 @@
+import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
+import { logger } from '../../lib/logger.js';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
@@ -440,11 +442,57 @@ const assign_member_to_inspection = async (req: Request) => {
   });
   if (!member) throw new AppError('Organization member not found', 404);
 
-  const assignment = await prisma.inspectionAssignment.upsert({
-    where: { orgMemberId_inspectionId: { orgMemberId, inspectionId } },
-    create: { orgMemberId, inspectionId, assignedById: user.accountId },
-    update: {},
+  // No plain unique constraint on (orgMemberId, inspectionId) anymore — a
+  // revoked assignment shouldn't block re-assigning the same pair, so the
+  // uniqueness is a partial index (revokedAt IS NULL) that Prisma's schema
+  // DSL can't express, hence no generated compound-unique input for
+  // upsert(). Look up the currently-active row explicitly instead.
+  const existingActive = await prisma.inspectionAssignment.findFirst({
+    where: { orgMemberId, inspectionId, revokedAt: null },
   });
+  if (existingActive) return existingActive;
+
+  // The findFirst-then-create above is still a check-then-act: two
+  // concurrent assign requests for the same (orgMemberId, inspectionId)
+  // pair can both miss each other's row and both attempt to create. The
+  // partial unique index (revokedAt IS NULL) backs this at the DB level, so
+  // catch the resulting P2002 and treat it the same as the existingActive
+  // case above rather than letting it surface as a raw 500 — same pattern
+  // as invite_member_into_db's identical race (organization.service.ts).
+  // Found by independent review.
+  let assignment;
+  try {
+    assignment = await prisma.inspectionAssignment.create({
+      data: { orgMemberId, inspectionId, assignedById: user.accountId },
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      const winner = await prisma.inspectionAssignment.findFirst({
+        where: { orgMemberId, inspectionId, revokedAt: null },
+      });
+      if (winner) return winner;
+    }
+    throw err;
+  }
+
+  // Never let an audit-log write fail the request it's logging — the
+  // assignment above already committed, so an audit-insert error here must
+  // not surface as a 500 for an otherwise-successful assignment. Mirrors
+  // organization.service.ts's recordAuditEvent. Found by independent review
+  // (this file's audit-log calls were missed when that pattern was added).
+  try {
+    await prisma.orgAuditLog.create({
+      data: {
+        organizationId,
+        action: 'INSPECTION_ASSIGNMENT_CREATED',
+        actorAccountId: user.accountId,
+        subjectOrgMemberId: orgMemberId,
+        metadata: { inspectionId, assignmentId: assignment.id },
+      },
+    });
+  } catch (err) {
+    logger.error({ err, inspectionId, orgMemberId }, 'Failed to write OrgAuditLog entry');
+  }
 
   return assignment;
 };
@@ -478,7 +526,31 @@ const unassign_member_from_inspection = async (req: Request) => {
   });
   if (!member) throw new AppError('Organization member not found', 404);
 
-  await prisma.inspectionAssignment.deleteMany({ where: { orgMemberId, inspectionId } });
+  // Soft-revoke, not delete: an auditor investigating a disputed finding
+  // needs to be able to answer "who was assigned to this inspection, and
+  // who removed them, and when" — a hard delete destroys that history the
+  // moment anyone is ever re-assigned or offboarded. Found by independent
+  // review.
+  const { count } = await prisma.inspectionAssignment.updateMany({
+    where: { orgMemberId, inspectionId, revokedAt: null },
+    data: { revokedAt: new Date(), revokedById: user.accountId },
+  });
+
+  if (count > 0) {
+    try {
+      await prisma.orgAuditLog.create({
+        data: {
+          organizationId,
+          action: 'INSPECTION_ASSIGNMENT_REVOKED',
+          actorAccountId: user.accountId,
+          subjectOrgMemberId: orgMemberId,
+          metadata: { inspectionId },
+        },
+      });
+    } catch (err) {
+      logger.error({ err, inspectionId, orgMemberId }, 'Failed to write OrgAuditLog entry');
+    }
+  }
 
   return { orgMemberId, inspectionId };
 };
@@ -489,6 +561,13 @@ const get_inspection_assignments = async (req: Request) => {
   if (ctx.role !== 'ADMIN') {
     throw new AppError('Only organization admins can view inspection assignments.', 403);
   }
+  // Kept consistent with assign/unassign's requireCallerOrganizationId call
+  // even though the id itself isn't used below: without it, an ADMIN with
+  // no OrgMember row (the ADMIN-of-self backward-compat fallback) could
+  // list assignments here while assign/unassign both 403 for the same
+  // caller — an inconsistent experience across the three assignment
+  // endpoints for the same edge case. Found by independent review.
+  await requireCallerOrganizationId(ctx);
 
   const { id: inspectionId } = req.params as { id: string };
   const inspection = await prisma.inspection.findFirst({
@@ -497,7 +576,7 @@ const get_inspection_assignments = async (req: Request) => {
   if (!inspection) throw new AppError('Inspection not found', 404);
 
   return prisma.inspectionAssignment.findMany({
-    where: { inspectionId },
+    where: { inspectionId, revokedAt: null },
     include: {
       orgMember: {
         select: {

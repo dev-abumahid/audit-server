@@ -26,6 +26,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
+    orgAuditLog: {
+      create: vi.fn(),
+    },
     $transaction: vi.fn(),
   },
 }));
@@ -94,6 +97,39 @@ describe('organization service — invite creation', () => {
       'org-invite-email-queue',
       expect.objectContaining({ email: 'newperson@test.com', organizationName: 'Acme' }),
     );
+  });
+
+  it('converts a concurrent invite-creation race (partial unique index violation) into a clean 409', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    // Neither admin's findFirst sees the other's in-flight invite — both
+    // reach create(), and the DB's partial unique index on
+    // (organizationId, email) WHERE status='PENDING' rejects the loser.
+    orgInvitationDb.findFirst.mockResolvedValue(null);
+    organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
+    const { Prisma } = await import('@prisma/client');
+    orgInvitationDb.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
+
+    await expect(
+      organization_services.invite_member_into_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          body: { email: 'raced@test.com', role: 'VIEWER' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(mockQueueAdd).not.toHaveBeenCalled();
   });
 
   it('refreshes an existing PENDING invitation instead of creating a duplicate', async () => {
@@ -636,7 +672,10 @@ describe('organization service — list org members', () => {
     expect(orgMemberDb.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { organizationId: ORG_1 } }),
     );
-    expect(result).toEqual(members);
+    // isExpired is a derived field the service adds on top of the raw row —
+    // see the doc comment on get_org_members_from_db for why it's derived
+    // rather than written back to `status`.
+    expect(result).toEqual(members.map((m) => ({ ...m, isExpired: false })));
   });
 
   it('rejects a caller with no org membership at all', async () => {
@@ -752,7 +791,16 @@ describe('organization service — list pending invitations', () => {
 });
 
 describe('organization service — update org member', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The last-admin count-and-update is now wrapped in a Serializable
+    // prisma.$transaction — hand the callback a tx backed by the same
+    // orgMemberDb mock so existing assertions on orgMemberDb.count/update
+    // still see the calls made inside it.
+    mockTransaction.mockImplementation(async (fn: (tx: unknown) => unknown) =>
+      fn({ orgMember: orgMemberDb }),
+    );
+  });
 
   it('ADMIN updates a member status scoped to their own org', async () => {
     orgMemberDb.findUnique.mockResolvedValue({
@@ -989,6 +1037,7 @@ describe('organization service — update org member', () => {
           role: 'ADMIN',
           status: 'ACTIVE',
           id: { not: 'member-other-admin' },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: expect.any(Date) } }],
         },
       }),
     );
@@ -1030,6 +1079,66 @@ describe('organization service — update org member', () => {
 
     expect(orgMemberDb.update).toHaveBeenCalled();
     expect(result.status).toBe('SUSPENDED');
+  });
+
+  it('does not count an admin whose own expiresAt has already lapsed as a valid "other admin"', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgMemberDb.findFirst.mockResolvedValue({
+      id: 'member-other-admin',
+      organizationId: ORG_1,
+      accountId: 'admin-2',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+
+    // Simulate a real DB instead of a bare mocked count: a third admin row
+    // whose own time-boxed expiresAt lapsed an hour ago. count()'s
+    // implementation here actually applies the where-clause's OR semantics
+    // against this row, so the test fails if the code stops filtering out
+    // lapsed-but-still-status-ACTIVE admins.
+    const expiredThirdAdmin = {
+      id: 'member-expired-admin',
+      organizationId: ORG_1,
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+    };
+    orgMemberDb.count.mockImplementation(
+      ({ where }: { where: Record<string, unknown> }) =>
+        new Promise((resolve) => {
+          const row = expiredThirdAdmin;
+          const notExcluded = (where.id as { not: string })?.not !== row.id;
+          const orgMatches = where.organizationId === row.organizationId;
+          const roleMatches = where.role === row.role;
+          const statusMatches = where.status === row.status;
+          const orClauses = where.OR as Array<Record<string, unknown>> | undefined;
+          const passesOr = !!orClauses?.some((clause) => {
+            if (clause.expiresAt === null) return row.expiresAt === null;
+            const gt = (clause.expiresAt as { gt?: Date } | undefined)?.gt;
+            return !!gt && row.expiresAt.getTime() > gt.getTime();
+          });
+          resolve(orgMatches && roleMatches && statusMatches && notExcluded && passesOr ? 1 : 0);
+        }),
+    );
+
+    await expect(
+      organization_services.update_org_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'member-other-admin' },
+          body: { status: 'SUSPENDED' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(orgMemberDb.update).not.toHaveBeenCalled();
   });
 
   it('does not run the last-admin check when deactivating a non-admin', async () => {

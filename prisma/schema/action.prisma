@@ -49,6 +49,8 @@ model Action {
 
     // Slice-1 (#55) prep
     findingAssignments FindingAssignment[]
+
+    @@index([orgAccountId])
 }
 
 model ActionMessage {

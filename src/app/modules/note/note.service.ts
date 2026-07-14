@@ -3,19 +3,23 @@ import * as fs from 'fs';
 import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
-import { resolveCallerOrgContext } from '../../utils/org_scope.js';
+import {
+  applyActionScope,
+  assertCanWriteToInspection,
+  resolveCallerOrgContext,
+} from '../../utils/org_scope.js';
 import { AppError } from '../../utils/app_error.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 
 const get_all_note_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  // define your own logic here
-  const result = await prisma.note.findMany({
-    where: {
-      orgAccountId: ctx.organizationId,
-    },
-  });
+  // Notes are 1:1 with an inspection, so they inherit the same Lead
+  // Auditor/Viewer assignment scoping as Inspection/Action — otherwise a
+  // Lead Auditor restricted to inspection A could still read notes on
+  // inspection B. Found by independent review.
+  const whereCondition = await applyActionScope({ orgAccountId: ctx.organizationId }, ctx);
+  const result = await prisma.note.findMany({ where: whereCondition });
   return result;
 };
 
@@ -23,7 +27,8 @@ const get_single_note_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   const { id } = req.params as { id: string };
-  const result = await prisma.note.findFirst({ where: { id, orgAccountId: ctx.organizationId } });
+  const whereCondition = await applyActionScope({ id, orgAccountId: ctx.organizationId }, ctx);
+  const result = await prisma.note.findFirst({ where: whereCondition });
   if (!result) throw new AppError('Note not found', 404);
   return result;
 };
@@ -31,9 +36,11 @@ const get_note_by_inspection_id_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   const { inspectionId } = req.params as { inspectionId: string };
-  const result = await prisma.note.findFirst({
-    where: { inspectionId, orgAccountId: ctx.organizationId },
-  });
+  const whereCondition = await applyActionScope(
+    { inspectionId, orgAccountId: ctx.organizationId },
+    ctx,
+  );
+  const result = await prisma.note.findFirst({ where: whereCondition });
   if (!result) throw new AppError('Note not found', 404);
   return result;
 };
@@ -48,6 +55,7 @@ const save_raw_note_into_db = async (req: Request) => {
     where: { id: body.inspectionId, orgAccountId: ctx.organizationId },
   });
   if (!inspection) throw new AppError('Inspection not found', 404);
+  await assertCanWriteToInspection(ctx, body.inspectionId);
 
   // check note exist or not
   const isNoteExist = await prisma.note.findFirst({
@@ -77,6 +85,7 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
     where: { id: body.inspectionId, orgAccountId: ctx.organizationId },
   });
   if (!inspection) throw new AppError('Inspection not found', 404);
+  await assertCanWriteToInspection(ctx, body.inspectionId);
 
   // check note exist or not
   const isNoteExist = await prisma.note.findFirst({
@@ -127,6 +136,7 @@ const update_note_into_db = async (req: Request) => {
 
   const existing = await prisma.note.findFirst({ where: { id, orgAccountId: ctx.organizationId } });
   if (!existing) throw new AppError('Note not found', 404);
+  await assertCanWriteToInspection(ctx, existing.inspectionId);
 
   const result = await prisma.note.update({
     where: { id },
@@ -147,6 +157,7 @@ const delete_note_from_db = async (req: Request) => {
   const { id } = req.params as { id: string };
   const existing = await prisma.note.findFirst({ where: { id, orgAccountId: ctx.organizationId } });
   if (!existing) throw new AppError('Note not found', 404);
+  await assertCanWriteToInspection(ctx, existing.inspectionId);
   const result = await prisma.note.delete({ where: { id } });
   return result;
 };

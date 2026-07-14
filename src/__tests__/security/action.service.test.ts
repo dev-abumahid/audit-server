@@ -246,7 +246,7 @@ describe('action service — org scoping (ticket #6)', () => {
       await action_service.get_all_action_from_db(makeReq());
 
       expect(assignmentDb.findMany).toHaveBeenCalledWith({
-        where: { orgMemberId: MEMBER_ID },
+        where: { orgMemberId: MEMBER_ID, revokedAt: null },
         select: { inspectionId: true },
       });
       const [findArg] = db.findMany.mock.calls[0];
