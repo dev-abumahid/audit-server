@@ -76,6 +76,10 @@ const get_single_site_from_db = async (req: Request) => {
   const result = await prisma.site.findUnique({
     where: { id, org_account_id: ctx.organizationId },
   });
+  // Every sibling module's get_single_* throws 404 for a missing/cross-org
+  // record; this one returned a bare 200 with data: null instead. Found by
+  // independent review.
+  if (!result) throw new AppError('Site not found', 404);
   return result;
 };
 
@@ -85,7 +89,11 @@ const create_site_into_db = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const payload = req.body;
   payload.org_account_id = ctx.organizationId;
-  const result = await prisma.site.create({ data: req.body });
+  // Was `data: req.body` — only worked because payload and req.body are the
+  // same object reference. Using `payload` directly makes that dependency
+  // explicit instead of relying on shared mutation. Found by independent
+  // review.
+  const result = await prisma.site.create({ data: payload });
   return result;
 };
 
@@ -116,6 +124,15 @@ const delete_site_from_db = async (req: Request) => {
   const ctx = await resolveCallerOrgContext(user.accountId);
   assertCanWriteOrgResource(ctx);
   const id = req.params.id as string;
+  // Existence check before delete, matching every sibling module — deleting
+  // a missing/cross-org id used to fall straight through to Prisma's raw
+  // P2025 "record to delete does not exist" error (a 500), instead of the
+  // clean 404 the rest of the API returns for the same class of request.
+  // Found by independent review.
+  const existing = await prisma.site.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Site not found', 404);
   const result = await prisma.site.delete({ where: { id, org_account_id: ctx.organizationId } });
   return result;
 };

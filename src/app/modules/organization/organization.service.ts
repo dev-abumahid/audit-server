@@ -8,7 +8,10 @@ import { prisma } from '../../lib/prisma.js';
 import { orgInviteEmailQueue } from '../../queues/email/org-invite/org-invite.email.queue.js';
 import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
-import { findActiveMembership } from '../../utils/org_scope.js';
+import {
+  findActiveMembership,
+  recordOrgAuditEvent as recordAuditEvent,
+} from '../../utils/org_scope.js';
 
 // New-account password minimum, enforced here (not in the zod schema) since
 // this same `password` field also authenticates an *existing* account's
@@ -17,39 +20,6 @@ import { findActiveMembership } from '../../utils/org_scope.js';
 // for any account created before an 8-char minimum existed. Found by
 // independent review.
 const NEW_ACCOUNT_PASSWORD_MIN_LENGTH = 8;
-
-/**
- * Writes an OrgAuditLog row for an org-membership lifecycle event. Fire-
- * and-forget from the caller's perspective (awaited, but never allowed to
- * fail the request it's logging) — an audit-log write failing shouldn't
- * block the actual invite/status-change/accept it's recording, or every
- * legitimate action becomes hostage to the audit table being healthy. Found
- * by independent review: without a durable event log, "who suspended
- * member X, and when, and who invited them" is unanswerable once a status
- * change overwrites OrgMember's current-state columns.
- */
-const recordAuditEvent = async (entry: {
-  organizationId: string;
-  action:
-    | 'MEMBER_INVITED'
-    | 'MEMBER_INVITE_RESENT'
-    | 'MEMBER_INVITE_ACCEPTED'
-    | 'MEMBER_STATUS_CHANGED'
-    | 'MEMBER_EXPIRY_CHANGED'
-    | 'MEMBER_REMOVED';
-  actorAccountId?: string | null;
-  subjectOrgMemberId?: string | null;
-  subjectEmail?: string | null;
-  metadata?: Record<string, unknown>;
-}) => {
-  try {
-    await prisma.orgAuditLog.create({
-      data: { ...entry, metadata: entry.metadata as Prisma.InputJsonValue },
-    });
-  } catch (err) {
-    logger.error({ err, entry }, 'Failed to write OrgAuditLog entry');
-  }
-};
 
 // Named constant, not a magic number — invitations are valid for this long
 // after being (re)sent.
@@ -145,6 +115,15 @@ const invite_member_into_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const payload: { email: string; role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER' } =
     req?.body;
+  // Normalized once, used everywhere below (lookup, create/update, email
+  // send) — accept_invitation_into_db already matches Account.email
+  // case-insensitively, but OrgInvitation.email itself (and the partial
+  // unique index backing "one PENDING invite per org+email") was plain
+  // case-sensitive text. Without normalizing here, inviting
+  // 'Jane@Company.com' then 'jane@company.com' for the same org created two
+  // separate PENDING rows with two different tokens instead of the intended
+  // refresh-existing behavior. Found by independent review.
+  const email = payload.email.trim().toLowerCase();
 
   // Org scoping: the invite always targets the caller's own org — there is
   // no way to pass an organizationId in the body, which is deliberate.
@@ -170,7 +149,7 @@ const invite_member_into_db = async (req: Request) => {
     prisma.orgInvitation.findFirst({
       where: {
         organizationId: callerMembership.organizationId,
-        email: payload.email,
+        email,
         status: 'PENDING',
       },
     }),
@@ -197,7 +176,7 @@ const invite_member_into_db = async (req: Request) => {
       : await prisma.orgInvitation.create({
           data: {
             organizationId: callerMembership.organizationId,
-            email: payload.email,
+            email,
             role: payload.role,
             invitedById: user.accountId,
             token,
@@ -719,6 +698,77 @@ const accept_invitation_into_db = async (req: Request) => {
   return { accessToken, accountId: newAccountId, isNewAccount: true };
 };
 
+/**
+ * Admin-only. Exposes requireApprovalForSubAssignment (the slice 4 toggle:
+ * whether a Lead Auditor's finding sub-assignment needs an Admin's sign-off
+ * before the assignee gets access — see action.service.ts's
+ * assign_light_user_to_action) and leadAuditorRoleLabel (the configurable
+ * display name for the Lead Auditor role — the OrgRole enum value itself
+ * stays fixed, only the label shown to users is customizable).
+ */
+const get_organization_settings_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+
+  return prisma.organization.findUniqueOrThrow({
+    where: { id: callerMembership.organizationId },
+    select: {
+      id: true,
+      name: true,
+      requireApprovalForSubAssignment: true,
+      leadAuditorRoleLabel: true,
+    },
+  });
+};
+
+const update_organization_settings_in_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const payload: { requireApprovalForSubAssignment?: boolean; leadAuditorRoleLabel?: string } =
+    req?.body;
+  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+
+  const before = await prisma.organization.findUniqueOrThrow({
+    where: { id: callerMembership.organizationId },
+    select: { requireApprovalForSubAssignment: true, leadAuditorRoleLabel: true },
+  });
+
+  const updated = await prisma.organization.update({
+    where: { id: callerMembership.organizationId },
+    data: {
+      ...(payload.requireApprovalForSubAssignment !== undefined && {
+        requireApprovalForSubAssignment: payload.requireApprovalForSubAssignment,
+      }),
+      ...(payload.leadAuditorRoleLabel !== undefined && {
+        leadAuditorRoleLabel: payload.leadAuditorRoleLabel,
+      }),
+    },
+    select: {
+      id: true,
+      name: true,
+      requireApprovalForSubAssignment: true,
+      leadAuditorRoleLabel: true,
+    },
+  });
+
+  await recordAuditEvent({
+    organizationId: callerMembership.organizationId,
+    action: 'ORG_SETTINGS_CHANGED',
+    actorAccountId: user.accountId,
+    metadata: {
+      before: {
+        requireApprovalForSubAssignment: before.requireApprovalForSubAssignment,
+        leadAuditorRoleLabel: before.leadAuditorRoleLabel,
+      },
+      after: {
+        requireApprovalForSubAssignment: updated.requireApprovalForSubAssignment,
+        leadAuditorRoleLabel: updated.leadAuditorRoleLabel,
+      },
+    },
+  });
+
+  return updated;
+};
+
 export const organization_services = {
   invite_member_into_db,
   get_pending_invitations_from_db,
@@ -726,4 +776,6 @@ export const organization_services = {
   update_org_member_in_db,
   resend_invitation_from_db,
   accept_invitation_into_db,
+  get_organization_settings_from_db,
+  update_organization_settings_in_db,
 };

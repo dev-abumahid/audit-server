@@ -22,4 +22,39 @@ router.patch(
 );
 router.delete('/:id', auth('ORGANIZATION'), action_controller.delete_action);
 
+// Slice 4 (#55): sub-assign one finding to an internal Light User member.
+// Admin-only and assigned-Lead-Auditor-only, enforced in the service via
+// assertCanWriteToInspection — see action.service.ts.
+router.post(
+  '/:id/assign',
+  auth('ORGANIZATION'),
+  RequestValidator(action_validations.assign_light_user),
+  action_controller.assign_light_user,
+);
+router.delete(
+  '/:id/assign/:orgMemberId',
+  auth('ORGANIZATION'),
+  action_controller.unassign_light_user,
+);
+router.get('/:id/assignments', auth('ORGANIZATION'), action_controller.get_finding_assignments);
+
+// Self-scoped — any member can see their own sub-assignments (including
+// pending/rejected ones), since there's no cross-member data exposed. Not
+// nested under /:id since it's not about one finding.
+router.get('/assignments/mine', auth('ORGANIZATION'), action_controller.get_my_finding_assignments);
+
+// Admin-only (enforced in the service via assertIsOrgAdmin). Not nested
+// under /:id — an admin approves/rejects from a pending-approvals list, not
+// necessarily while looking at one specific finding.
+router.post(
+  '/assignments/:id/approve',
+  auth('ORGANIZATION'),
+  action_controller.approve_finding_assignment,
+);
+router.post(
+  '/assignments/:id/reject',
+  auth('ORGANIZATION'),
+  action_controller.reject_finding_assignment,
+);
+
 export default router;

@@ -131,6 +131,14 @@ describe('site service — org scoping (ticket #6)', () => {
         where: { id: 's1', org_account_id: ORG_A },
       });
     });
+
+    it('throws 404 for another org site instead of returning null', async () => {
+      db.findUnique.mockResolvedValue(null);
+
+      await expect(
+        site_service.get_single_site_from_db(makeReq({ params: { id: 'org-b-site' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
   });
 
   describe('create_site_into_db', () => {
@@ -169,12 +177,28 @@ describe('site service — org scoping (ticket #6)', () => {
   });
 
   describe('delete_site_from_db', () => {
-    it('includes org_account_id in WHERE clause', async () => {
+    it('verifies ownership before deleting', async () => {
+      db.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
       db.delete.mockResolvedValue({});
 
       await site_service.delete_site_from_db(makeReq({ params: { id: 's1' } }));
 
-      expect(db.delete).toHaveBeenCalledWith({ where: { id: 's1', org_account_id: ORG_A } });
+      expect(db.findFirst).toHaveBeenCalledWith({
+        where: { id: 's1', org_account_id: ORG_A },
+      });
+      expect(db.delete).toHaveBeenCalledWith({
+        where: { id: 's1', org_account_id: ORG_A },
+      });
+    });
+
+    it('throws 404 and does NOT delete another org site', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        site_service.delete_site_from_db(makeReq({ params: { id: 'org-b-site' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.delete).not.toHaveBeenCalled();
     });
   });
 });

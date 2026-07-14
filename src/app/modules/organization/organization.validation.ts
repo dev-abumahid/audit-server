@@ -31,7 +31,11 @@ const invite_member = z.object({
 const accept_invitation = z.object({
   token: z.string('Token is required.').min(1, 'Token is required.'),
   password: z.string('Password is required.').min(1, 'Password is required.'),
-  fullName: z.string().min(1).optional(),
+  // Capped like every other user-supplied display string in this module
+  // (see leadAuditorRoleLabel) — this is the one field on this public,
+  // unauthenticated endpoint that had no length limit at all. Found by
+  // independent review.
+  fullName: z.string().min(1).max(255).optional(),
 });
 
 // Admin-only member management (offboarding / time-boxing access). At least
@@ -52,8 +56,29 @@ const update_member = z
     message: 'At least one of status or expiresAt must be provided.',
   });
 
+// Slice 4 (#55): requireApprovalForSubAssignment toggles whether a Lead
+// Auditor's finding sub-assignment needs Admin sign-off before it takes
+// effect; leadAuditorRoleLabel is the configurable display name for the
+// Lead Auditor role. At least one of the two must be present, matching
+// update_member's pattern — a bare `{}` body would otherwise silently
+// succeed and no-op.
+const update_settings = z
+  .object({
+    requireApprovalForSubAssignment: z.boolean().optional(),
+    leadAuditorRoleLabel: z.string().min(1).max(100).optional(),
+  })
+  .refine(
+    (data) =>
+      data.requireApprovalForSubAssignment !== undefined || data.leadAuditorRoleLabel !== undefined,
+    {
+      message:
+        'At least one of requireApprovalForSubAssignment or leadAuditorRoleLabel must be provided.',
+    },
+  );
+
 export const organization_validations = {
   invite_member,
   accept_invitation,
   update_member,
+  update_settings,
 };

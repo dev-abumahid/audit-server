@@ -7,6 +7,7 @@ import {
   assertCanWriteToInspection,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 const get_all_recommendation_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
@@ -15,17 +16,38 @@ const get_all_recommendation_from_db = async (req: Request) => {
   // Lead Auditor/Viewer assignment scoping as Inspection/Action. Found by
   // independent review.
   const whereCondition = await applyActionScope({ orgAccountId: ctx.organizationId }, ctx);
-  const result = await prisma.recommendation.findMany({
-    where: whereCondition,
-    select: {
-      id: true,
-      siteId: true,
-      riskId: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+
+  // Was an unconditional findMany with no limit, unlike every other list
+  // endpoint in this feature (site/template/risk all paginate). Found by
+  // independent review.
+  const pagination = paginationHelper({
+    page: req.query.page as string,
+    limit: req.query.limit as string,
   });
-  return result;
+  const [data, total] = await Promise.all([
+    prisma.recommendation.findMany({
+      where: whereCondition,
+      skip: pagination.skip,
+      take: pagination.limit,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        siteId: true,
+        riskId: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.recommendation.count({ where: whereCondition }),
+  ]);
+
+  return {
+    data,
+    meta: {
+      ...buildPaginationMeta(pagination, total),
+      totalPage: Math.ceil(total / pagination.limit),
+    },
+  };
 };
 
 const get_single_recommendation_from_db = async (req: Request) => {

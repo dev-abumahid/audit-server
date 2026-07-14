@@ -1,6 +1,7 @@
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { RedisStore, type RedisReply } from 'rate-limit-redis';
 import { redisConnection } from '../queues/connection.js';
+import { JwtPayloadType } from '../utils/JWT.js';
 
 export const makeRedisStore = (prefix: string) =>
   new RedisStore({
@@ -45,4 +46,25 @@ export const orgInviteAcceptLimiter = rateLimit({
       ? `token:${req.body.token}`
       : ipKeyGenerator(req.ip ?? ''),
   message: { success: false, message: 'Too many attempts. Please try again later.' },
+});
+
+// POST /invite and POST /invite/:id/resend both trigger an outbound email to
+// an admin-supplied address, but had no throttle at all — unlike
+// orgInviteAcceptLimiter on the acceptance side. A compromised or malicious
+// ADMIN account could otherwise call either in a tight loop to spam
+// arbitrary external addresses with invite emails, or exhaust the email
+// queue. Keyed by the caller's own accountId (not IP) since these are
+// always authenticated requests — an admin working from multiple IPs still
+// shares one budget, and unrelated admins in the same office/VPN don't
+// collide. Must be mounted after auth() so req.user is populated. Found by
+// independent review.
+export const orgInviteSendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeRedisStore('rl:org:invite-send:'),
+  keyGenerator: (req) =>
+    (req.user as JwtPayloadType | undefined)?.accountId ?? ipKeyGenerator(req.ip ?? ''),
+  message: { success: false, message: 'Too many invitations sent. Please try again later.' },
 });

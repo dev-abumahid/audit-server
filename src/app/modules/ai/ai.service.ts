@@ -378,7 +378,7 @@ const delete_pinecone_data_from_database = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const fileName = req.query.fileName as string;
 
-  await fetch(
+  const aiResponse = await fetch(
     `${configs.ai_server_end_point}/delete-vectors-by-filename?file_name=${fileName}&organization_username=${ctx.organizationId}`,
     {
       method: 'DELETE',
@@ -388,6 +388,15 @@ const delete_pinecone_data_from_database = async (req: Request) => {
       },
     },
   );
+  // Every other AI-service call in this file throws on a non-ok response;
+  // this one proceeded to delete the local DB record regardless, letting
+  // the DB and the actual Pinecone vector store drift out of sync on a
+  // failed upstream delete (network blip, secret mismatch, file already
+  // gone) with no error surfaced to the caller. Found by independent
+  // review.
+  if (!aiResponse.ok) {
+    throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+  }
 
   const result = await prisma.pineconeDocument.deleteMany({
     where: {

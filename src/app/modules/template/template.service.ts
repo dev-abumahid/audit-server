@@ -90,6 +90,10 @@ const get_single_template_from_db = async (req: Request) => {
     },
   });
 
+  // Every sibling module's get_single_* throws 404 for a missing/cross-org
+  // record; this one returned a bare 200 with data: null instead. Found by
+  // independent review.
+  if (!result) throw new AppError('Template not found', 404);
   return result;
 };
 
@@ -137,7 +141,18 @@ const delete_template_from_db = async (req: Request) => {
   const ctx = await resolveCallerOrgContext(user?.accountId);
   assertCanWriteOrgResource(ctx);
   const { id } = req.params as { id: string };
-  const result = await prisma.template.delete({ where: { id, orgAccountId: ctx.organizationId } });
+  // Existence check before delete, matching every sibling module — deleting
+  // a missing/cross-org id used to fall straight through to Prisma's raw
+  // P2025 "record to delete does not exist" error (a 500), instead of the
+  // clean 404 the rest of the API returns for the same class of request.
+  // Found by independent review.
+  const existing = await prisma.template.findFirst({
+    where: { id, orgAccountId: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Template not found', 404);
+  const result = await prisma.template.delete({
+    where: { id, orgAccountId: ctx.organizationId },
+  });
   return result;
 };
 
@@ -190,7 +205,7 @@ const delete_template_page_by_id_from_db = async (req: Request) => {
     select: { template: { select: { orgAccountId: true } } },
   });
   if (!page || page.template.orgAccountId !== ctx.organizationId) {
-    throw new Error('Page not found');
+    throw new AppError('Page not found', 404);
   }
   return await prisma.page.delete({ where: { id } });
 };
@@ -252,7 +267,7 @@ const delete_page_question_by_id_from_db = async (req: Request) => {
     select: { page: { select: { template: { select: { orgAccountId: true } } } } },
   });
   if (!question || question.page.template.orgAccountId !== ctx.organizationId) {
-    throw new Error('Question not found');
+    throw new AppError('Question not found', 404);
   }
   return await prisma.question.delete({ where: { id } });
 };

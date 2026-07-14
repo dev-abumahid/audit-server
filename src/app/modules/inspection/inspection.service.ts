@@ -1,7 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
-import { logger } from '../../lib/logger.js';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
@@ -9,7 +8,9 @@ import uploadCloud from '../../utils/cloudinary.js';
 import {
   applyInspectionScope,
   assertCanWriteToInspection,
-  CallerOrgContext,
+  assertIsOrgAdmin,
+  recordOrgAuditEvent,
+  requireCallerOrganizationId,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
@@ -402,31 +403,10 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
  * slice; this is the piece that actually makes assignment-based access
  * meaningful rather than a permanently-empty scope.
  */
-/**
- * Every assignment endpoint needs the caller's real Organization.id (not
- * ctx.organizationId, which is the anchor Account.id used by the legacy
- * orgAccountId columns) to scope which OrgMember rows they're allowed to
- * assign. Requires ctx.orgMemberId to be set — an ADMIN with no OrgMember
- * row at all (the backward-compat fallback for pre-multi-tenant accounts)
- * has no real Organization to assign anyone into.
- */
-const requireCallerOrganizationId = async (ctx: CallerOrgContext): Promise<string> => {
-  if (!ctx.orgMemberId) {
-    throw new AppError('You are not part of a multi-member organization.', 403);
-  }
-  const membership = await prisma.orgMember.findUnique({ where: { id: ctx.orgMemberId } });
-  if (!membership) {
-    throw new AppError('You are not part of a multi-member organization.', 403);
-  }
-  return membership.organizationId;
-};
-
 const assign_member_to_inspection = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  if (ctx.role !== 'ADMIN') {
-    throw new AppError('Only organization admins can assign inspections.', 403);
-  }
+  assertIsOrgAdmin(ctx);
   const organizationId = await requireCallerOrganizationId(ctx);
 
   const { id: inspectionId } = req.params as { id: string };
@@ -477,22 +457,14 @@ const assign_member_to_inspection = async (req: Request) => {
 
   // Never let an audit-log write fail the request it's logging — the
   // assignment above already committed, so an audit-insert error here must
-  // not surface as a 500 for an otherwise-successful assignment. Mirrors
-  // organization.service.ts's recordAuditEvent. Found by independent review
-  // (this file's audit-log calls were missed when that pattern was added).
-  try {
-    await prisma.orgAuditLog.create({
-      data: {
-        organizationId,
-        action: 'INSPECTION_ASSIGNMENT_CREATED',
-        actorAccountId: user.accountId,
-        subjectOrgMemberId: orgMemberId,
-        metadata: { inspectionId, assignmentId: assignment.id },
-      },
-    });
-  } catch (err) {
-    logger.error({ err, inspectionId, orgMemberId }, 'Failed to write OrgAuditLog entry');
-  }
+  // not surface as a 500 for an otherwise-successful assignment.
+  await recordOrgAuditEvent({
+    organizationId,
+    action: 'INSPECTION_ASSIGNMENT_CREATED',
+    actorAccountId: user.accountId,
+    subjectOrgMemberId: orgMemberId,
+    metadata: { inspectionId, assignmentId: assignment.id },
+  });
 
   return assignment;
 };
@@ -500,9 +472,7 @@ const assign_member_to_inspection = async (req: Request) => {
 const unassign_member_from_inspection = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  if (ctx.role !== 'ADMIN') {
-    throw new AppError('Only organization admins can unassign inspections.', 403);
-  }
+  assertIsOrgAdmin(ctx);
   const organizationId = await requireCallerOrganizationId(ctx);
 
   const { id: inspectionId, orgMemberId } = req.params as {
@@ -536,21 +506,23 @@ const unassign_member_from_inspection = async (req: Request) => {
     data: { revokedAt: new Date(), revokedById: user.accountId },
   });
 
-  if (count > 0) {
-    try {
-      await prisma.orgAuditLog.create({
-        data: {
-          organizationId,
-          action: 'INSPECTION_ASSIGNMENT_REVOKED',
-          actorAccountId: user.accountId,
-          subjectOrgMemberId: orgMemberId,
-          metadata: { inspectionId },
-        },
-      });
-    } catch (err) {
-      logger.error({ err, inspectionId, orgMemberId }, 'Failed to write OrgAuditLog entry');
-    }
+  // Surfaced as a 404 rather than a blanket 200 — a caller unassigning
+  // access they believe is live deserves to know when nothing was actually
+  // revoked (stale UI, wrong orgMemberId, already unassigned), instead of
+  // walking away believing access was cut off when it wasn't. Matches
+  // action.service.ts's unassign_light_user_from_action. Found by
+  // independent review.
+  if (count === 0) {
+    throw new AppError('No active assignment found for this member.', 404);
   }
+
+  await recordOrgAuditEvent({
+    organizationId,
+    action: 'INSPECTION_ASSIGNMENT_REVOKED',
+    actorAccountId: user.accountId,
+    subjectOrgMemberId: orgMemberId,
+    metadata: { inspectionId },
+  });
 
   return { orgMemberId, inspectionId };
 };
@@ -558,9 +530,7 @@ const unassign_member_from_inspection = async (req: Request) => {
 const get_inspection_assignments = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  if (ctx.role !== 'ADMIN') {
-    throw new AppError('Only organization admins can view inspection assignments.', 403);
-  }
+  assertIsOrgAdmin(ctx);
   // Kept consistent with assign/unassign's requireCallerOrganizationId call
   // even though the id itself isn't used below: without it, an ADMIN with
   // no OrgMember row (the ADMIN-of-self backward-compat fallback) could
@@ -577,6 +547,7 @@ const get_inspection_assignments = async (req: Request) => {
 
   return prisma.inspectionAssignment.findMany({
     where: { inspectionId, revokedAt: null },
+    orderBy: { createdAt: 'desc' },
     include: {
       orgMember: {
         select: {

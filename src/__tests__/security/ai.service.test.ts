@@ -251,3 +251,33 @@ describe('ai service — Pinecone write-path role scoping (issue #55 slice 3)', 
     expect(pineconeDb.create).toHaveBeenCalled();
   });
 });
+
+describe('ai service — Pinecone delete upstream-failure handling (issue #55 follow-up)', () => {
+  const pineconeDb = prisma.pineconeDocument as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  it('does NOT delete the local record when the upstream Pinecone delete fails', async () => {
+    mockMembership('ADMIN');
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500 });
+
+    await expect(
+      ai_service.delete_pinecone_data_from_database(makeReq({ query: { fileName: 'a.pdf' } })),
+    ).rejects.toMatchObject({ statusCode: 502 });
+
+    expect(pineconeDb.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('deletes the local record when the upstream Pinecone delete succeeds', async () => {
+    mockMembership('ADMIN');
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, status: 200 });
+    pineconeDb.deleteMany.mockResolvedValue({ count: 1 });
+
+    await ai_service.delete_pinecone_data_from_database(makeReq({ query: { fileName: 'a.pdf' } }));
+
+    expect(pineconeDb.deleteMany).toHaveBeenCalled();
+  });
+});

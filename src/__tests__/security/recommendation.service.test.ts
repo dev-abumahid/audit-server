@@ -8,6 +8,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findFirst: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
+      count: vi.fn(),
     },
     recommendationResult: {
       findFirst: vi.fn(),
@@ -131,6 +132,7 @@ describe('recommendation service — org scoping (ticket #6)', () => {
   describe('get_all_recommendation_from_db', () => {
     it('filters by caller org', async () => {
       recDb.findMany.mockResolvedValue([]);
+      recDb.count.mockResolvedValue(0);
 
       await recommendation_service.get_all_recommendation_from_db(makeReq());
 

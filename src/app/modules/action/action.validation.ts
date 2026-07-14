@@ -34,6 +34,11 @@ const create_action = z.object({
 // Update Action
 const update_action = create_action.partial();
 
+// Slice 4 (#55): sub-assign a finding to an internal Light User member.
+const assign_light_user = z.object({
+  orgMemberId: z.string('orgMemberId is required.').min(1, 'orgMemberId is required.'),
+});
+
 // Types
 export type ActionInput = z.infer<typeof create_action>;
 export type ActionMessageInput = z.infer<typeof actionMessageSchema>;
@@ -43,4 +48,5 @@ export const action_validations = {
   create_action,
   update_action,
   actionMessageSchema,
+  assign_light_user,
 };

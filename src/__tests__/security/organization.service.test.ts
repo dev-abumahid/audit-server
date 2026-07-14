@@ -21,6 +21,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     organization: {
       findUniqueOrThrow: vi.fn(),
+      update: vi.fn(),
     },
     account: {
       findUnique: vi.fn(),
@@ -248,6 +249,76 @@ describe('organization service — invite creation', () => {
     ).rejects.toMatchObject({ statusCode: 403 });
 
     expect(orgInvitationDb.create).not.toHaveBeenCalled();
+  });
+
+  it('normalizes the invite email to lowercase and trimmed before lookup and creation (issue #55 follow-up)', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgInvitationDb.findFirst.mockResolvedValue(null);
+    organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
+    orgInvitationDb.create.mockImplementation(({ data }) =>
+      Promise.resolve({ id: 'inv-1', status: 'PENDING', ...data }),
+    );
+
+    await organization_services.invite_member_into_db(
+      makeReq({
+        user: { accountId: 'admin-1' },
+        body: { email: '  Jane@Company.com  ', role: 'VIEWER' },
+      }),
+    );
+
+    expect(orgInvitationDb.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ email: 'jane@company.com' }),
+      }),
+    );
+    expect(orgInvitationDb.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ email: 'jane@company.com' }),
+      }),
+    );
+  });
+
+  it('treats differently-cased emails as the same pending invite and refreshes instead of duplicating (issue #55 follow-up)', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'admin-1',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    orgInvitationDb.findFirst.mockResolvedValue({
+      id: 'inv-existing',
+      organizationId: ORG_1,
+      email: 'jane@company.com',
+      status: 'PENDING',
+    });
+    organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
+    orgInvitationDb.update.mockImplementation(({ data }) =>
+      Promise.resolve({
+        id: 'inv-existing',
+        email: 'jane@company.com',
+        status: 'PENDING',
+        ...data,
+      }),
+    );
+
+    await organization_services.invite_member_into_db(
+      makeReq({
+        user: { accountId: 'admin-1' },
+        body: { email: 'JANE@COMPANY.COM', role: 'VIEWER' },
+      }),
+    );
+
+    expect(orgInvitationDb.create).not.toHaveBeenCalled();
+    expect(orgInvitationDb.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'inv-existing' } }),
+    );
   });
 });
 
@@ -1342,5 +1413,163 @@ describe('organization service — resend invitation', () => {
     ).rejects.toMatchObject({ statusCode: 403 });
 
     expect(orgInvitationDb.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe('organization service — settings (issue #55 slice 4)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  describe('get_organization_settings_from_db', () => {
+    it('ADMIN can read the org settings', async () => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        organizationId: ORG_1,
+        accountId: 'admin-1',
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        expiresAt: null,
+      });
+      organizationDb.findUniqueOrThrow.mockResolvedValue({
+        id: ORG_1,
+        name: 'Acme',
+        requireApprovalForSubAssignment: true,
+      });
+
+      const result = await organization_services.get_organization_settings_from_db(
+        makeReq({ user: { accountId: 'admin-1' } }),
+      );
+
+      expect(result.requireApprovalForSubAssignment).toBe(true);
+    });
+
+    it('ADMIN can read leadAuditorRoleLabel', async () => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        organizationId: ORG_1,
+        accountId: 'admin-1',
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        expiresAt: null,
+      });
+      organizationDb.findUniqueOrThrow.mockResolvedValue({
+        id: ORG_1,
+        name: 'Acme',
+        requireApprovalForSubAssignment: false,
+        leadAuditorRoleLabel: 'Senior Inspector',
+      });
+
+      const result = await organization_services.get_organization_settings_from_db(
+        makeReq({ user: { accountId: 'admin-1' } }),
+      );
+
+      expect(result.leadAuditorRoleLabel).toBe('Senior Inspector');
+    });
+
+    it('non-ADMIN cannot read the org settings', async () => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        organizationId: ORG_1,
+        accountId: 'lead-1',
+        role: 'LEAD_AUDITOR',
+        status: 'ACTIVE',
+        expiresAt: null,
+      });
+
+      await expect(
+        organization_services.get_organization_settings_from_db(
+          makeReq({ user: { accountId: 'lead-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(organizationDb.findUniqueOrThrow).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update_organization_settings_in_db', () => {
+    it('ADMIN can toggle requireApprovalForSubAssignment on', async () => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        organizationId: ORG_1,
+        accountId: 'admin-1',
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        expiresAt: null,
+      });
+      organizationDb.findUniqueOrThrow.mockResolvedValue({
+        requireApprovalForSubAssignment: false,
+      });
+      organizationDb.update.mockResolvedValue({
+        id: ORG_1,
+        name: 'Acme',
+        requireApprovalForSubAssignment: true,
+      });
+
+      const result = await organization_services.update_organization_settings_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          body: { requireApprovalForSubAssignment: true },
+        }),
+      );
+
+      expect(organizationDb.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: ORG_1 },
+          data: { requireApprovalForSubAssignment: true },
+        }),
+      );
+      expect(result.requireApprovalForSubAssignment).toBe(true);
+    });
+
+    it('ADMIN can update leadAuditorRoleLabel independently of requireApprovalForSubAssignment', async () => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        organizationId: ORG_1,
+        accountId: 'admin-1',
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        expiresAt: null,
+      });
+      organizationDb.findUniqueOrThrow.mockResolvedValue({
+        requireApprovalForSubAssignment: false,
+        leadAuditorRoleLabel: 'Lead Auditor',
+      });
+      organizationDb.update.mockResolvedValue({
+        id: ORG_1,
+        name: 'Acme',
+        requireApprovalForSubAssignment: false,
+        leadAuditorRoleLabel: 'Senior Inspector',
+      });
+
+      const result = await organization_services.update_organization_settings_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          body: { leadAuditorRoleLabel: 'Senior Inspector' },
+        }),
+      );
+
+      expect(organizationDb.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: ORG_1 },
+          data: { leadAuditorRoleLabel: 'Senior Inspector' },
+        }),
+      );
+      expect(result.leadAuditorRoleLabel).toBe('Senior Inspector');
+    });
+
+    it('non-ADMIN cannot update the org settings', async () => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        organizationId: ORG_1,
+        accountId: 'lead-1',
+        role: 'LEAD_AUDITOR',
+        status: 'ACTIVE',
+        expiresAt: null,
+      });
+
+      await expect(
+        organization_services.update_organization_settings_in_db(
+          makeReq({
+            user: { accountId: 'lead-1' },
+            body: { requireApprovalForSubAssignment: true },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(organizationDb.update).not.toHaveBeenCalled();
+    });
   });
 });

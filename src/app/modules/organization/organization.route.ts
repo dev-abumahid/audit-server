@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
-import { orgInviteAcceptLimiter } from '../../middlewares/rate_limiters.js';
+import { orgInviteAcceptLimiter, orgInviteSendLimiter } from '../../middlewares/rate_limiters.js';
 import RequestValidator from '../../middlewares/request_validator.js';
 import { organization_controller } from './organization.controller.js';
 import { organization_validations } from './organization.validation.js';
@@ -10,6 +10,7 @@ const router = Router();
 router.post(
   '/invite',
   auth('ORGANIZATION'),
+  orgInviteSendLimiter,
   RequestValidator(organization_validations.invite_member),
   organization_controller.invite_member,
 );
@@ -31,7 +32,23 @@ router.patch(
   organization_controller.update_org_member,
 );
 
-router.post('/invite/:id/resend', auth('ORGANIZATION'), organization_controller.resend_invitation);
+router.post(
+  '/invite/:id/resend',
+  auth('ORGANIZATION'),
+  orgInviteSendLimiter,
+  organization_controller.resend_invitation,
+);
+
+// Admin-only (enforced in the service via requireCallerIsOrgAdmin). Slice 4
+// (#55): toggles whether a finding sub-assignment needs Admin approval
+// before it takes effect — see action.service.ts.
+router.get('/settings', auth('ORGANIZATION'), organization_controller.get_organization_settings);
+router.patch(
+  '/settings',
+  auth('ORGANIZATION'),
+  RequestValidator(organization_validations.update_settings),
+  organization_controller.update_organization_settings,
+);
 
 // Public — the invitation token itself is the credential that gets you to
 // this endpoint at all; no JWT auth middleware in front of it. The token is

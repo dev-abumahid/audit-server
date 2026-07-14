@@ -8,8 +8,8 @@ const get_all_recommendation = catchAsync(async (req, res) => {
     success: true,
     statusCode: 200,
     message: 'All recommendation fetched successfully.',
-    data: result,
-    meta: {},
+    data: result.data,
+    meta: result.meta,
   });
 });
 

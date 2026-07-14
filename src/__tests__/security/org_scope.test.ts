@@ -10,6 +10,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     inspectionAssignment: {
       findMany: vi.fn(),
+      count: vi.fn(),
+    },
+    findingAssignment: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
   },
 }));
@@ -18,12 +23,17 @@ import { prisma } from '../../app/lib/prisma.js';
 import {
   applyActionScope,
   applyInspectionScope,
+  assertCanWriteToAction,
   resolveCallerOrgContext,
 } from '../../app/utils/org_scope.js';
 
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const assignmentDb = prisma.inspectionAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const findingAssignmentDb = prisma.findingAssignment as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -180,7 +190,7 @@ describe('org_scope — applyInspectionScope', () => {
     expect(assigned.id).toBe('i1');
   });
 
-  it('VIEWER with zero assignments: where-clause is unchanged (org-wide)', async () => {
+  it('VIEWER never assigned anything: where-clause is unchanged (org-wide)', async () => {
     assignmentDb.findMany.mockResolvedValue([]);
 
     const where = { orgAccountId: ANCHOR };
@@ -193,8 +203,23 @@ describe('org_scope — applyInspectionScope', () => {
     expect(result).toEqual(where);
   });
 
+  it('VIEWER whose assignments were all later revoked: scoped to nothing, NOT org-wide (issue #55 follow-up)', async () => {
+    // Zero *active* rows (revokedAt is set on every row), but at least one
+    // row ever existed — an admin revoked every assignment this Viewer had,
+    // intending to cut off their access. Falling back to org-wide here would
+    // silently undo that.
+    assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'i1', revokedAt: new Date() }]);
+
+    const result = await applyInspectionScope(
+      { orgAccountId: ANCHOR },
+      { organizationId: ANCHOR, role: 'VIEWER', orgMemberId: MEMBER_ID },
+    );
+
+    expect(result).toEqual({ orgAccountId: ANCHOR, id: { in: [] } });
+  });
+
   it('VIEWER with assignments: scoped the same as Lead Auditor', async () => {
-    assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'i1' }]);
+    assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'i1', revokedAt: null }]);
 
     const result = await applyInspectionScope(
       { orgAccountId: ANCHOR },
@@ -239,7 +264,7 @@ describe('org_scope — applyActionScope', () => {
     expect(result).toEqual({ orgAccountId: ANCHOR, inspectionId: { in: ['i1'] } });
   });
 
-  it('VIEWER with zero assignments: org-wide', async () => {
+  it('VIEWER never assigned anything: org-wide', async () => {
     assignmentDb.findMany.mockResolvedValue([]);
 
     const where = { orgAccountId: ANCHOR };
@@ -252,12 +277,149 @@ describe('org_scope — applyActionScope', () => {
     expect(result).toEqual(where);
   });
 
-  it('LIGHT_USER: denied by default', async () => {
+  it('VIEWER whose assignments were all later revoked: scoped to nothing, NOT org-wide (issue #55 follow-up)', async () => {
+    assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'i1', revokedAt: new Date() }]);
+
+    const result = await applyActionScope(
+      { orgAccountId: ANCHOR },
+      { organizationId: ANCHOR, role: 'VIEWER', orgMemberId: MEMBER_ID },
+    );
+
+    expect(result).toEqual({ orgAccountId: ANCHOR, inspectionId: { in: [] } });
+  });
+
+  it('LIGHT_USER with no live FindingAssignment: denied (empty id set)', async () => {
+    findingAssignmentDb.findMany.mockResolvedValue([]);
+
     const result = await applyActionScope(
       { orgAccountId: ANCHOR },
       { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
     );
 
-    expect(result).toEqual({ orgAccountId: ANCHOR, inspectionId: { in: [] } });
+    expect(result).toEqual({ orgAccountId: ANCHOR, id: { in: [] } });
+    expect(assignmentDb.findMany).not.toHaveBeenCalled();
+  });
+
+  it('LIGHT_USER: scoped by id (not inspectionId) to their sub-assigned findings (issue #55 slice 4)', async () => {
+    findingAssignmentDb.findMany.mockResolvedValue([{ actionId: 'action-1' }]);
+
+    const result = await applyActionScope(
+      { orgAccountId: ANCHOR },
+      { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+    );
+
+    expect(result).toEqual({ orgAccountId: ANCHOR, id: { in: ['action-1'] } });
+    expect(findingAssignmentDb.findMany).toHaveBeenCalledWith({
+      where: { orgMemberId: MEMBER_ID, status: 'ACTIVE', revokedAt: null },
+      select: { actionId: true },
+    });
+  });
+
+  it('LIGHT_USER: a PENDING_APPROVAL assignment grants no access; only ACTIVE does, end to end', async () => {
+    // Simulates real DB filtering (not a hand-picked return value) against a
+    // small fixture containing both a still-pending and an approved row for
+    // the same member, so this actually exercises the status filter rather
+    // than just asserting the query shape.
+    const rows = [
+      {
+        actionId: 'action-pending',
+        orgMemberId: MEMBER_ID,
+        status: 'PENDING_APPROVAL',
+        revokedAt: null,
+      },
+      { actionId: 'action-active', orgMemberId: MEMBER_ID, status: 'ACTIVE', revokedAt: null },
+    ];
+    findingAssignmentDb.findMany.mockImplementation(
+      ({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          rows
+            .filter(
+              (row) =>
+                row.orgMemberId === where.orgMemberId &&
+                row.status === where.status &&
+                row.revokedAt === where.revokedAt,
+            )
+            .map((row) => ({ actionId: row.actionId })),
+        ),
+    );
+
+    const result = await applyActionScope(
+      { orgAccountId: ANCHOR },
+      { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+    );
+
+    // Only the ACTIVE row's action is in scope — the PENDING_APPROVAL one
+    // (not yet signed off by an Admin) grants nothing.
+    expect(result).toEqual({ orgAccountId: ANCHOR, id: { in: ['action-active'] } });
+  });
+});
+
+describe('org_scope — assertCanWriteToAction (issue #55 slice 4)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const ACTION = { id: 'action-1', inspectionId: 'insp-1' };
+
+  it('ADMIN: always allowed', async () => {
+    await expect(
+      assertCanWriteToAction({ organizationId: ANCHOR, role: 'ADMIN', orgMemberId: null }, ACTION),
+    ).resolves.toBeUndefined();
+  });
+
+  it('LEAD_AUDITOR assigned to the parent inspection: allowed', async () => {
+    assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-1' }]);
+
+    await expect(
+      assertCanWriteToAction(
+        { organizationId: ANCHOR, role: 'LEAD_AUDITOR', orgMemberId: MEMBER_ID },
+        ACTION,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('LEAD_AUDITOR NOT assigned to the parent inspection: denied', async () => {
+    assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-other' }]);
+
+    await expect(
+      assertCanWriteToAction(
+        { organizationId: ANCHOR, role: 'LEAD_AUDITOR', orgMemberId: MEMBER_ID },
+        ACTION,
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('LIGHT_USER with an ACTIVE FindingAssignment for this exact action: allowed', async () => {
+    findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+
+    await expect(
+      assertCanWriteToAction(
+        { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+        ACTION,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(findingAssignmentDb.findFirst).toHaveBeenCalledWith({
+      where: { orgMemberId: MEMBER_ID, actionId: ACTION.id, status: 'ACTIVE', revokedAt: null },
+      select: { id: true },
+    });
+  });
+
+  it('LIGHT_USER assigned to a DIFFERENT action: denied', async () => {
+    findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      assertCanWriteToAction(
+        { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+        ACTION,
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('VIEWER: never allowed', async () => {
+    await expect(
+      assertCanWriteToAction(
+        { organizationId: ANCHOR, role: 'VIEWER', orgMemberId: MEMBER_ID },
+        ACTION,
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
   });
 });

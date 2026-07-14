@@ -37,6 +37,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findFirst: vi.fn(),
       create: vi.fn(),
       updateMany: vi.fn(),
+      count: vi.fn(),
     },
     orgAuditLog: {
       create: vi.fn(),
@@ -412,7 +413,9 @@ describe('inspection service — org scoping (ticket #6)', () => {
 
     it('VIEWER with 1+ InspectionAssignment rows is scoped the same way Lead Auditor is', async () => {
       mockMembership('VIEWER');
-      assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+      assignmentDb.findMany.mockResolvedValue([
+        { inspectionId: 'insp-assigned-1', revokedAt: null },
+      ]);
       inspectionDb.count.mockResolvedValue(0);
       inspectionDb.findMany.mockResolvedValue([]);
 

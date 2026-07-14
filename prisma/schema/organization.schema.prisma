@@ -102,6 +102,14 @@ model InspectionAssignment {
     @@index([orgMemberId])
 }
 
+// Slice 4 of issue #55: the real scoping mechanism for internal LIGHT_USER
+// members (org_scope.ts denied LIGHT_USER by default everywhere until this
+// shipped). A Lead Auditor/Admin sub-assigns one specific Action (finding)
+// — not the whole inspection — to a LIGHT_USER member. If the org has
+// requireApprovalForSubAssignment enabled, the row starts PENDING_APPROVAL
+// and an Admin must approve it before the assignee's access takes effect;
+// otherwise it starts ACTIVE immediately. Only a status of ACTIVE (and
+// revokedAt IS NULL) grants access — see org_scope.ts's getAssignedActionIds.
 model FindingAssignment {
     id                  String @id @default(uuid())
     actionId            String
@@ -110,6 +118,11 @@ model FindingAssignment {
     assignedById        String
     approvedById        String?
     status              FindingAssignmentStatus @default(PENDING_APPROVAL)
+    // Soft-revoke, same pattern as InspectionAssignment: an ended assignment
+    // stays queryable for "who had access to this finding, and who revoked
+    // it, and when" rather than disappearing. null = not revoked.
+    revokedAt   DateTime?
+    revokedById String?
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
@@ -118,6 +131,11 @@ model FindingAssignment {
     orgMember         OrgMember?         @relation("FindingAssigneeMember", fields: [orgMemberId], references: [id], onDelete: Cascade)
     externalOrgMember ExternalOrgMember? @relation(fields: [externalOrgMemberId], references: [id], onDelete: Cascade)
 
+    // Only one *live* (not revoked, not REJECTED) assignment per
+    // action/member pair — enforced via a partial unique index added by
+    // hand in the migration (see migration.sql); Prisma's schema DSL has no
+    // WHERE-clause syntax for @@unique. A revoked or rejected row doesn't
+    // block a fresh assignment attempt for the same pair.
     @@index([actionId])
     @@index([orgMemberId])
     @@index([externalOrgMemberId])
@@ -202,6 +220,11 @@ enum OrgAuditAction {
     MEMBER_REMOVED
     INSPECTION_ASSIGNMENT_CREATED
     INSPECTION_ASSIGNMENT_REVOKED
+    FINDING_ASSIGNMENT_CREATED
+    FINDING_ASSIGNMENT_APPROVED
+    FINDING_ASSIGNMENT_REJECTED
+    FINDING_ASSIGNMENT_REVOKED
+    ORG_SETTINGS_CHANGED
 }
 
 model OrgAuditLog {

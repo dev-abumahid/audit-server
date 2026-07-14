@@ -10,6 +10,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
+      count: vi.fn(),
     },
     inspection: {
       findFirst: vi.fn(),
@@ -135,11 +136,26 @@ describe('note service — org scoping', () => {
   describe('get_all_note_from_db', () => {
     it('filters findMany by caller org', async () => {
       db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
 
       await note_service.get_all_note_from_db(makeReq());
 
       const [callArg] = db.findMany.mock.calls[0];
       expect(callArg.where).toMatchObject({ orgAccountId: ORG_A });
+    });
+
+    it('paginates results', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(25);
+
+      const result = await note_service.get_all_note_from_db(
+        makeReq({ query: { page: '2', limit: '10' } }),
+      );
+
+      const [callArg] = db.findMany.mock.calls[0];
+      expect(callArg.skip).toBe(10);
+      expect(callArg.take).toBe(10);
+      expect(result.meta).toEqual({ page: 2, limit: 10, skip: 10, total: 25, totalPage: 3 });
     });
   });
 

@@ -21,9 +21,22 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     organization: {
       findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
     },
     inspectionAssignment: {
       findMany: vi.fn(),
+      count: vi.fn(),
+    },
+    findingAssignment: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    orgAuditLog: {
+      create: vi.fn(),
     },
   },
 }));
@@ -36,6 +49,10 @@ const dbInspection = prisma.inspection as unknown as Record<string, ReturnType<t
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const assignmentDb = prisma.inspectionAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const findingAssignmentDb = prisma.findingAssignment as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -284,7 +301,9 @@ describe('action service — org scoping (ticket #6)', () => {
 
     it('VIEWER with 1+ InspectionAssignment rows is scoped the same way Lead Auditor is', async () => {
       mockMembership('VIEWER');
-      assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+      assignmentDb.findMany.mockResolvedValue([
+        { inspectionId: 'insp-assigned-1', revokedAt: null },
+      ]);
       db.findMany.mockResolvedValue([]);
       db.count.mockResolvedValue(0);
 
@@ -294,16 +313,152 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(findArg.where).toMatchObject({ inspectionId: { in: ['insp-assigned-1'] } });
     });
 
-    it('LIGHT_USER gets nothing back (deny by default)', async () => {
+    it('LIGHT_USER with no live FindingAssignment gets nothing back', async () => {
       mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([]);
       db.findMany.mockResolvedValue([]);
       db.count.mockResolvedValue(0);
 
       await action_service.get_all_action_from_db(makeReq());
 
       const [findArg] = db.findMany.mock.calls[0];
-      expect(findArg.where.inspectionId).toEqual({ in: [] });
+      expect(findArg.where.id).toEqual({ in: [] });
       expect(assignmentDb.findMany).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER list is restricted by id to their sub-assigned findings (issue #55 slice 4)', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([
+        { actionId: 'action-assigned-1' },
+        { actionId: 'action-assigned-2' },
+      ]);
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      expect(findingAssignmentDb.findMany).toHaveBeenCalledWith({
+        where: { orgMemberId: MEMBER_ID, status: 'ACTIVE', revokedAt: null },
+        select: { actionId: true },
+      });
+      const [findArg] = db.findMany.mock.calls[0];
+      expect(findArg.where).toMatchObject({
+        orgAccountId: ANCHOR,
+        id: { in: ['action-assigned-1', 'action-assigned-2'] },
+      });
+      // Never scoped by inspectionId for LIGHT_USER — they don't get
+      // inspection-level access, only the specific finding(s).
+      expect(findArg.where.inspectionId).toBeUndefined();
+    });
+
+    it('LIGHT_USER cannot read a finding they are not sub-assigned to', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([{ actionId: 'action-assigned-1' }]);
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.get_single_action_from_db(makeReq({ params: { id: 'action-other' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      const [findArg] = db.findFirst.mock.calls[0];
+      expect(findArg.where.id).toEqual({ in: [] });
+    });
+
+    it('LIGHT_USER can update a finding they are actively sub-assigned to', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'action-1' }, body: { status: 'COMPLETE' } }),
+      );
+
+      expect(db.update).toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER cannot smuggle orgAccountId/inspectionId/siteId through update_action_into_db', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({
+          params: { id: 'action-1' },
+          body: {
+            status: 'COMPLETE',
+            orgAccountId: 'other-org',
+            inspectionId: 'other-inspection',
+            siteId: 'other-site',
+          },
+        }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).toEqual({ status: 'COMPLETE' });
+      expect(callArg.data.orgAccountId).toBeUndefined();
+      expect(callArg.data.inspectionId).toBeUndefined();
+      expect(callArg.data.siteId).toBeUndefined();
+    });
+
+    it('LIGHT_USER cannot update a finding they are NOT sub-assigned to', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+
+      await expect(
+        action_service.update_action_into_db(
+          makeReq({ params: { id: 'action-1' }, body: { status: 'COMPLETE' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER can never delete a finding, even one they are actively sub-assigned to', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([{ actionId: 'action-1' }]);
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+
+      await expect(
+        action_service.delete_action_from_db(makeReq({ params: { id: 'action-1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER can never create a finding, even on an inspection with a live sub-assignment', async () => {
+      mockMembership('LIGHT_USER');
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ANCHOR,
+      });
+
+      await expect(
+        action_service.create_action_into_db(
+          makeReq({ body: { inspectionId: 'insp-1', title: 'Nope' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.create).not.toHaveBeenCalled();
     });
 
     it('a caller with no OrgMember row falls back to full ADMIN-equivalent access', async () => {
@@ -431,6 +586,748 @@ describe('action service — org scoping (ticket #6)', () => {
         expect(db.delete).toHaveBeenCalled();
         expect(assignmentDb.findMany).not.toHaveBeenCalled();
       });
+    });
+  });
+});
+
+describe('action service — finding sub-assignment (issue #55 slice 4)', () => {
+  const ANCHOR = 'anchor-account-00000000-0000-0000-0000-000000000009';
+  const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
+  const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
+  const LIGHT_USER_MEMBER_ID = 'light-user-member-00000000-0000-0000-000000000010';
+
+  const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ORG_A,
+      role,
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  describe('assign_light_user_to_action', () => {
+    it('ADMIN sub-assigns a Light User; status is ACTIVE when approval is not required', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({
+          id: LIGHT_USER_MEMBER_ID,
+          organizationId: ORG_ID,
+          role: 'LIGHT_USER',
+          status: 'ACTIVE',
+          expiresAt: null,
+        });
+      organizationDb.findUniqueOrThrow = vi
+        .fn()
+        .mockResolvedValue({ requireApprovalForSubAssignment: false });
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+      findingAssignmentDb.create.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'ACTIVE',
+      });
+
+      const result = await action_service.assign_light_user_to_action(
+        makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+      );
+
+      expect(findingAssignmentDb.create).toHaveBeenCalledWith({
+        data: {
+          actionId: 'action-1',
+          orgMemberId: LIGHT_USER_MEMBER_ID,
+          assignedById: ORG_A,
+          status: 'ACTIVE',
+        },
+      });
+      expect(result.status).toBe('ACTIVE');
+    });
+
+    it('starts PENDING_APPROVAL when the org requires approval for sub-assignment', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({
+          id: LIGHT_USER_MEMBER_ID,
+          organizationId: ORG_ID,
+          role: 'LIGHT_USER',
+          status: 'ACTIVE',
+          expiresAt: null,
+        });
+      organizationDb.findUniqueOrThrow = vi
+        .fn()
+        .mockResolvedValue({ requireApprovalForSubAssignment: true });
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+      findingAssignmentDb.create.mockImplementation(({ data }) =>
+        Promise.resolve({ id: 'fa-1', ...data }),
+      );
+
+      const result = await action_service.assign_light_user_to_action(
+        makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+      );
+
+      expect(result.status).toBe('PENDING_APPROVAL');
+    });
+
+    it('rejects sub-assigning a non-LIGHT_USER member', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({ id: 'lead-member-1', organizationId: ORG_ID, role: 'LEAD_AUDITOR' });
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'action-1' }, body: { orgMemberId: 'lead-member-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('VIEWER cannot sub-assign anyone to a finding', async () => {
+      mockMembership('VIEWER');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR not assigned to the parent inspection cannot sub-assign a finding on it', async () => {
+      mockMembership('LEAD_AUDITOR');
+      assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-other' }]);
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('re-assigning an already-live pair is a no-op that returns the existing row', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({
+          id: LIGHT_USER_MEMBER_ID,
+          organizationId: ORG_ID,
+          role: 'LIGHT_USER',
+          status: 'ACTIVE',
+          expiresAt: null,
+        });
+      const existing = {
+        id: 'fa-existing',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+      };
+      findingAssignmentDb.findFirst.mockResolvedValue(existing);
+
+      const result = await action_service.assign_light_user_to_action(
+        makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+      );
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+      expect(result).toEqual(existing);
+    });
+
+    it('converts a concurrent assign race (partial unique index violation) into the winning row', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({
+          id: LIGHT_USER_MEMBER_ID,
+          organizationId: ORG_ID,
+          role: 'LIGHT_USER',
+          status: 'ACTIVE',
+          expiresAt: null,
+        });
+      organizationDb.findUniqueOrThrow = vi
+        .fn()
+        .mockResolvedValue({ requireApprovalForSubAssignment: false });
+      const winner = { id: 'fa-winner', actionId: 'action-1', orgMemberId: LIGHT_USER_MEMBER_ID };
+      findingAssignmentDb.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(winner);
+      const { Prisma } = await import('@prisma/client');
+      findingAssignmentDb.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+      );
+
+      const result = await action_service.assign_light_user_to_action(
+        makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+      );
+
+      expect(result).toEqual(winner);
+    });
+
+    it('rejects sub-assigning a SUSPENDED Light User member', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({
+          id: LIGHT_USER_MEMBER_ID,
+          organizationId: ORG_ID,
+          role: 'LIGHT_USER',
+          status: 'SUSPENDED',
+          expiresAt: null,
+        });
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects sub-assigning a Light User member whose time-boxed access has expired', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({
+          id: LIGHT_USER_MEMBER_ID,
+          organizationId: ORG_ID,
+          role: 'LIGHT_USER',
+          status: 'ACTIVE',
+          expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+        });
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT sub-assign when the actionId belongs to another org', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'org-b-action' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT sub-assign when the orgMemberId belongs to another org', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue(null);
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'action-1' }, body: { orgMemberId: 'org-b-member' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('a prior REJECTED assignment does not block a fresh sub-assignment for the same (action, member) pair', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({
+          id: LIGHT_USER_MEMBER_ID,
+          organizationId: ORG_ID,
+          role: 'LIGHT_USER',
+          status: 'ACTIVE',
+          expiresAt: null,
+        });
+      organizationDb.findUniqueOrThrow = vi
+        .fn()
+        .mockResolvedValue({ requireApprovalForSubAssignment: false });
+      // The prior REJECTED row is excluded by the `status: { not: 'REJECTED' } }`
+      // clause, so the "existing live" lookup finds nothing and a fresh row
+      // is created — verified by asserting findingAssignmentDb.create IS
+      // called, not skipped as if the old REJECTED row still counted.
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+      findingAssignmentDb.create.mockResolvedValue({
+        id: 'fa-2',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'ACTIVE',
+      });
+
+      const result = await action_service.assign_light_user_to_action(
+        makeReq({ params: { id: 'action-1' }, body: { orgMemberId: LIGHT_USER_MEMBER_ID } }),
+      );
+
+      expect(findingAssignmentDb.findFirst).toHaveBeenCalledWith({
+        where: {
+          actionId: 'action-1',
+          orgMemberId: LIGHT_USER_MEMBER_ID,
+          revokedAt: null,
+          status: { not: 'REJECTED' },
+        },
+      });
+      expect(findingAssignmentDb.create).toHaveBeenCalled();
+      expect(result.id).toBe('fa-2');
+    });
+  });
+
+  describe('unassign_light_user_from_action', () => {
+    it('ADMIN revokes a sub-assignment', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({ id: LIGHT_USER_MEMBER_ID, organizationId: ORG_ID });
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 1 });
+      findingAssignmentDb.findUniqueOrThrow.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        revokedAt: new Date(),
+        revokedById: ORG_A,
+      });
+
+      const result = await action_service.unassign_light_user_from_action(
+        makeReq({ params: { id: 'action-1', orgMemberId: LIGHT_USER_MEMBER_ID } }),
+      );
+
+      expect(findingAssignmentDb.findFirst).toHaveBeenCalledWith({
+        where: {
+          actionId: 'action-1',
+          orgMemberId: LIGHT_USER_MEMBER_ID,
+          revokedAt: null,
+          status: { not: 'REJECTED' },
+        },
+      });
+      expect(findingAssignmentDb.updateMany).toHaveBeenCalledWith({
+        where: { id: 'fa-1', revokedAt: null },
+        data: expect.objectContaining({ revokedAt: expect.any(Date) }),
+      });
+      expect(result.id).toBe('fa-1');
+    });
+
+    it('a concurrent unassign race is a harmless no-op for the loser, not a duplicate audit event', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({ id: LIGHT_USER_MEMBER_ID, organizationId: ORG_ID });
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      // Lost the race: a concurrent request already revoked this row
+      // between the findFirst read and this updateMany write.
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 0 });
+      findingAssignmentDb.findUniqueOrThrow.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        revokedAt: new Date(),
+        revokedById: 'someone-else',
+      });
+
+      const result = await action_service.unassign_light_user_from_action(
+        makeReq({ params: { id: 'action-1', orgMemberId: LIGHT_USER_MEMBER_ID } }),
+      );
+
+      expect(result.id).toBe('fa-1');
+      expect(prisma.orgAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('VIEWER cannot revoke a sub-assignment', async () => {
+      mockMembership('VIEWER');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+
+      await expect(
+        action_service.unassign_light_user_from_action(
+          makeReq({ params: { id: 'action-1', orgMemberId: LIGHT_USER_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 when there is no live assignment to revoke, instead of a silent success', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue({ id: LIGHT_USER_MEMBER_ID, organizationId: ORG_ID });
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.unassign_light_user_from_action(
+          makeReq({ params: { id: 'action-1', orgMemberId: LIGHT_USER_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+
+    it('throws 404 and does NOT revoke when the orgMemberId belongs to another org', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      (prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>).findFirst = vi
+        .fn()
+        .mockResolvedValue(null);
+
+      await expect(
+        action_service.unassign_light_user_from_action(
+          makeReq({ params: { id: 'action-1', orgMemberId: 'org-b-member' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('approve_finding_assignment', () => {
+    it('ADMIN approves a PENDING_APPROVAL assignment, making it ACTIVE', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'PENDING_APPROVAL',
+        revokedAt: null,
+      });
+      findingAssignmentDb.update.mockResolvedValue({
+        id: 'fa-1',
+        status: 'ACTIVE',
+        approvedById: ORG_A,
+      });
+
+      const result = await action_service.approve_finding_assignment(
+        makeReq({ params: { id: 'fa-1' } }),
+      );
+
+      expect(findingAssignmentDb.update).toHaveBeenCalledWith({
+        where: { id: 'fa-1' },
+        data: { status: 'ACTIVE', approvedById: ORG_A },
+      });
+      expect(result.status).toBe('ACTIVE');
+    });
+
+    it('non-ADMIN cannot approve a finding assignment', async () => {
+      mockMembership('LEAD_AUDITOR');
+
+      await expect(
+        action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects approving an assignment that is not PENDING_APPROVAL', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'ACTIVE',
+      });
+
+      await expect(
+        action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT approve an assignment belonging to another org', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.approve_finding_assignment(makeReq({ params: { id: 'org-b-fa' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER cannot approve their own pending finding assignment (self-approval)', async () => {
+      mockMembership('LIGHT_USER');
+
+      await expect(
+        action_service.approve_finding_assignment(
+          makeReq({ user: { accountId: ORG_A }, params: { id: 'fa-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.findFirst).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects approving an assignment that was withdrawn (revoked) while still PENDING_APPROVAL', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'PENDING_APPROVAL',
+        revokedAt: new Date(),
+      });
+
+      await expect(
+        action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reject_finding_assignment', () => {
+    it('ADMIN rejects a PENDING_APPROVAL assignment', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'PENDING_APPROVAL',
+        revokedAt: null,
+      });
+      findingAssignmentDb.update.mockResolvedValue({
+        id: 'fa-1',
+        status: 'REJECTED',
+        approvedById: ORG_A,
+      });
+
+      const result = await action_service.reject_finding_assignment(
+        makeReq({ params: { id: 'fa-1' } }),
+      );
+
+      expect(result.status).toBe('REJECTED');
+    });
+
+    it('non-ADMIN cannot reject a finding assignment', async () => {
+      mockMembership('LEAD_AUDITOR');
+
+      await expect(
+        action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER cannot reject their own pending finding assignment (self-rejection)', async () => {
+      mockMembership('LIGHT_USER');
+
+      await expect(
+        action_service.reject_finding_assignment(
+          makeReq({ user: { accountId: ORG_A }, params: { id: 'fa-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.findFirst).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT reject an assignment belonging to another org', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.reject_finding_assignment(makeReq({ params: { id: 'org-b-fa' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects rejecting an assignment that was already withdrawn (revoked) while still PENDING_APPROVAL', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'PENDING_APPROVAL',
+        revokedAt: new Date(),
+      });
+
+      await expect(
+        action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('a rejected assignment does not grant the assignee any access (getAssignedActionIds excludes it)', async () => {
+      // Documents the invariant directly rather than re-deriving org_scope's
+      // own query: getAssignedActionIds filters status: 'ACTIVE', so a
+      // REJECTED row is never returned regardless of revokedAt.
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([]);
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      expect(findingAssignmentDb.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ status: 'ACTIVE' }) }),
+      );
+    });
+  });
+
+  describe('get_finding_assignments_for_action', () => {
+    it('ADMIN can list sub-assignments for a finding', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      findingAssignmentDb.findMany.mockResolvedValue([
+        { id: 'fa-1', orgMemberId: LIGHT_USER_MEMBER_ID },
+      ]);
+
+      const result = await action_service.get_finding_assignments_for_action(
+        makeReq({ params: { id: 'action-1' } }),
+      );
+
+      expect(findingAssignmentDb.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { actionId: 'action-1', revokedAt: null } }),
+      );
+      expect(result).toHaveLength(1);
+    });
+
+    it('VIEWER cannot list sub-assignments for a finding', async () => {
+      mockMembership('VIEWER');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+
+      await expect(
+        action_service.get_finding_assignments_for_action(makeReq({ params: { id: 'action-1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('get_my_finding_assignments', () => {
+    it('LIGHT_USER sees their own assignments across every status, including pending and rejected', async () => {
+      mockMembership('LIGHT_USER');
+      const rows = [
+        { id: 'fa-1', orgMemberId: MEMBER_ID, status: 'ACTIVE' },
+        { id: 'fa-2', orgMemberId: MEMBER_ID, status: 'PENDING_APPROVAL' },
+        { id: 'fa-3', orgMemberId: MEMBER_ID, status: 'REJECTED' },
+      ];
+      findingAssignmentDb.findMany.mockResolvedValue(rows);
+
+      const result = await action_service.get_my_finding_assignments(makeReq());
+
+      expect(findingAssignmentDb.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { orgMemberId: MEMBER_ID } }),
+      );
+      expect(result).toHaveLength(3);
+    });
+
+    it("does not leak other members' assignments — only orgMemberId === caller is queried", async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([]);
+
+      await action_service.get_my_finding_assignments(makeReq());
+
+      const [callArg] = findingAssignmentDb.findMany.mock.calls[0];
+      expect(callArg.where).toEqual({ orgMemberId: MEMBER_ID });
+    });
+
+    it('returns an empty array for a caller with no OrgMember row (ADMIN-of-self fallback)', async () => {
+      orgMemberDb.findUnique.mockResolvedValue(null);
+
+      const result = await action_service.get_my_finding_assignments(makeReq());
+
+      expect(result).toEqual([]);
+      expect(findingAssignmentDb.findMany).not.toHaveBeenCalled();
     });
   });
 });

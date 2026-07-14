@@ -9,6 +9,7 @@ import {
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { AppError } from '../../utils/app_error.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 
 const get_all_note_from_db = async (req: Request) => {
@@ -19,8 +20,31 @@ const get_all_note_from_db = async (req: Request) => {
   // Lead Auditor restricted to inspection A could still read notes on
   // inspection B. Found by independent review.
   const whereCondition = await applyActionScope({ orgAccountId: ctx.organizationId }, ctx);
-  const result = await prisma.note.findMany({ where: whereCondition });
-  return result;
+
+  // Was an unconditional findMany with no limit, unlike every other list
+  // endpoint in this feature (site/template/risk all paginate). Found by
+  // independent review.
+  const pagination = paginationHelper({
+    page: req.query.page as string,
+    limit: req.query.limit as string,
+  });
+  const [data, total] = await Promise.all([
+    prisma.note.findMany({
+      where: whereCondition,
+      skip: pagination.skip,
+      take: pagination.limit,
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.note.count({ where: whereCondition }),
+  ]);
+
+  return {
+    data,
+    meta: {
+      ...buildPaginationMeta(pagination, total),
+      totalPage: Math.ceil(total / pagination.limit),
+    },
+  };
 };
 
 const get_single_note_from_db = async (req: Request) => {

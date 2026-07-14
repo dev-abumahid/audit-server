@@ -68,6 +68,28 @@ const accept_invitation = catchAsync(async (req, res) => {
   });
 });
 
+const get_organization_settings = catchAsync(async (req, res) => {
+  const result = await organization_services.get_organization_settings_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Organization settings fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const update_organization_settings = catchAsync(async (req, res) => {
+  const result = await organization_services.update_organization_settings_in_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Organization settings updated successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const organization_controller = {
   invite_member,
   get_pending_invitations,
@@ -75,4 +97,6 @@ export const organization_controller = {
   update_org_member,
   resend_invitation,
   accept_invitation,
+  get_organization_settings,
+  update_organization_settings,
 };

@@ -8,8 +8,8 @@ const get_all_note = catchAsync(async (req, res) => {
     success: true,
     statusCode: 200,
     message: 'All note fetched successfully.',
-    data: result,
-    meta: {},
+    data: result.data,
+    meta: result.meta,
   });
 });
 

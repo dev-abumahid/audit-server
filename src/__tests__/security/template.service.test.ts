@@ -13,6 +13,14 @@ vi.mock('../../app/lib/prisma.js', () => ({
       create: vi.fn(),
       deleteMany: vi.fn(),
     },
+    page: {
+      findFirst: vi.fn(),
+      delete: vi.fn(),
+    },
+    question: {
+      findFirst: vi.fn(),
+      delete: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -32,6 +40,9 @@ const templateAccessDb = prisma.templateAccess as unknown as Record<
 >;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const pageDb = (prisma as unknown as { page: Record<string, ReturnType<typeof vi.fn>> }).page;
+const questionDb = (prisma as unknown as { question: Record<string, ReturnType<typeof vi.fn>> })
+  .question;
 
 const ANCHOR = ORG_A;
 const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
@@ -247,5 +258,68 @@ describe('template service — access invitation payload field name (ticket #57)
         templateId: 't1',
       },
     });
+  });
+});
+
+describe('template service — error-handling consistency (issue #55 follow-up)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  it('get_single_template_from_db throws 404 for another org template instead of returning null', async () => {
+    templateDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      template_service.get_single_template_from_db(makeReq({ params: { id: 'org-b-template' } })),
+    ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('delete_template_from_db verifies existence before deleting', async () => {
+    templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+    templateDb.delete.mockResolvedValue({});
+
+    await template_service.delete_template_from_db(makeReq({ params: { id: 't1' } }));
+
+    expect(templateDb.findFirst).toHaveBeenCalledWith({
+      where: { id: 't1', orgAccountId: ORG_A },
+    });
+    expect(templateDb.delete).toHaveBeenCalledWith({
+      where: { id: 't1', orgAccountId: ORG_A },
+    });
+  });
+
+  it('delete_template_from_db throws 404 and does NOT delete another org template', async () => {
+    templateDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      template_service.delete_template_from_db(makeReq({ params: { id: 'org-b-template' } })),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(templateDb.delete).not.toHaveBeenCalled();
+  });
+
+  it('delete_template_page_by_id_from_db throws an AppError(404), not a plain Error, for a cross-org page', async () => {
+    pageDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      template_service.delete_template_page_by_id_from_db(
+        makeReq({ params: { id: 'org-b-page' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(pageDb.delete).not.toHaveBeenCalled();
+  });
+
+  it('delete_page_question_by_id_from_db throws an AppError(404), not a plain Error, for a cross-org question', async () => {
+    questionDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      template_service.delete_page_question_by_id_from_db(
+        makeReq({ params: { id: 'org-b-question' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(questionDb.delete).not.toHaveBeenCalled();
   });
 });
