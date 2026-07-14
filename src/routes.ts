@@ -4,6 +4,7 @@ import actionRoute from './app/modules/action/action.route.js';
 import aiRoute from './app/modules/ai/ai.route.js';
 import inspectionRoute from './app/modules/inspection/inspection.route.js';
 import noteRoute from './app/modules/note/note.route.js';
+import organizationRoute from './app/modules/organization/organization.route.js';
 import profileRoute from './app/modules/profile/profile.route.js';
 import recommendationRoute from './app/modules/recommendation/recommendation.route.js';
 import riskRoute from './app/modules/risk/risk.route.js';
@@ -22,6 +23,7 @@ const moduleRoutes = [
   { path: '/site', route: siteRoute },
   { path: '/template', route: templateRoute },
   { path: '/profile', route: profileRoute },
+  { path: '/organization', route: organizationRoute },
   { path: '/auth', route: accountRouter },
 ];
 

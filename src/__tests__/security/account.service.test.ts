@@ -58,6 +58,8 @@ describe('account service', () => {
         fn({
           account: { create: vi.fn().mockResolvedValue(createdAccount) },
           organizationProfile: { create: vi.fn().mockResolvedValue({ id: 'prof-1' }) },
+          organization: { create: vi.fn().mockResolvedValue({ id: 'org-1' }) },
+          orgMember: { create: vi.fn().mockResolvedValue({}) },
         }),
       );
       db.update.mockResolvedValue({});
@@ -72,6 +74,8 @@ describe('account service', () => {
       await txCallback({
         account: { create: createSpy },
         organizationProfile: { create: vi.fn().mockResolvedValue({}) },
+        organization: { create: vi.fn().mockResolvedValue({ id: 'org-1' }) },
+        orgMember: { create: vi.fn().mockResolvedValue({}) },
       });
       expect(createSpy).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ isAccountVerified: false }) }),
@@ -95,6 +99,8 @@ describe('account service', () => {
             }),
           },
           organizationProfile: { create: vi.fn().mockResolvedValue({}) },
+          organization: { create: vi.fn().mockResolvedValue({ id: 'org-1' }) },
+          orgMember: { create: vi.fn().mockResolvedValue({}) },
         }),
       );
       db.update.mockResolvedValue({});
@@ -107,6 +113,45 @@ describe('account service', () => {
 
       expect(capturedPassword).not.toBe('super-secret');
       expect(bcrypt.compareSync('super-secret', capturedPassword!)).toBe(true);
+    });
+
+    it('creates an Organization + ADMIN OrgMember alongside the Account (#55 slice 2)', async () => {
+      db.findFirst.mockResolvedValue(null);
+      const organizationCreate = vi
+        .fn()
+        .mockResolvedValue({ id: 'org-1', anchorAccountId: 'acc-1' });
+      const orgMemberCreate = vi.fn().mockResolvedValue({});
+      mockTransaction.mockImplementation(async (fn) =>
+        fn({
+          account: { create: vi.fn().mockResolvedValue({ id: 'acc-1' }) },
+          organizationProfile: { create: vi.fn().mockResolvedValue({}) },
+          organization: { create: organizationCreate },
+          orgMember: { create: orgMemberCreate },
+        }),
+      );
+      db.update.mockResolvedValue({});
+
+      await account_services.create_account_into_db(
+        makeReq({
+          body: { email: 'new@test.com', password: 'pw', organizationName: 'Acme Corp' },
+        }),
+      );
+
+      expect(organizationCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ name: 'Acme Corp', anchorAccountId: 'acc-1' }),
+        }),
+      );
+      expect(orgMemberCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            organizationId: 'org-1',
+            accountId: 'acc-1',
+            role: 'ADMIN',
+            status: 'ACTIVE',
+          }),
+        }),
+      );
     });
   });
 

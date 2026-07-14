@@ -1,31 +1,13 @@
 import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
-import { RedisStore, type RedisReply } from 'rate-limit-redis';
 import { configs } from '../../configs/index.js';
 import auth from '../../middlewares/auth.js';
+import { makeRedisStore, sensitiveAuthLimiter } from '../../middlewares/rate_limiters.js';
 import RequestValidator from '../../middlewares/request_validator.js';
 import { passportConfig } from '../../passport-js/config.js';
 import { customAccessTokenAndResponse } from '../../passport-js/customAccessTokenAndResponse.js';
-import { redisConnection } from '../../queues/connection.js';
 import { account_controller } from './account.controller.js';
 import { account_validation } from './account.validation.js';
-
-const makeRedisStore = (prefix: string) =>
-  new RedisStore({
-    prefix,
-    sendCommand: (command: string, ...args: string[]) =>
-      redisConnection.call(command, ...args) as Promise<RedisReply>,
-  });
-
-// Brute-force sensitive: sign-in, sign-up, OTP, password reset
-const sensitiveAuthLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  store: makeRedisStore('rl:auth:sensitive:'),
-  message: { success: false, message: 'Too many attempts. Please try again later.' },
-});
 
 // Session check: /me fires on every page load, no credential risk
 const sessionCheckLimiter = rateLimit({

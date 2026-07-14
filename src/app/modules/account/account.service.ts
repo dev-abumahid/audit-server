@@ -23,7 +23,10 @@ const create_account_into_db = async (req: Request) => {
   // hash password
   const hashPassword = bcrypt.hashSync(payload.password, 10);
 
-  // create account and profile
+  // create account, profile, and the org/org-membership that backs it (#55
+  // slice 2) — mirrors exactly what src/scripts/backfill-org-membership.ts
+  // does for pre-existing accounts, so new signups never need that backfill
+  // to run for them.
   const result = await prisma.$transaction(async (tx: any) => {
     const account = await tx.account.create({
       data: {
@@ -38,6 +41,22 @@ const create_account_into_db = async (req: Request) => {
       data: {
         organizationName: payload.organizationName,
         accountId: account.id,
+      },
+    });
+
+    const organization = await tx.organization.create({
+      data: {
+        name: payload.organizationName,
+        anchorAccountId: account.id,
+      },
+    });
+
+    await tx.orgMember.create({
+      data: {
+        organizationId: organization.id,
+        accountId: account.id,
+        role: 'ADMIN',
+        status: 'ACTIVE',
       },
     });
 
@@ -187,15 +206,11 @@ const login_user_into_db = async (req: Request) => {
     throw new AppError('Account is not verified', 401);
   }
   // generate access
-  const accessToken = jwtHelpers.generateToken(
-    {
-      email: account.email,
-      role: account.role,
-      accountId: account.id,
-    },
-    configs.jwt.access_token as string,
-    configs.jwt.access_expires as string,
-  );
+  const accessToken = jwtHelpers.generateAccessToken({
+    email: account.email,
+    role: account.role,
+    accountId: account.id,
+  });
 
   // return payload
   const returnPayload = {
