@@ -11,6 +11,15 @@ enum STATUS {
     CANT_DO
 }
 
+// Slice-1 (#55) prep: distinguishes internal-only action messages from ones
+// visible to external/client users. Schema-only for now — no enforcement
+// logic exists yet, and the default keeps existing rows behaving exactly as
+// before (internal-only).
+enum MessageVisibility {
+    INTERNAL
+    CLIENT_VISIBLE
+}
+
 model Action {
     id String @id @default(uuid())
 
@@ -37,6 +46,9 @@ model Action {
     // Date time
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
+
+    // Slice-1 (#55) prep
+    findingAssignments FindingAssignment[]
 }
 
 model ActionMessage {
@@ -47,8 +59,9 @@ model ActionMessage {
     senderAccountId String
 
     // Main body
-    message String
-    fileUrl String?
+    message    String
+    fileUrl    String?
+    visibility MessageVisibility @default(INTERNAL)
 
     // Relations
     action  Action  @relation(fields: [actionId], references: [id], onDelete: Cascade)
