@@ -30,6 +30,7 @@ import {
   assertCanWriteToActionForExternalMember,
   hasActiveFindingAssignmentForExternalMember,
   isExternalMembershipActive,
+  resolveAccountOrgAnchor,
   resolveCallerOrgContext,
   resolveExternalCallerContext,
 } from '../../app/utils/org_scope.js';
@@ -157,6 +158,84 @@ describe('org_scope — resolveCallerOrgContext', () => {
     const ctx = await resolveCallerOrgContext(ACCOUNT);
 
     expect(ctx.role).toBe('VIEWER');
+  });
+});
+
+describe('org_scope — resolveAccountOrgAnchor (issue #58 follow-up)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('resolves to ADMIN-of-self (own accountId, isActive: true) when there is no OrgMember row', async () => {
+    orgMemberDb.findUnique.mockResolvedValue(null);
+
+    const result = await resolveAccountOrgAnchor(ACCOUNT);
+
+    expect(result).toEqual({ organizationId: ACCOUNT, isActive: true });
+  });
+
+  it('resolves to the org anchor and isActive: true for a real, ACTIVE membership', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'LIGHT_USER',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+
+    const result = await resolveAccountOrgAnchor(ACCOUNT);
+
+    expect(result).toEqual({ organizationId: ANCHOR, isActive: true });
+  });
+
+  it('resolves to the org anchor but isActive: false for a SUSPENDED membership — does NOT throw', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'LIGHT_USER',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+    organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+
+    const result = await resolveAccountOrgAnchor(ACCOUNT);
+
+    expect(result).toEqual({ organizationId: ANCHOR, isActive: false });
+  });
+
+  it('resolves to the org anchor but isActive: false for an expired membership — does NOT throw', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'LIGHT_USER',
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+    });
+    organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+
+    const result = await resolveAccountOrgAnchor(ACCOUNT);
+
+    expect(result).toEqual({ organizationId: ANCHOR, isActive: false });
+  });
+
+  it('fails closed (isActive: false, a non-matching organizationId) when the Organization row is missing', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ACCOUNT,
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    organizationDb.findUnique.mockResolvedValue(null);
+
+    const result = await resolveAccountOrgAnchor(ACCOUNT);
+
+    expect(result.isActive).toBe(false);
+    expect(result.organizationId).not.toBe(ANCHOR);
+    expect(result.organizationId).not.toBe(ACCOUNT);
   });
 });
 

@@ -120,6 +120,45 @@ export const resolveCallerOrgContext = async (accountId: string): Promise<Caller
 };
 
 /**
+ * Resolves an arbitrary account's org anchor for a "is this account in the
+ * same org as me" check on some OTHER (non-caller) account — e.g. verifying
+ * a grant/revoke target belongs to the caller's org. Deliberately does NOT
+ * throw for a suspended/expired membership the way resolveCallerOrgContext
+ * (via findActiveMembership) does for the *caller* — that throw exists
+ * because a caller's own dead membership must hard-deny the whole request
+ * with a caller-facing message, but this function is resolving a *target*
+ * account: "is that target in my org" and "is that target's own membership
+ * currently active" are two independent facts a caller of this function may
+ * need to check separately (e.g. revoking a suspended member's leftover
+ * access must still succeed even though granting new access to them
+ * shouldn't). Returns `isActive: true` under the same ADMIN-of-self fallback
+ * resolveCallerOrgContext uses for an account with no OrgMember row at all.
+ * Found by independent review — the naive version of this check reused
+ * resolveCallerOrgContext directly, which surfaced the caller-oriented 403
+ * for a merely-inactive target and made revoking a suspended member's access
+ * impossible through the affected endpoint.
+ */
+export const resolveAccountOrgAnchor = async (
+  accountId: string,
+): Promise<{ organizationId: string; isActive: boolean }> => {
+  const membership = await prisma.orgMember.findUnique({ where: { accountId } });
+  if (!membership) {
+    return { organizationId: accountId, isActive: true };
+  }
+  const organization = await prisma.organization.findUnique({
+    where: { id: membership.organizationId },
+  });
+  if (!organization) {
+    // Defensive, mirrors resolveCallerOrgContext's fail-closed handling of
+    // the same "should never happen" case — a nonexistent org can't match
+    // any real caller's organizationId, so this can never wrongly resolve
+    // to "same org."
+    return { organizationId: `__missing_org__:${membership.organizationId}`, isActive: false };
+  }
+  return { organizationId: organization.anchorAccountId, isActive: isMembershipActive(membership) };
+};
+
+/**
  * Every assignment endpoint (InspectionAssignment, FindingAssignment) needs
  * the caller's real Organization.id (not ctx.organizationId, which is the
  * anchor Account.id used by the legacy orgAccountId columns) to scope which

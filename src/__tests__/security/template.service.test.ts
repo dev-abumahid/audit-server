@@ -27,6 +27,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
     organization: {
       findUnique: vi.fn(),
     },
+    profile: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -43,6 +46,8 @@ const organizationDb = prisma.organization as unknown as Record<string, ReturnTy
 const pageDb = (prisma as unknown as { page: Record<string, ReturnType<typeof vi.fn>> }).page;
 const questionDb = (prisma as unknown as { question: Record<string, ReturnType<typeof vi.fn>> })
   .question;
+const profileDb = (prisma as unknown as { profile: Record<string, ReturnType<typeof vi.fn>> })
+  .profile;
 
 const ANCHOR = ORG_A;
 const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
@@ -67,6 +72,11 @@ describe('template service — access member ownership scoping (ticket #31)', ()
     // caller's own accountId), same as every pre-org-scoping-migration test
     // in this file expects.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default target profile resolves to the caller's own account — i.e.
+    // "same org" under the ADMIN-of-self fallback every test in this file
+    // otherwise expects. Tests exercising the cross-org userId case (issue
+    // #58) override this explicitly.
+    profileDb.findUnique.mockResolvedValue({ accountId: ORG_A });
   });
 
   describe('add_template_access_member_into_db', () => {
@@ -92,6 +102,94 @@ describe('template service — access member ownership scoping (ticket #31)', ()
           makeReq({ body: { templateId: 'org-b-template', userId: 'u1' } }),
         ),
       ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(templateAccessDb.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT grant access when the target userId belongs to another org (issue #58)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      profileDb.findUnique.mockResolvedValue({ accountId: 'org-b-account' });
+
+      await expect(
+        template_service.add_template_access_member_into_db(
+          makeReq({ body: { templateId: 't1', userId: 'org-b-profile' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(templateAccessDb.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT grant access when the target userId does not exist', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      profileDb.findUnique.mockResolvedValue(null);
+
+      await expect(
+        template_service.add_template_access_member_into_db(
+          makeReq({ body: { templateId: 't1', userId: 'nonexistent-profile' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(templateAccessDb.create).not.toHaveBeenCalled();
+    });
+
+    it('grants access when the target resolves to the caller org via a REAL OrgMember row, not just the ADMIN-of-self fallback (issue #58 follow-up)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      profileDb.findUnique.mockResolvedValue({ accountId: 'target-account' });
+      // Caller has no OrgMember row (ADMIN-of-self, anchor = ORG_A); target
+      // has a REAL, active OrgMember row whose org's anchor is also ORG_A —
+      // two different resolution paths landing on the same anchor.
+      orgMemberDb.findUnique.mockImplementation(({ where }: { where: { accountId: string } }) =>
+        Promise.resolve(
+          where.accountId === 'target-account'
+            ? {
+                id: 'om-1',
+                organizationId: ORG_ID,
+                accountId: 'target-account',
+                role: 'LIGHT_USER',
+                status: 'ACTIVE',
+                expiresAt: null,
+              }
+            : null,
+        ),
+      );
+      organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ORG_A });
+      templateAccessDb.create.mockResolvedValue({});
+
+      await template_service.add_template_access_member_into_db(
+        makeReq({ body: { templateId: 't1', userId: 'target-profile' } }),
+      );
+
+      expect(templateAccessDb.create).toHaveBeenCalled();
+    });
+
+    it('throws 400 and does NOT grant access to a SUSPENDED target, even in the same org (issue #58 follow-up)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      profileDb.findUnique.mockResolvedValue({ accountId: 'suspended-account' });
+      // mockImplementation, not a blanket mockResolvedValue — orgMember.findUnique
+      // is also called for the CALLER's own resolveCallerOrgContext above, and a
+      // blanket suspended row there would 403 the caller before this test's
+      // scenario (the *target* being suspended) is ever reached.
+      orgMemberDb.findUnique.mockImplementation(({ where }: { where: { accountId: string } }) =>
+        Promise.resolve(
+          where.accountId === 'suspended-account'
+            ? {
+                id: 'om-1',
+                organizationId: ORG_ID,
+                accountId: 'suspended-account',
+                role: 'LIGHT_USER',
+                status: 'SUSPENDED',
+                expiresAt: null,
+              }
+            : null,
+        ),
+      );
+      organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ORG_A });
+
+      await expect(
+        template_service.add_template_access_member_into_db(
+          makeReq({ body: { templateId: 't1', userId: 'suspended-profile' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
 
       expect(templateAccessDb.create).not.toHaveBeenCalled();
     });
@@ -123,6 +221,48 @@ describe('template service — access member ownership scoping (ticket #31)', ()
 
       expect(templateAccessDb.deleteMany).not.toHaveBeenCalled();
     });
+
+    it('throws 404 and does NOT remove access when the target userId belongs to another org (issue #58)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      profileDb.findUnique.mockResolvedValue({ accountId: 'org-b-account' });
+
+      await expect(
+        template_service.remove_template_access_member_from_db(
+          makeReq({ body: { templateId: 't1', userId: 'org-b-profile' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(templateAccessDb.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('still revokes access from a SUSPENDED same-org target — offboarding must not be blocked (issue #58 follow-up)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      profileDb.findUnique.mockResolvedValue({ accountId: 'suspended-account' });
+      // mockImplementation, not a blanket mockResolvedValue — see the analogous
+      // add_template_access_member_into_db test above for why.
+      orgMemberDb.findUnique.mockImplementation(({ where }: { where: { accountId: string } }) =>
+        Promise.resolve(
+          where.accountId === 'suspended-account'
+            ? {
+                id: 'om-1',
+                organizationId: ORG_ID,
+                accountId: 'suspended-account',
+                role: 'LIGHT_USER',
+                status: 'SUSPENDED',
+                expiresAt: null,
+              }
+            : null,
+        ),
+      );
+      organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ORG_A });
+      templateAccessDb.deleteMany.mockResolvedValue({ count: 1 });
+
+      await template_service.remove_template_access_member_from_db(
+        makeReq({ body: { templateId: 't1', userId: 'suspended-profile' } }),
+      );
+
+      expect(templateAccessDb.deleteMany).toHaveBeenCalled();
+    });
   });
 });
 
@@ -130,6 +270,11 @@ describe('template service — write/access-grant role scoping (issue #55 slice 
   beforeEach(() => {
     vi.clearAllMocks();
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default target profile resolves to the caller's own account — i.e.
+    // "same org" under the ADMIN-of-self fallback every test in this file
+    // otherwise expects. Tests exercising the cross-org userId case (issue
+    // #58) override this explicitly.
+    profileDb.findUnique.mockResolvedValue({ accountId: ORG_A });
   });
 
   it('VIEWER cannot create a template', async () => {
@@ -168,6 +313,7 @@ describe('template service — write/access-grant role scoping (issue #55 slice 
 
   it('ignores an orgAccountId supplied in the body and always writes the caller org anchor on update', async () => {
     mockMembership('ADMIN');
+    templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ANCHOR });
     templateDb.update.mockResolvedValue({});
 
     await template_service.update_template_into_db(
@@ -226,6 +372,11 @@ describe('template service — access invitation payload field name (ticket #57)
     // caller's own accountId), same as every pre-org-scoping-migration test
     // in this file expects.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default target profile resolves to the caller's own account — i.e.
+    // "same org" under the ADMIN-of-self fallback every test in this file
+    // otherwise expects. Tests exercising the cross-org userId case (issue
+    // #58) override this explicitly.
+    profileDb.findUnique.mockResolvedValue({ accountId: ORG_A });
   });
 
   it('passes the userId from the request body through to templateAccess.create, not undefined', async () => {
@@ -265,6 +416,11 @@ describe('template service — error-handling consistency (issue #55 follow-up)'
   beforeEach(() => {
     vi.clearAllMocks();
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default target profile resolves to the caller's own account — i.e.
+    // "same org" under the ADMIN-of-self fallback every test in this file
+    // otherwise expects. Tests exercising the cross-org userId case (issue
+    // #58) override this explicitly.
+    profileDb.findUnique.mockResolvedValue({ accountId: ORG_A });
   });
 
   it('get_single_template_from_db throws 404 for another org template instead of returning null', async () => {
@@ -273,6 +429,32 @@ describe('template service — error-handling consistency (issue #55 follow-up)'
     await expect(
       template_service.get_single_template_from_db(makeReq({ params: { id: 'org-b-template' } })),
     ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('update_template_into_db verifies existence before updating (issue #60)', async () => {
+    templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+    templateDb.update.mockResolvedValue({});
+
+    await template_service.update_template_into_db(
+      makeReq({ params: { id: 't1' }, body: { templateName: 'New name' } }),
+    );
+
+    expect(templateDb.findFirst).toHaveBeenCalledWith({
+      where: { id: 't1', orgAccountId: ORG_A },
+    });
+    expect(templateDb.update).toHaveBeenCalled();
+  });
+
+  it('update_template_into_db throws 404 and does NOT update another org template (issue #60)', async () => {
+    templateDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      template_service.update_template_into_db(
+        makeReq({ params: { id: 'org-b-template' }, body: { templateName: 'hack' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(templateDb.update).not.toHaveBeenCalled();
   });
 
   it('delete_template_from_db verifies existence before deleting', async () => {

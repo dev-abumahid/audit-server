@@ -8,6 +8,7 @@ import { JwtPayloadType } from '../../utils/JWT.js';
 import {
   assertCanWriteOrgResource,
   assertIsOrgAdmin,
+  resolveAccountOrgAnchor,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
@@ -122,6 +123,16 @@ const update_template_into_db = async (req: Request) => {
     const cloudRes = await uploadCloud(req?.file);
     body.templateLogo = cloudRes?.secure_url;
   }
+
+  // Existence check before update, matching every sibling module — updating
+  // a missing/cross-org id used to fall straight through to Prisma's raw
+  // P2025 "record to update not found" error (a 500), instead of the clean
+  // 404 the rest of the API returns for the same class of request. Found by
+  // independent review (issue #60).
+  const existing = await prisma.template.findFirst({
+    where: { id, orgAccountId: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Template not found', 404);
 
   // Never trust orgAccountId from the request body on an update — Prisma
   // applies `data` as the SET clause independently of `where`, so a stray
@@ -272,6 +283,47 @@ const delete_page_question_by_id_from_db = async (req: Request) => {
   return await prisma.question.delete({ where: { id } });
 };
 
+/**
+ * Verifies a TemplateAccess target (Profile.id, via body.userId) belongs to
+ * the same org as the caller — PR #56 fixed the templateId ownership check
+ * on these two functions (issue #31), but neither verified the *target*
+ * user, so an Admin who legitimately owns a template could still grant/
+ * revoke access for a Profile.id belonging to an entirely different org, a
+ * second, distinct cross-tenant vector. TemplateAccess.userId is a
+ * Profile.id, not an Account.id or OrgMember.id, so "same org" is checked by
+ * resolving the target Profile's own account's org anchor and comparing it
+ * to the caller's.
+ *
+ * requireActive is opt-in, not baked into the same-org check itself — an
+ * earlier version of this function resolved the target through
+ * resolveCallerOrgContext (the caller-facing helper), which throws a 403 for
+ * a merely-inactive (suspended/expired) target instead of the uniform 404
+ * every other invalid userId here produces, AND made it impossible to ever
+ * revoke a suspended member's leftover access (the revoke path can't allow
+ * that to fail). resolveAccountOrgAnchor (org_scope.ts) resolves the same-org
+ * fact without that throw, so the two independent facts — "same org" and
+ * "currently active" — can be checked separately per call site. Found by
+ * independent review (issue #58).
+ */
+const requireTargetProfileInCallerOrg = async (
+  userId: string,
+  callerOrganizationId: string,
+  { requireActive = false }: { requireActive?: boolean } = {},
+) => {
+  const targetProfile = await prisma.profile.findUnique({
+    where: { id: userId },
+    select: { accountId: true },
+  });
+  if (!targetProfile) throw new AppError('User not found', 404);
+  const target = await resolveAccountOrgAnchor(targetProfile.accountId);
+  if (target.organizationId !== callerOrganizationId) {
+    throw new AppError('User not found', 404);
+  }
+  if (requireActive && !target.isActive) {
+    throw new AppError("This member's access to the organization is not active.", 400);
+  }
+};
+
 const add_template_access_member_into_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
@@ -282,6 +334,12 @@ const add_template_access_member_into_db = async (req: Request) => {
     where: { id: body.templateId, orgAccountId: ctx.organizationId },
   });
   if (!template) throw new AppError('Template Not found', 404);
+
+  // Granting NEW access to an inactive (suspended/expired) member is
+  // pointless — they can't use it — so this path requires an active target,
+  // unlike revoke below which must always be allowed to succeed regardless
+  // of the target's current status.
+  await requireTargetProfileInCallerOrg(body.userId, ctx.organizationId, { requireActive: true });
 
   // now assign member
   const res = await prisma.templateAccess.create({
@@ -307,6 +365,11 @@ const remove_template_access_member_from_db = async (req: Request) => {
     where: { id: body.templateId, orgAccountId: ctx.organizationId },
   });
   if (!template) throw new AppError('Template Not found', 404);
+
+  // No requireActive here — revoking a suspended/offboarded member's
+  // leftover access must always be allowed to succeed; only the same-org
+  // fact matters for a revoke, not whether the target is currently active.
+  await requireTargetProfileInCallerOrg(body.userId, ctx.organizationId);
 
   // Now remove member
   const res = await prisma.templateAccess.deleteMany({
