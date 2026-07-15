@@ -2,6 +2,7 @@ import { Router } from 'express';
 import accountRouter from './app/modules/account/account.route.js';
 import actionRoute from './app/modules/action/action.route.js';
 import aiRoute from './app/modules/ai/ai.route.js';
+import externalAuthRoute from './app/modules/external-auth/external-auth.route.js';
 import inspectionRoute from './app/modules/inspection/inspection.route.js';
 import noteRoute from './app/modules/note/note.route.js';
 import organizationRoute from './app/modules/organization/organization.route.js';
@@ -25,6 +26,7 @@ const moduleRoutes = [
   { path: '/profile', route: profileRoute },
   { path: '/organization', route: organizationRoute },
   { path: '/auth', route: accountRouter },
+  { path: '/external-auth', route: externalAuthRoute },
 ];
 
 moduleRoutes.forEach((route) => appRouter.use(route.path, route.route));

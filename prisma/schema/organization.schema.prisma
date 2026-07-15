@@ -225,6 +225,14 @@ enum OrgAuditAction {
     FINDING_ASSIGNMENT_REJECTED
     FINDING_ASSIGNMENT_REVOKED
     ORG_SETTINGS_CHANGED
+    // Slice 5 (#55): external (non-Account) member lifecycle events. Kept as
+    // distinct action values rather than reusing MEMBER_INVITED/MEMBER_REMOVED
+    // so a compliance reviewer can filter "who is/was an external party with
+    // access" without cross-referencing subjectOrgMemberId vs
+    // subjectExternalOrgMemberId on every row.
+    EXTERNAL_MEMBER_INVITED
+    EXTERNAL_MEMBER_REMOVED
+    EXTERNAL_MEMBER_LOGIN_SUCCEEDED
 }
 
 model OrgAuditLog {
@@ -232,12 +240,17 @@ model OrgAuditLog {
     organizationId String
     action         OrgAuditAction
     // accountId of whoever performed the action. Null for actions with no
-    // authenticated actor (e.g. a member accepting their own invitation is
-    // captured via the subject fields below, not actorAccountId).
+    // authenticated actor (e.g. a member accepting their own invitation, or
+    // an external member logging in, is captured via the subject fields
+    // below, not actorAccountId).
     actorAccountId String?
-    // The OrgMember/OrgInvitation this event is about, where applicable.
-    subjectOrgMemberId String?
-    subjectEmail       String?
+    // The OrgMember/OrgInvitation/ExternalOrgMember this event is about,
+    // where applicable. Exactly one of subjectOrgMemberId /
+    // subjectExternalOrgMemberId is ever set for a given row — an event is
+    // about an internal member or an external one, never both.
+    subjectOrgMemberId         String?
+    subjectExternalOrgMemberId String?
+    subjectEmail               String?
     // Freeform before/after snapshot for status/expiresAt-style changes —
     // deliberately loose (Json, not typed columns) since the set of fields
     // worth recording differs per action type.
@@ -249,4 +262,5 @@ model OrgAuditLog {
 
     @@index([organizationId, createdAt])
     @@index([subjectOrgMemberId])
+    @@index([subjectExternalOrgMemberId])
 }

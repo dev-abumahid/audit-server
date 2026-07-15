@@ -30,6 +30,13 @@ vi.mock('../../app/lib/prisma.js', () => ({
     orgAuditLog: {
       create: vi.fn(),
     },
+    externalOrgMember: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
     $transaction: vi.fn(),
   },
 }));
@@ -46,6 +53,10 @@ const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typ
 const orgInvitationDb = prisma.orgInvitation as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const accountDb = prisma.account as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const externalOrgMemberDb = prisma.externalOrgMember as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const mockTransaction = prisma.$transaction as unknown as ReturnType<typeof vi.fn>;
 const mockQueueAdd = vi.mocked(orgInviteEmailQueue.add);
 
@@ -1570,6 +1581,254 @@ describe('organization service — settings (issue #55 slice 4)', () => {
       ).rejects.toMatchObject({ statusCode: 403 });
 
       expect(organizationDb.update).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('organization service — external member management (issue #55 slice 5)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const mockAdmin = (accountId = 'admin-1') => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId,
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+  };
+
+  describe('invite_external_member_into_db', () => {
+    it('creates a new external LIGHT_USER member', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findUnique.mockResolvedValue(null);
+      externalOrgMemberDb.create.mockResolvedValue({ id: 'ext-1', role: 'LIGHT_USER' });
+
+      await organization_services.invite_external_member_into_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          body: { email: 'Contractor@Test.com', fullName: 'Contractor' },
+        }),
+      );
+
+      expect(externalOrgMemberDb.create).toHaveBeenCalledWith({
+        data: {
+          organizationId: ORG_1,
+          email: 'contractor@test.com',
+          fullName: 'Contractor',
+          role: 'LIGHT_USER',
+        },
+      });
+    });
+
+    it('rejects an explicit role of VIEWER — not supported yet', async () => {
+      mockAdmin();
+
+      await expect(
+        organization_services.invite_external_member_into_db(
+          makeReq({
+            user: { accountId: 'admin-1' },
+            body: { email: 'x@test.com', role: 'VIEWER' },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(externalOrgMemberDb.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the email is already an active external member', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findUnique.mockResolvedValue({
+        id: 'ext-1',
+        organizationId: ORG_1,
+        email: 'x@test.com',
+        isActive: true,
+      });
+
+      await expect(
+        organization_services.invite_external_member_into_db(
+          makeReq({ user: { accountId: 'admin-1' }, body: { email: 'x@test.com' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(externalOrgMemberDb.create).not.toHaveBeenCalled();
+    });
+
+    it('reactivates a previously-removed external member instead of creating a duplicate', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findUnique.mockResolvedValue({
+        id: 'ext-1',
+        organizationId: ORG_1,
+        email: 'x@test.com',
+        isActive: false,
+      });
+      externalOrgMemberDb.update.mockResolvedValue({ id: 'ext-1', isActive: true });
+
+      await organization_services.invite_external_member_into_db(
+        makeReq({ user: { accountId: 'admin-1' }, body: { email: 'x@test.com' } }),
+      );
+
+      expect(externalOrgMemberDb.create).not.toHaveBeenCalled();
+      expect(externalOrgMemberDb.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'ext-1' },
+          data: expect.objectContaining({ isActive: true, expiresAt: null }),
+        }),
+      );
+    });
+
+    it('rejects a non-admin caller', async () => {
+      orgMemberDb.findUnique.mockResolvedValue({
+        organizationId: ORG_1,
+        accountId: 'lead-1',
+        role: 'LEAD_AUDITOR',
+        status: 'ACTIVE',
+        expiresAt: null,
+      });
+
+      await expect(
+        organization_services.invite_external_member_into_db(
+          makeReq({ user: { accountId: 'lead-1' }, body: { email: 'x@test.com' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(externalOrgMemberDb.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('get_external_members_from_db', () => {
+    it('lists external members scoped to the caller org, with a derived isExpired field', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findMany.mockResolvedValue([
+        { id: 'ext-1', email: 'a@test.com', isActive: true, expiresAt: null },
+        {
+          id: 'ext-2',
+          email: 'b@test.com',
+          isActive: true,
+          expiresAt: new Date(Date.now() - 1000),
+        },
+      ]);
+
+      const result = await organization_services.get_external_members_from_db(
+        makeReq({ user: { accountId: 'admin-1' } }),
+      );
+
+      expect(externalOrgMemberDb.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { organizationId: ORG_1 } }),
+      );
+      expect(result[0].isExpired).toBe(false);
+      expect(result[1].isExpired).toBe(true);
+    });
+  });
+
+  describe('update_external_member_in_db', () => {
+    it('deactivates an external member and records an EXTERNAL_MEMBER_REMOVED audit event', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: 'ext-1',
+        organizationId: ORG_1,
+        email: 'x@test.com',
+        isActive: true,
+        expiresAt: null,
+      });
+      externalOrgMemberDb.update.mockResolvedValue({
+        id: 'ext-1',
+        isActive: false,
+        expiresAt: null,
+      });
+
+      await organization_services.update_external_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'ext-1' },
+          body: { isActive: false },
+        }),
+      );
+
+      expect(externalOrgMemberDb.update).toHaveBeenCalledWith({
+        where: { id: 'ext-1' },
+        data: { isActive: false },
+      });
+      expect(prisma.orgAuditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'EXTERNAL_MEMBER_REMOVED' }),
+        }),
+      );
+    });
+
+    it('records EXTERNAL_MEMBER_REMOVED when access is cut off via a past expiresAt, not just isActive:false (issue #55 slice 5 follow-up)', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: 'ext-1',
+        organizationId: ORG_1,
+        email: 'x@test.com',
+        isActive: true,
+        expiresAt: null,
+      });
+      const pastDate = new Date(Date.now() - 1000);
+      externalOrgMemberDb.update.mockResolvedValue({
+        id: 'ext-1',
+        isActive: true,
+        expiresAt: pastDate,
+      });
+
+      await organization_services.update_external_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'ext-1' },
+          body: { expiresAt: pastDate },
+        }),
+      );
+
+      expect(prisma.orgAuditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'EXTERNAL_MEMBER_REMOVED' }),
+        }),
+      );
+    });
+
+    it('does NOT record an audit event when the member remains active after the update', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: 'ext-1',
+        organizationId: ORG_1,
+        email: 'x@test.com',
+        isActive: true,
+        expiresAt: null,
+      });
+      const futureDate = new Date(Date.now() + 100000);
+      externalOrgMemberDb.update.mockResolvedValue({
+        id: 'ext-1',
+        isActive: true,
+        expiresAt: futureDate,
+      });
+
+      await organization_services.update_external_member_in_db(
+        makeReq({
+          user: { accountId: 'admin-1' },
+          params: { id: 'ext-1' },
+          body: { expiresAt: futureDate },
+        }),
+      );
+
+      expect(prisma.orgAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT update another org external member', async () => {
+      mockAdmin();
+      externalOrgMemberDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        organization_services.update_external_member_in_db(
+          makeReq({
+            user: { accountId: 'admin-1' },
+            params: { id: 'org-b-ext' },
+            body: { isActive: false },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(externalOrgMemberDb.update).not.toHaveBeenCalled();
     });
   });
 });

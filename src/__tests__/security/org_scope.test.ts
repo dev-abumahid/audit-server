@@ -16,6 +16,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findMany: vi.fn(),
       findFirst: vi.fn(),
     },
+    externalOrgMember: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -24,7 +27,11 @@ import {
   applyActionScope,
   applyInspectionScope,
   assertCanWriteToAction,
+  assertCanWriteToActionForExternalMember,
+  hasActiveFindingAssignmentForExternalMember,
+  isExternalMembershipActive,
   resolveCallerOrgContext,
+  resolveExternalCallerContext,
 } from '../../app/utils/org_scope.js';
 
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -34,6 +41,10 @@ const assignmentDb = prisma.inspectionAssignment as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 const findingAssignmentDb = prisma.findingAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const externalOrgMemberDb = prisma.externalOrgMember as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -421,5 +432,145 @@ describe('org_scope — assertCanWriteToAction (issue #55 slice 4)', () => {
         ACTION,
       ),
     ).rejects.toMatchObject({ statusCode: 403 });
+  });
+});
+
+describe('org_scope — external member helpers (issue #55 slice 5)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const ACTIVE_EXTERNAL_MEMBER = {
+    id: 'ext-1',
+    organizationId: 'org-1',
+    email: 'external@test.com',
+    fullName: null,
+    role: 'LIGHT_USER',
+    isActive: true,
+    expiresAt: null,
+  };
+
+  describe('isExternalMembershipActive', () => {
+    it('is true for an active, non-expired member', () => {
+      expect(isExternalMembershipActive({ isActive: true, expiresAt: null })).toBe(true);
+    });
+
+    it('is false when isActive is false', () => {
+      expect(isExternalMembershipActive({ isActive: false, expiresAt: null })).toBe(false);
+    });
+
+    it('is false when expiresAt is in the past', () => {
+      expect(
+        isExternalMembershipActive({ isActive: true, expiresAt: new Date(Date.now() - 1000) }),
+      ).toBe(false);
+    });
+
+    it('is true when expiresAt is in the future', () => {
+      expect(
+        isExternalMembershipActive({ isActive: true, expiresAt: new Date(Date.now() + 100000) }),
+      ).toBe(true);
+    });
+  });
+
+  describe('resolveExternalCallerContext', () => {
+    it('throws 401 when the member does not exist', async () => {
+      externalOrgMemberDb.findUnique.mockResolvedValue(null);
+
+      await expect(resolveExternalCallerContext('ext-1')).rejects.toMatchObject({
+        statusCode: 401,
+      });
+    });
+
+    it('throws 401 when the member is deactivated', async () => {
+      externalOrgMemberDb.findUnique.mockResolvedValue({
+        ...ACTIVE_EXTERNAL_MEMBER,
+        isActive: false,
+      });
+
+      await expect(resolveExternalCallerContext('ext-1')).rejects.toMatchObject({
+        statusCode: 401,
+      });
+    });
+
+    it('throws 403 when the member role is VIEWER (not yet supported)', async () => {
+      externalOrgMemberDb.findUnique.mockResolvedValue({
+        ...ACTIVE_EXTERNAL_MEMBER,
+        role: 'VIEWER',
+      });
+
+      await expect(resolveExternalCallerContext('ext-1')).rejects.toMatchObject({
+        statusCode: 403,
+      });
+    });
+
+    it('throws 401 when the organization cannot be found (defensive)', async () => {
+      externalOrgMemberDb.findUnique.mockResolvedValue({
+        ...ACTIVE_EXTERNAL_MEMBER,
+        organization: null,
+      });
+
+      await expect(resolveExternalCallerContext('ext-1')).rejects.toMatchObject({
+        statusCode: 401,
+      });
+    });
+
+    it('returns the anchor account id as organizationId and the real Organization.id as orgId', async () => {
+      externalOrgMemberDb.findUnique.mockResolvedValue({
+        ...ACTIVE_EXTERNAL_MEMBER,
+        organization: { id: 'org-1', anchorAccountId: 'anchor-1' },
+      });
+
+      const ctx = await resolveExternalCallerContext('ext-1');
+
+      expect(ctx).toEqual({
+        externalOrgMemberId: 'ext-1',
+        organizationId: 'anchor-1',
+        orgId: 'org-1',
+        role: 'LIGHT_USER',
+      });
+    });
+  });
+
+  describe('hasActiveFindingAssignmentForExternalMember', () => {
+    it('returns true when a live FindingAssignment exists', async () => {
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+
+      const result = await hasActiveFindingAssignmentForExternalMember('ext-1', 'action-1');
+
+      expect(findingAssignmentDb.findFirst).toHaveBeenCalledWith({
+        where: {
+          externalOrgMemberId: 'ext-1',
+          actionId: 'action-1',
+          status: 'ACTIVE',
+          revokedAt: null,
+        },
+        select: { id: true },
+      });
+      expect(result).toBe(true);
+    });
+
+    it('returns false when no live FindingAssignment exists', async () => {
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      const result = await hasActiveFindingAssignmentForExternalMember('ext-1', 'action-1');
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('assertCanWriteToActionForExternalMember', () => {
+    it('allows when a live FindingAssignment exists', async () => {
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+
+      await expect(
+        assertCanWriteToActionForExternalMember('ext-1', { id: 'action-1' }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('denies when no live FindingAssignment exists', async () => {
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        assertCanWriteToActionForExternalMember('ext-1', { id: 'action-1' }),
+      ).rejects.toMatchObject({ statusCode: 403 });
+    });
   });
 });

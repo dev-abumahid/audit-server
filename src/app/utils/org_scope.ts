@@ -48,9 +48,21 @@ export type CallerOrgContext = {
  * check, fixed in a follow-up once independent review caught it) precisely
  * because the logic was duplicated instead of shared.
  */
+/**
+ * Shared time-boxed-expiry predicate — used by isMembershipActive and
+ * isExternalMembershipActive below, and directly by the two org-member list
+ * endpoints (get_org_members_from_db, get_external_members_from_db in
+ * organization.service.ts) for their derived `isExpired` display field. Was
+ * four independent copies of the identical expression before independent
+ * review; kept in one place per this file's own established reasoning (see
+ * isMembershipActive's docstring on why duplicated predicates here have
+ * already drifted once).
+ */
+export const hasExpired = (entity: { expiresAt: Date | null }) =>
+  !!entity.expiresAt && entity.expiresAt.getTime() < Date.now();
+
 export const isMembershipActive = (membership: { status: string; expiresAt: Date | null }) => {
-  const isExpired = !!membership.expiresAt && membership.expiresAt.getTime() < Date.now();
-  return membership.status === 'ACTIVE' && !isExpired;
+  return membership.status === 'ACTIVE' && !hasExpired(membership);
 };
 
 /**
@@ -394,6 +406,135 @@ export const assertCanWriteToAction = async (
 };
 
 /**
+ * Slice 5 (#55): resolved view of "who is calling" for an external (non-
+ * Account) org member — the OTP-verified counterpart to CallerOrgContext.
+ * Kept as a separate type rather than folding into CallerOrgContext: an
+ * external member has no orgMemberId, is never anything but LIGHT_USER today
+ * (external VIEWER is deliberately not built yet — see
+ * resolveExternalCallerContext), and every existing function that takes a
+ * CallerOrgContext assumes an Account-backed caller (resolveCallerOrgContext,
+ * requireCallerOrganizationId, the ADMIN/LEAD_AUDITOR/VIEWER branches
+ * throughout this file) — reusing that type would mean every one of those
+ * call sites needs a runtime check for a caller shape they can never actually
+ * receive.
+ */
+export type ExternalCallerContext = {
+  externalOrgMemberId: string;
+  // The org's anchor Account.id — same meaning as CallerOrgContext.organizationId,
+  // used identically to filter domain tables via orgAccountId/org_account_id.
+  organizationId: string;
+  // The real Organization.id (Organization.anchorAccountId's owner), needed
+  // for OrgAuditLog.organizationId and any future org-scoped lookup that
+  // isn't a domain-table orgAccountId filter.
+
+  orgId: string;
+  role: 'LIGHT_USER';
+};
+
+/**
+ * External-member counterpart to isMembershipActive — ExternalOrgMember uses
+ * a plain `isActive` boolean instead of OrgMemberStatus, but the same
+ * time-boxed-expiry rule applies.
+ */
+export const isExternalMembershipActive = (member: {
+  isActive: boolean;
+  expiresAt: Date | null;
+}) => {
+  return member.isActive && !hasExpired(member);
+};
+
+/**
+ * Resolves an external member's caller context from the externalOrgMemberId
+ * embedded in their verified JWT (see auth_external.ts). Unlike
+ * resolveCallerOrgContext, there is no ADMIN-of-self fallback — an external
+ * member with no live ExternalOrgMember row has nothing to fall back to, so
+ * this always either returns a live context or throws.
+ *
+ * VIEWER rows are rejected here (not just at invite time in
+ * organization.service.ts) as defense in depth: the CEO-approved spec for
+ * external Viewers needs inspection-level scoping (InspectionAssignment has
+ * no externalOrgMemberId column yet) and a comment/flag system that don't
+ * exist yet. An ExternalOrgMember row with role VIEWER can only exist today
+ * via direct DB manipulation (invite validation already blocks creating one),
+ * so this is a fail-closed backstop, not the primary guard.
+ */
+export const resolveExternalCallerContext = async (
+  externalOrgMemberId: string,
+): Promise<ExternalCallerContext> => {
+  // Single round-trip via include — this runs on every authenticated
+  // external-member request (authExternal re-checks liveness against the DB
+  // on every call, not just at login), so the two-query version this
+  // replaced (member lookup, then a separate organization lookup) doubled
+  // DB latency on that hot path for no reason. Found by independent review.
+  const member = await prisma.externalOrgMember.findUnique({
+    where: { id: externalOrgMemberId },
+    include: { organization: { select: { id: true, anchorAccountId: true } } },
+  });
+  if (!member) {
+    throw new AppError('Your access could not be verified.', 401);
+  }
+  if (!isExternalMembershipActive(member)) {
+    throw new AppError('Your access to this organization is no longer active.', 401);
+  }
+  if (member.role !== 'LIGHT_USER') {
+    throw new AppError('This external member role is not yet supported.', 403);
+  }
+  // Defensive: the FK guarantees this in practice (same reasoning as
+  // resolveCallerOrgContext's identical check).
+  if (!member.organization) {
+    throw new AppError('Your organization could not be found.', 401);
+  }
+  return {
+    externalOrgMemberId: member.id,
+    organizationId: member.organization.anchorAccountId,
+    orgId: member.organization.id,
+    role: 'LIGHT_USER',
+  };
+};
+
+/**
+ * Targeted single-action existence check — whether one specific
+ * (externalOrgMemberId, actionId) pair has a live FindingAssignment, without
+ * fetching the member's entire assignment list the way
+ * getAssignedActionIdsForExternalMember does. Used by
+ * assertCanWriteToActionForExternalMember (write gate) and
+ * get_single_action_for_external_member (action.service.ts's read gate) —
+ * neither needs the full list, only a yes/no answer for one id. Split out
+ * after independent review found the read gate was calling
+ * getAssignedActionIdsForExternalMember and checking `.includes(id)`, paying
+ * for a full-table fetch to answer a question this targeted query answers
+ * directly.
+ */
+export const hasActiveFindingAssignmentForExternalMember = async (
+  externalOrgMemberId: string,
+  actionId: string,
+): Promise<boolean> => {
+  const live = await prisma.findingAssignment.findFirst({
+    where: {
+      externalOrgMemberId,
+      actionId,
+      status: 'ACTIVE',
+      revokedAt: null,
+    },
+    select: { id: true },
+  });
+  return !!live;
+};
+
+/**
+ * External-member counterpart to assertCanWriteToAction's LIGHT_USER branch
+ * — an external Light User may only write to a finding they hold a live
+ * (ACTIVE, non-revoked) FindingAssignment for, exactly like an internal one.
+ */
+export const assertCanWriteToActionForExternalMember = async (
+  externalOrgMemberId: string,
+  action: { id: string },
+): Promise<void> => {
+  if (await hasActiveFindingAssignmentForExternalMember(externalOrgMemberId, action.id)) return;
+  throw new AppError('You are not assigned to this finding.', 403);
+};
+
+/**
  * Write gate for org-wide shared resources that aren't owned by a single
  * inspection — Site and Template. Unlike assertCanWriteToInspection, there's
  * no per-inspection assignment to check here (a Site/Template isn't scoped
@@ -452,9 +593,13 @@ export const recordOrgAuditEvent = async (entry: {
     | 'FINDING_ASSIGNMENT_APPROVED'
     | 'FINDING_ASSIGNMENT_REJECTED'
     | 'FINDING_ASSIGNMENT_REVOKED'
-    | 'ORG_SETTINGS_CHANGED';
+    | 'ORG_SETTINGS_CHANGED'
+    | 'EXTERNAL_MEMBER_INVITED'
+    | 'EXTERNAL_MEMBER_REMOVED'
+    | 'EXTERNAL_MEMBER_LOGIN_SUCCEEDED';
   actorAccountId?: string | null;
   subjectOrgMemberId?: string | null;
+  subjectExternalOrgMemberId?: string | null;
   subjectEmail?: string | null;
   metadata?: Record<string, unknown>;
 }) => {

@@ -62,4 +62,22 @@ router.post(
   organization_controller.accept_invitation,
 );
 
+// Slice 5 (#55): admin management of external (non-Account) Light User
+// members. Admin-only (enforced in the service via requireCallerIsOrgAdmin),
+// same as /members above.
+router.post(
+  '/external-members',
+  auth('ORGANIZATION'),
+  orgInviteSendLimiter,
+  RequestValidator(organization_validations.invite_external_member),
+  organization_controller.invite_external_member,
+);
+router.get('/external-members', auth('ORGANIZATION'), organization_controller.get_external_members);
+router.patch(
+  '/external-members/:id',
+  auth('ORGANIZATION'),
+  RequestValidator(organization_validations.update_external_member),
+  organization_controller.update_external_member,
+);
+
 export default router;

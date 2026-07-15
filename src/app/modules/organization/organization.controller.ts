@@ -90,6 +90,39 @@ const update_organization_settings = catchAsync(async (req, res) => {
   });
 });
 
+const invite_external_member = catchAsync(async (req, res) => {
+  const result = await organization_services.invite_external_member_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 201,
+    message: 'External member invited successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const get_external_members = catchAsync(async (req, res) => {
+  const result = await organization_services.get_external_members_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'External members fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const update_external_member = catchAsync(async (req, res) => {
+  const result = await organization_services.update_external_member_in_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'External member updated successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const organization_controller = {
   invite_member,
   get_pending_invitations,
@@ -99,4 +132,7 @@ export const organization_controller = {
   accept_invitation,
   get_organization_settings,
   update_organization_settings,
+  invite_external_member,
+  get_external_members,
+  update_external_member,
 };

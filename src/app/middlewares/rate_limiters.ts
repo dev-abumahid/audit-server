@@ -68,3 +68,48 @@ export const orgInviteSendLimiter = rateLimit({
     (req.user as JwtPayloadType | undefined)?.accountId ?? ipKeyGenerator(req.ip ?? ''),
   message: { success: false, message: 'Too many invitations sent. Please try again later.' },
 });
+
+// Slice 5 (#55): public, unauthenticated endpoint that triggers an outbound
+// email — same abuse shape as orgInviteSendLimiter (spam/queue-exhaustion)
+// but reachable by anyone, not just an authenticated admin, so it needs its
+// own budget rather than sharing sensitiveAuthLimiter's window with sign-in/
+// sign-up/password-reset traffic. Keyed by the (organizationId, email)
+// target — same target-oracle reasoning as orgInviteAcceptLimiter — with an
+// IP fallback for a malformed body that has neither field.
+// .trim() matters here, not just .toLowerCase() — external-auth.service.ts
+// normalizes the email with .trim().toLowerCase() before its DB lookup, so
+// every whitespace-padded variant of the same email resolves to the same
+// ExternalOrgMember row server-side. Without trimming here too, each padded
+// variant produced a distinct rate-limit key, letting a caller cycle through
+// ' e@x.com', 'e@x.com ', '  e@x.com' etc. to dodge the limiter entirely
+// against a single real target. Found by independent review.
+const externalCodeKeyGenerator = (req: { body?: { organizationId?: unknown; email?: unknown } }) =>
+  typeof req.body?.organizationId === 'string' && typeof req.body?.email === 'string'
+    ? `target:${req.body.organizationId}:${req.body.email.trim().toLowerCase()}`
+    : undefined;
+
+export const externalCodeRequestLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeRedisStore('rl:external:code-request:'),
+  keyGenerator: (req) => externalCodeKeyGenerator(req) ?? ipKeyGenerator(req.ip ?? ''),
+  message: { success: false, message: 'Too many attempts. Please try again later.' },
+});
+
+// Verifying a code is a brute-force oracle against the 6-digit numeric
+// keyspace — the per-row failedAttempts/lockedUntil lockout in
+// external-auth.service.ts is the primary defense (see
+// ExternalOrgMemberVerificationCode's schema comment), this is
+// defense-in-depth against a caller cycling through fresh codes/rows faster
+// than the lockout can catch.
+export const externalCodeVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeRedisStore('rl:external:code-verify:'),
+  keyGenerator: (req) => externalCodeKeyGenerator(req) ?? ipKeyGenerator(req.ip ?? ''),
+  message: { success: false, message: 'Too many attempts. Please try again later.' },
+});

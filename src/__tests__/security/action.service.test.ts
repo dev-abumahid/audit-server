@@ -38,6 +38,10 @@ vi.mock('../../app/lib/prisma.js', () => ({
     orgAuditLog: {
       create: vi.fn(),
     },
+    externalOrgMember: {
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -53,6 +57,10 @@ const assignmentDb = prisma.inspectionAssignment as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 const findingAssignmentDb = prisma.findingAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const externalOrgMemberDb = prisma.externalOrgMember as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -1328,6 +1336,324 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
 
       expect(result).toEqual([]);
       expect(findingAssignmentDb.findMany).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('action service — external Light User sub-assignment (issue #55 slice 5)', () => {
+  const ANCHOR = 'anchor-account-00000000-0000-0000-0000-000000000011';
+  const ORG_ID = 'org-00000000-0000-0000-0000-000000000011';
+  const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000011';
+  const EXTERNAL_MEMBER_ID = 'ext-member-00000000-0000-0000-0000-000000000012';
+
+  const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      id: MEMBER_ID,
+      organizationId: ORG_ID,
+      accountId: ORG_A,
+      role,
+      status: 'ACTIVE',
+      expiresAt: null,
+    });
+    organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  describe('assign_light_user_to_action (externalOrgMemberId)', () => {
+    it('ADMIN sub-assigns an external Light User; status is ACTIVE when approval is not required', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: EXTERNAL_MEMBER_ID,
+        organizationId: ORG_ID,
+        role: 'LIGHT_USER',
+        isActive: true,
+        expiresAt: null,
+      });
+      organizationDb.findUniqueOrThrow = vi
+        .fn()
+        .mockResolvedValue({ requireApprovalForSubAssignment: false });
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+      findingAssignmentDb.create.mockImplementation(({ data }) =>
+        Promise.resolve({ id: 'fa-1', ...data }),
+      );
+
+      const result = await action_service.assign_light_user_to_action(
+        makeReq({ params: { id: 'action-1' }, body: { externalOrgMemberId: EXTERNAL_MEMBER_ID } }),
+      );
+
+      expect(findingAssignmentDb.create).toHaveBeenCalledWith({
+        data: {
+          actionId: 'action-1',
+          externalOrgMemberId: EXTERNAL_MEMBER_ID,
+          assignedById: ORG_A,
+          status: 'ACTIVE',
+        },
+      });
+      expect(result.status).toBe('ACTIVE');
+    });
+
+    it('rejects sub-assigning an external member who is not LIGHT_USER role', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: EXTERNAL_MEMBER_ID,
+        organizationId: ORG_ID,
+        role: 'VIEWER',
+        isActive: true,
+        expiresAt: null,
+      });
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({
+            params: { id: 'action-1' },
+            body: { externalOrgMemberId: EXTERNAL_MEMBER_ID },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects sub-assigning a deactivated external member', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: EXTERNAL_MEMBER_ID,
+        organizationId: ORG_ID,
+        role: 'LIGHT_USER',
+        isActive: false,
+        expiresAt: null,
+      });
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({
+            params: { id: 'action-1' },
+            body: { externalOrgMemberId: EXTERNAL_MEMBER_ID },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 when the external member does not belong to the caller org', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      externalOrgMemberDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.assign_light_user_to_action(
+          makeReq({ params: { id: 'action-1' }, body: { externalOrgMemberId: 'org-b-ext' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+
+    it('records the audit event with subjectExternalOrgMemberId, not subjectOrgMemberId', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: EXTERNAL_MEMBER_ID,
+        organizationId: ORG_ID,
+        role: 'LIGHT_USER',
+        isActive: true,
+        expiresAt: null,
+      });
+      organizationDb.findUniqueOrThrow = vi
+        .fn()
+        .mockResolvedValue({ requireApprovalForSubAssignment: false });
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+      findingAssignmentDb.create.mockImplementation(({ data }) =>
+        Promise.resolve({ id: 'fa-1', ...data }),
+      );
+
+      await action_service.assign_light_user_to_action(
+        makeReq({ params: { id: 'action-1' }, body: { externalOrgMemberId: EXTERNAL_MEMBER_ID } }),
+      );
+
+      const [auditArg] = (prisma.orgAuditLog.create as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(auditArg.data.subjectExternalOrgMemberId).toBe(EXTERNAL_MEMBER_ID);
+      expect(auditArg.data.subjectOrgMemberId).toBeNull();
+    });
+  });
+
+  describe('unassign_external_light_user_from_action', () => {
+    it('revokes a live external sub-assignment', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: EXTERNAL_MEMBER_ID,
+        organizationId: ORG_ID,
+      });
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        externalOrgMemberId: EXTERNAL_MEMBER_ID,
+        status: 'ACTIVE',
+        revokedAt: null,
+      });
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 1 });
+      findingAssignmentDb.findUniqueOrThrow.mockResolvedValue({
+        id: 'fa-1',
+        revokedAt: new Date(),
+      });
+
+      const result = await action_service.unassign_external_light_user_from_action(
+        makeReq({ params: { id: 'action-1', externalOrgMemberId: EXTERNAL_MEMBER_ID } }),
+      );
+
+      expect(findingAssignmentDb.updateMany).toHaveBeenCalledWith({
+        where: { id: 'fa-1', revokedAt: null },
+        data: expect.objectContaining({ revokedById: ORG_A }),
+      });
+      expect(result.revokedAt).not.toBeNull();
+    });
+
+    it('throws 404 when no live assignment exists for this external member', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'action-1',
+        inspectionId: 'insp-1',
+        orgAccountId: ANCHOR,
+      });
+      externalOrgMemberDb.findFirst.mockResolvedValue({
+        id: EXTERNAL_MEMBER_ID,
+        organizationId: ORG_ID,
+      });
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.unassign_external_light_user_from_action(
+          makeReq({ params: { id: 'action-1', externalOrgMemberId: EXTERNAL_MEMBER_ID } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('get_my_finding_assignments_external', () => {
+    it("queries only the caller's own externalOrgMemberId", async () => {
+      findingAssignmentDb.findMany.mockResolvedValue([]);
+
+      await action_service.get_my_finding_assignments_external(
+        makeReq({ externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID } } as never),
+      );
+
+      const [callArg] = findingAssignmentDb.findMany.mock.calls[0];
+      expect(callArg.where).toEqual({ externalOrgMemberId: EXTERNAL_MEMBER_ID });
+    });
+  });
+
+  describe('get_single_action_for_external_member', () => {
+    it('returns the action when the external member holds a live assignment for it', async () => {
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+
+      const result = await action_service.get_single_action_for_external_member(
+        makeReq({
+          params: { id: 'action-1' },
+          externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+        } as never),
+      );
+
+      expect(result).toMatchObject({ id: 'action-1' });
+    });
+
+    it('throws 404 when the external member has no assignment for this action', async () => {
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.get_single_action_for_external_member(
+          makeReq({
+            params: { id: 'action-1' },
+            externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+          } as never),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update_action_for_external_member', () => {
+    it('updates the action when a live FindingAssignment exists', async () => {
+      db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      db.update.mockResolvedValue({ id: 'action-1', status: 'IN_PROGRESS' });
+
+      const result = await action_service.update_action_for_external_member(
+        makeReq({
+          params: { id: 'action-1' },
+          body: { status: 'IN_PROGRESS' },
+          externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+        } as never),
+      );
+
+      expect(result.status).toBe('IN_PROGRESS');
+    });
+
+    it('throws 403 when no live FindingAssignment exists for this action', async () => {
+      db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+      findingAssignmentDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.update_action_for_external_member(
+          makeReq({
+            params: { id: 'action-1' },
+            body: { status: 'IN_PROGRESS' },
+            externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+          } as never),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 for another org action', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.update_action_for_external_member(
+          makeReq({
+            params: { id: 'org-b-action' },
+            body: { status: 'IN_PROGRESS' },
+            externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+          } as never),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
     });
   });
 });

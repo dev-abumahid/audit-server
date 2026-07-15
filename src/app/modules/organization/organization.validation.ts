@@ -76,9 +76,32 @@ const update_settings = z
     },
   );
 
+// Slice 5 (#55): role is optional and, if present, must be LIGHT_USER — see
+// invite_external_member_into_db for why VIEWER is rejected here rather than
+// silently accepted.
+const invite_external_member = z.object({
+  // Capped for the same reason as fullName/leadAuditorRoleLabel below — this
+  // value also lands in ExternalOrgMember's (organizationId, email) unique
+  // index. Found by independent review.
+  email: z.string('Email is required.').email('Must be a valid email address.').max(255),
+  fullName: z.string().min(1).max(255).optional(),
+  role: z.enum(['LIGHT_USER', 'VIEWER']).optional(),
+});
+
+const update_external_member = z
+  .object({
+    isActive: z.boolean().optional(),
+    expiresAt: z.coerce.date('expiresAt must be a valid date.').nullable().optional(),
+  })
+  .refine((data) => data.isActive !== undefined || data.expiresAt !== undefined, {
+    message: 'At least one of isActive or expiresAt must be provided.',
+  });
+
 export const organization_validations = {
   invite_member,
   accept_invitation,
   update_member,
   update_settings,
+  invite_external_member,
+  update_external_member,
 };

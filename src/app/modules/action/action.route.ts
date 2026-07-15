@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
+import authExternal from '../../middlewares/auth_external.js';
 import RequestValidator from '../../middlewares/request_validator.js';
 import { action_controller } from './action.controller.js';
 import { action_validations } from './action.validation.js';
@@ -36,6 +37,16 @@ router.delete(
   auth('ORGANIZATION'),
   action_controller.unassign_light_user,
 );
+// Slice 5 (#55): external-member counterpart. A distinct path segment
+// (`/external/:externalOrgMemberId`) rather than reusing `:orgMemberId` —
+// the two id spaces are different tables, and collapsing them into one
+// route param would mean guessing which table to check first (or checking
+// both on every call) instead of the route itself saying which one.
+router.delete(
+  '/:id/assign/external/:externalOrgMemberId',
+  auth('ORGANIZATION'),
+  action_controller.unassign_external_light_user,
+);
 router.get('/:id/assignments', auth('ORGANIZATION'), action_controller.get_finding_assignments);
 
 // Self-scoped — any member can see their own sub-assignments (including
@@ -55,6 +66,21 @@ router.post(
   '/assignments/:id/reject',
   auth('ORGANIZATION'),
   action_controller.reject_finding_assignment,
+);
+
+// Slice 5 (#55): external Light User's own view of findings they've been
+// sub-assigned — gated by authExternal, not auth('ORGANIZATION'), since an
+// external member has no Account/internal JWT at all. Multi-segment paths
+// (`external/mine`, `external/:id`) never collide with the single-segment
+// `/:id` route above regardless of declaration order — see the unassign
+// route above for the same reasoning.
+router.get('/external/mine', authExternal(), action_controller.get_my_finding_assignments_external);
+router.get('/external/:id', authExternal(), action_controller.get_single_action_external);
+router.patch(
+  '/external/:id',
+  authExternal(),
+  RequestValidator(action_validations.update_action),
+  action_controller.update_action_external,
 );
 
 export default router;

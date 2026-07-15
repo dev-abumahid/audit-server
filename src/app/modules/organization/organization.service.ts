@@ -10,6 +10,8 @@ import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
 import {
   findActiveMembership,
+  hasExpired,
+  isExternalMembershipActive,
   recordOrgAuditEvent as recordAuditEvent,
 } from '../../utils/org_scope.js';
 
@@ -291,7 +293,7 @@ const get_org_members_from_db = async (req: Request) => {
   // fixes. Found by independent review.
   return members.map((member) => ({
     ...member,
-    isExpired: !!member.expiresAt && member.expiresAt.getTime() < Date.now(),
+    isExpired: hasExpired(member),
   }));
 };
 
@@ -769,6 +771,148 @@ const update_organization_settings_in_db = async (req: Request) => {
   return updated;
 };
 
+/**
+ * Slice 5 (#55): admin invites an external Light User. Unlike
+ * invite_member_into_db, this never creates an Account/OrgInvitation/token —
+ * ExternalOrgMember rows exist entirely outside the password-based auth flow
+ * (see org_scope.ts's resolveExternalCallerContext and
+ * external-auth.service.ts). No invite email is sent here: an external
+ * member has no signup link to click, they simply go to the OTP
+ * request-code endpoint themselves once told (out-of-band, by the admin)
+ * that they have access — there's nothing to email them yet at invite time.
+ *
+ * role is accepted but currently hard-restricted to LIGHT_USER: external
+ * VIEWER is CEO-approved product scope (see the model's own schema comment)
+ * but needs inspection-level scoping (InspectionAssignment has no
+ * externalOrgMemberId column) and a comment/flag system, neither of which
+ * exist yet — rejecting it here up front is a deliberate, visible scope
+ * limit rather than silently creating a member who'd then have zero access
+ * through any real endpoint.
+ */
+const invite_external_member_into_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const payload: { email: string; fullName?: string; role?: 'LIGHT_USER' | 'VIEWER' } = req?.body;
+  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+
+  if (payload.role !== undefined && payload.role !== 'LIGHT_USER') {
+    throw new AppError('External Viewer access is not supported yet.', 400);
+  }
+
+  const email = payload.email.trim().toLowerCase();
+
+  const existing = await prisma.externalOrgMember.findUnique({
+    where: { organizationId_email: { organizationId: callerMembership.organizationId, email } },
+  });
+
+  let member;
+  if (existing) {
+    if (existing.isActive) {
+      throw new AppError('This email is already an external member of your organization.', 409);
+    }
+    // Re-invite after removal: reactivate the same row (preserving its
+    // FindingAssignment history) instead of creating a second one — the
+    // @@unique([organizationId, email]) constraint wouldn't allow a second
+    // row for the same pair anyway. Matches this codebase's established
+    // "keep the data, just restore access" removal/reinstatement pattern.
+    member = await prisma.externalOrgMember.update({
+      where: { id: existing.id },
+      data: {
+        isActive: true,
+        expiresAt: null,
+        ...(payload.fullName !== undefined && { fullName: payload.fullName }),
+      },
+    });
+  } else {
+    member = await prisma.externalOrgMember.create({
+      data: {
+        organizationId: callerMembership.organizationId,
+        email,
+        fullName: payload.fullName,
+        role: 'LIGHT_USER',
+      },
+    });
+  }
+
+  await recordAuditEvent({
+    organizationId: callerMembership.organizationId,
+    action: 'EXTERNAL_MEMBER_INVITED',
+    actorAccountId: user.accountId,
+    subjectExternalOrgMemberId: member.id,
+    subjectEmail: email,
+  });
+
+  return member;
+};
+
+/**
+ * Admin-only listing of external members, mirroring get_org_members_from_db
+ * (including the derived isExpired field for the same reason — isActive
+ * alone doesn't reflect a lapsed time-boxed expiresAt).
+ */
+const get_external_members_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+
+  const members = await prisma.externalOrgMember.findMany({
+    where: { organizationId: callerMembership.organizationId },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  return members.map((member) => ({
+    ...member,
+    isExpired: hasExpired(member),
+  }));
+};
+
+/**
+ * Admin-only. Toggles isActive and/or expiresAt — the only way to offboard
+ * or time-box an external member. Mirrors update_org_member_in_db, minus
+ * the last-admin protection (an external member is never ADMIN) and the
+ * self-service block (an external member can't call this endpoint at all —
+ * it's gated by auth('ORGANIZATION'), not authExternal).
+ */
+const update_external_member_in_db = async (req: Request) => {
+  const user = req?.user as JwtPayloadType;
+  const memberId = req?.params?.id as string;
+  const payload: { isActive?: boolean; expiresAt?: Date | null } = req?.body;
+  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+
+  const member = await prisma.externalOrgMember.findFirst({
+    where: { id: memberId, organizationId: callerMembership.organizationId },
+  });
+  if (!member) {
+    throw new AppError('External member not found.', 404);
+  }
+
+  const updated = await prisma.externalOrgMember.update({
+    where: { id: member.id },
+    data: {
+      ...(payload.isActive !== undefined && { isActive: payload.isActive }),
+      ...(payload.expiresAt !== undefined && { expiresAt: payload.expiresAt }),
+    },
+  });
+
+  // Keyed off the actual live/not-live transition (isExternalMembershipActive),
+  // not payload.isActive === false alone — an admin can equally cut off access
+  // by setting expiresAt to a past date, which update_org_member_in_db's
+  // internal counterpart already treats as an access-ending change worth
+  // logging. Without this, offboarding an external member via expiresAt
+  // instead of isActive left OrgAuditLog with no record at all of access
+  // ending, defeating the compliance purpose the EXTERNAL_MEMBER_* actions
+  // exist for. Found by independent review.
+  if (isExternalMembershipActive(member) && !isExternalMembershipActive(updated)) {
+    await recordAuditEvent({
+      organizationId: callerMembership.organizationId,
+      action: 'EXTERNAL_MEMBER_REMOVED',
+      actorAccountId: user.accountId,
+      subjectExternalOrgMemberId: member.id,
+      subjectEmail: member.email,
+    });
+  }
+
+  return updated;
+};
+
 export const organization_services = {
   invite_member_into_db,
   get_pending_invitations_from_db,
@@ -778,4 +922,7 @@ export const organization_services = {
   accept_invitation_into_db,
   get_organization_settings_from_db,
   update_organization_settings_in_db,
+  invite_external_member_into_db,
+  get_external_members_from_db,
+  update_external_member_in_db,
 };

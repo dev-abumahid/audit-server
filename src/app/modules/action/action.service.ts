@@ -6,9 +6,13 @@ import { AppError } from '../../utils/app_error.js';
 import {
   applyActionScope,
   assertCanWriteToAction,
+  assertCanWriteToActionForExternalMember,
   assertCanWriteToInspection,
   assertIsOrgAdmin,
   CallerOrgContext,
+  ExternalCallerContext,
+  hasActiveFindingAssignmentForExternalMember,
+  isExternalMembershipActive,
   isMembershipActive,
   recordOrgAuditEvent,
   requireCallerOrganizationId,
@@ -211,6 +215,32 @@ const requireOrgScopedAction = async (actionId: string, ctx: CallerOrgContext) =
 };
 
 /**
+ * Resolves an internal OrgMember scoped to the caller's org, 404 if missing
+ * — shared by assign_light_user_to_action and unassign_light_user_from_action
+ * so this exact lookup isn't hand-copied at both call sites.
+ */
+const requireOrgScopedMember = async (orgMemberId: string, organizationId: string) => {
+  const member = await prisma.orgMember.findFirst({ where: { id: orgMemberId, organizationId } });
+  if (!member) throw new AppError('Organization member not found', 404);
+  return member;
+};
+
+/**
+ * External-member counterpart to requireOrgScopedMember, shared by
+ * assign_light_user_to_action and unassign_external_light_user_from_action.
+ */
+const requireOrgScopedExternalMember = async (
+  externalOrgMemberId: string,
+  organizationId: string,
+) => {
+  const member = await prisma.externalOrgMember.findFirst({
+    where: { id: externalOrgMemberId, organizationId },
+  });
+  if (!member) throw new AppError('External organization member not found', 404);
+  return member;
+};
+
+/**
  * Slice 4: sub-assigns one specific finding (Action) to an internal
  * LIGHT_USER member — the real scoping mechanism org_scope.ts's
  * getAssignedActionIds relies on. Callable by ADMIN or a Lead Auditor
@@ -218,34 +248,68 @@ const requireOrgScopedAction = async (actionId: string, ctx: CallerOrgContext) =
  * the finding itself). Starts PENDING_APPROVAL if the org has
  * requireApprovalForSubAssignment enabled, otherwise ACTIVE immediately —
  * only ACTIVE (and non-revoked) grants the assignee any access.
+ *
+ * Slice 5 extends this to an external Light User via body.externalOrgMemberId
+ * — exactly one of orgMemberId/externalOrgMemberId is ever present
+ * (enforced by action.validation.ts's assign_light_user schema). The two
+ * target types share every rule (member must exist in this org, be
+ * LIGHT_USER, be active, respect the approval toggle, dedupe against an
+ * existing live row, resolve the same P2002 race) — only the table queried
+ * and the partial-unique-index race-key differ, so this stays one function
+ * with a branch rather than two near-duplicate ones.
  */
 const assign_light_user_to_action = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   const { id: actionId } = req.params as { id: string };
-  const { orgMemberId } = req.body as { orgMemberId: string };
+  const { orgMemberId, externalOrgMemberId } = req.body as {
+    orgMemberId?: string;
+    externalOrgMemberId?: string;
+  };
 
   const action = await requireOrgScopedAction(actionId, ctx);
   await assertCanWriteToInspection(ctx, action.inspectionId);
   const organizationId = await requireCallerOrganizationId(ctx);
 
-  const member = await prisma.orgMember.findFirst({
-    where: { id: orgMemberId, organizationId },
-  });
-  if (!member) throw new AppError('Organization member not found', 404);
-  // Only LIGHT_USER is sub-assignable this way — Lead Auditor/Viewer get
-  // scoped access at the inspection level via InspectionAssignment
-  // instead, and an ADMIN already has full access with nothing to assign.
-  if (member.role !== 'LIGHT_USER') {
-    throw new AppError('Only Light User members can be sub-assigned to a finding.', 400);
-  }
-  // Without this, a finding can be sub-assigned to a SUSPENDED or
-  // time-boxed-expired member — the row sits live in the table, and if that
-  // member is later reinstated with no re-review of existing assignments,
-  // they'd silently regain finding access via a row created while they had
-  // no active membership at all. Found by independent review.
-  if (!isMembershipActive(member)) {
-    throw new AppError("This member's access to the organization is not active.", 400);
+  let targetData: Omit<Prisma.FindingAssignmentUncheckedCreateInput, 'assignedById' | 'status'>;
+  let liveWhere: Prisma.FindingAssignmentWhereInput;
+  let subjectOrgMemberId: string | null = null;
+  let subjectExternalOrgMemberId: string | null = null;
+
+  if (orgMemberId) {
+    const member = await requireOrgScopedMember(orgMemberId, organizationId);
+    // Only LIGHT_USER is sub-assignable this way — Lead Auditor/Viewer get
+    // scoped access at the inspection level via InspectionAssignment
+    // instead, and an ADMIN already has full access with nothing to assign.
+    if (member.role !== 'LIGHT_USER') {
+      throw new AppError('Only Light User members can be sub-assigned to a finding.', 400);
+    }
+    // Without this, a finding can be sub-assigned to a SUSPENDED or
+    // time-boxed-expired member — the row sits live in the table, and if
+    // that member is later reinstated with no re-review of existing
+    // assignments, they'd silently regain finding access via a row created
+    // while they had no active membership at all. Found by independent
+    // review.
+    if (!isMembershipActive(member)) {
+      throw new AppError("This member's access to the organization is not active.", 400);
+    }
+    targetData = { actionId, orgMemberId };
+    liveWhere = { actionId, orgMemberId, revokedAt: null, status: { not: 'REJECTED' } };
+    subjectOrgMemberId = orgMemberId;
+  } else {
+    const member = await requireOrgScopedExternalMember(
+      externalOrgMemberId as string,
+      organizationId,
+    );
+    if (member.role !== 'LIGHT_USER') {
+      throw new AppError('Only Light User members can be sub-assigned to a finding.', 400);
+    }
+    if (!isExternalMembershipActive(member)) {
+      throw new AppError("This member's access to the organization is not active.", 400);
+    }
+    targetData = { actionId, externalOrgMemberId };
+    liveWhere = { actionId, externalOrgMemberId, revokedAt: null, status: { not: 'REJECTED' } };
+    subjectExternalOrgMemberId = externalOrgMemberId as string;
   }
 
   const organization = await prisma.organization.findUniqueOrThrow({
@@ -253,9 +317,7 @@ const assign_light_user_to_action = async (req: Request) => {
     select: { requireApprovalForSubAssignment: true },
   });
 
-  const existingLive = await prisma.findingAssignment.findFirst({
-    where: { actionId, orgMemberId, revokedAt: null, status: { not: 'REJECTED' } },
-  });
+  const existingLive = await prisma.findingAssignment.findFirst({ where: liveWhere });
   if (existingLive) return existingLive;
 
   const status = organization.requireApprovalForSubAssignment ? 'PENDING_APPROVAL' : 'ACTIVE';
@@ -263,7 +325,7 @@ const assign_light_user_to_action = async (req: Request) => {
   let assignment;
   try {
     assignment = await prisma.findingAssignment.create({
-      data: { actionId, orgMemberId, assignedById: user.accountId, status },
+      data: { ...targetData, assignedById: user.accountId, status },
     });
   } catch (err) {
     // Same race as InspectionAssignment/OrgInvitation: two concurrent
@@ -272,9 +334,7 @@ const assign_light_user_to_action = async (req: Request) => {
     // unique index rejects the loser, which we resolve to the winner's row
     // instead of a raw 500.
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-      const winner = await prisma.findingAssignment.findFirst({
-        where: { actionId, orgMemberId, revokedAt: null, status: { not: 'REJECTED' } },
-      });
+      const winner = await prisma.findingAssignment.findFirst({ where: liveWhere });
       if (winner) return winner;
     }
     throw err;
@@ -284,7 +344,8 @@ const assign_light_user_to_action = async (req: Request) => {
     organizationId,
     action: 'FINDING_ASSIGNMENT_CREATED',
     actorAccountId: user.accountId,
-    subjectOrgMemberId: orgMemberId,
+    subjectOrgMemberId,
+    subjectExternalOrgMemberId,
     metadata: { actionId, status, assignmentId: assignment.id },
   });
 
@@ -292,43 +353,35 @@ const assign_light_user_to_action = async (req: Request) => {
 };
 
 /**
- * Soft-revokes a Light User's sub-assignment to a finding — works whether
- * the assignment is currently PENDING_APPROVAL or ACTIVE (withdrawing a
- * not-yet-approved request is as valid as ending a live one). Same
- * authority as assigning: ADMIN or a Lead Auditor assigned to the parent
- * inspection.
+ * Shared revoke logic for both unassign_light_user_from_action and
+ * unassign_external_light_user_from_action — everything past "which member
+ * table did this row's target come from" is identical, so this stays one
+ * function with the target-specific where-clause/subject id passed in,
+ * rather than two near-duplicate copies.
  */
-const unassign_light_user_from_action = async (req: Request) => {
-  const user = req.user as JwtPayloadType;
-  const ctx = await resolveCallerOrgContext(user.accountId);
-  const { id: actionId, orgMemberId } = req.params as { id: string; orgMemberId: string };
-
-  const action = await requireOrgScopedAction(actionId, ctx);
-  await assertCanWriteToInspection(ctx, action.inspectionId);
-  const organizationId = await requireCallerOrganizationId(ctx);
-
-  const member = await prisma.orgMember.findFirst({
-    where: { id: orgMemberId, organizationId },
-  });
-  if (!member) throw new AppError('Organization member not found', 404);
-
+const revokeLiveFindingAssignment = async (params: {
+  liveWhere: Prisma.FindingAssignmentWhereInput;
+  organizationId: string;
+  actorAccountId: string;
+  subjectOrgMemberId?: string | null;
+  subjectExternalOrgMemberId?: string | null;
+  actionId: string;
+}) => {
   // Scoped to status: { not: 'REJECTED' } — a REJECTED row already grants no
   // access and is a terminal state; "revoking" it would set revokedAt on a
   // row that was never live, corrupting the audit trail with a
   // FINDING_ASSIGNMENT_REVOKED event for something that was actually
   // rejected. Found by independent review. The partial unique index
-  // guarantees at most one such row for this (actionId, orgMemberId) pair,
-  // so finding it first (rather than a bare updateMany) lets us return the
-  // actual updated row instead of just echoing the request params back.
-  const live = await prisma.findingAssignment.findFirst({
-    where: { actionId, orgMemberId, revokedAt: null, status: { not: 'REJECTED' } },
-  });
+  // guarantees at most one such row for this pair, so finding it first
+  // (rather than a bare updateMany) lets us return the actual updated row
+  // instead of just echoing the request params back.
+  const live = await prisma.findingAssignment.findFirst({ where: params.liveWhere });
 
   // Surfaced as a 404 rather than a blanket 200 — a caller revoking access
   // they believe is live deserves to know when nothing was actually
-  // revoked (stale UI, wrong orgMemberId, already revoked/rejected),
-  // instead of walking away believing access was cut off when it wasn't.
-  // Found by independent review.
+  // revoked (stale UI, wrong member id, already revoked/rejected), instead
+  // of walking away believing access was cut off when it wasn't. Found by
+  // independent review.
   if (!live) {
     throw new AppError('No active or pending sub-assignment found for this member.', 404);
   }
@@ -343,7 +396,7 @@ const unassign_light_user_from_action = async (req: Request) => {
   // independent review.
   const { count } = await prisma.findingAssignment.updateMany({
     where: { id: live.id, revokedAt: null },
-    data: { revokedAt: new Date(), revokedById: user.accountId },
+    data: { revokedAt: new Date(), revokedById: params.actorAccountId },
   });
 
   const updated = await prisma.findingAssignment.findUniqueOrThrow({ where: { id: live.id } });
@@ -357,14 +410,70 @@ const unassign_light_user_from_action = async (req: Request) => {
   }
 
   await recordOrgAuditEvent({
-    organizationId,
+    organizationId: params.organizationId,
     action: 'FINDING_ASSIGNMENT_REVOKED',
-    actorAccountId: user.accountId,
-    subjectOrgMemberId: orgMemberId,
-    metadata: { actionId, assignmentId: updated.id },
+    actorAccountId: params.actorAccountId,
+    subjectOrgMemberId: params.subjectOrgMemberId ?? null,
+    subjectExternalOrgMemberId: params.subjectExternalOrgMemberId ?? null,
+    metadata: { actionId: params.actionId, assignmentId: updated.id },
   });
 
   return updated;
+};
+
+/**
+ * Soft-revokes an internal Light User's sub-assignment to a finding — works
+ * whether the assignment is currently PENDING_APPROVAL or ACTIVE (withdrawing
+ * a not-yet-approved request is as valid as ending a live one). Same
+ * authority as assigning: ADMIN or a Lead Auditor assigned to the parent
+ * inspection.
+ */
+const unassign_light_user_from_action = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id: actionId, orgMemberId } = req.params as { id: string; orgMemberId: string };
+
+  const action = await requireOrgScopedAction(actionId, ctx);
+  await assertCanWriteToInspection(ctx, action.inspectionId);
+  const organizationId = await requireCallerOrganizationId(ctx);
+
+  await requireOrgScopedMember(orgMemberId, organizationId);
+
+  return revokeLiveFindingAssignment({
+    liveWhere: { actionId, orgMemberId, revokedAt: null, status: { not: 'REJECTED' } },
+    organizationId,
+    actorAccountId: user.accountId,
+    subjectOrgMemberId: orgMemberId,
+    actionId,
+  });
+};
+
+/**
+ * Slice 5: external-member counterpart to unassign_light_user_from_action —
+ * identical rule, just scoped to ExternalOrgMember/externalOrgMemberId
+ * instead of OrgMember/orgMemberId.
+ */
+const unassign_external_light_user_from_action = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id: actionId, externalOrgMemberId } = req.params as {
+    id: string;
+    externalOrgMemberId: string;
+  };
+
+  const action = await requireOrgScopedAction(actionId, ctx);
+  await assertCanWriteToInspection(ctx, action.inspectionId);
+  const organizationId = await requireCallerOrganizationId(ctx);
+
+  await requireOrgScopedExternalMember(externalOrgMemberId, organizationId);
+
+  return revokeLiveFindingAssignment({
+    liveWhere: { actionId, externalOrgMemberId, revokedAt: null, status: { not: 'REJECTED' } },
+    organizationId,
+    actorAccountId: user.accountId,
+    subjectExternalOrgMemberId: externalOrgMemberId,
+    actionId,
+  });
 };
 
 /**
@@ -419,6 +528,7 @@ const approve_finding_assignment = async (req: Request) => {
     action: 'FINDING_ASSIGNMENT_APPROVED',
     actorAccountId: user.accountId,
     subjectOrgMemberId: assignment.orgMemberId,
+    subjectExternalOrgMemberId: assignment.externalOrgMemberId,
     metadata: { actionId: assignment.actionId, assignmentId: assignment.id },
   });
 
@@ -457,6 +567,7 @@ const reject_finding_assignment = async (req: Request) => {
     action: 'FINDING_ASSIGNMENT_REJECTED',
     actorAccountId: user.accountId,
     subjectOrgMemberId: assignment.orgMemberId,
+    subjectExternalOrgMemberId: assignment.externalOrgMemberId,
     metadata: { actionId: assignment.actionId, assignmentId: assignment.id },
   });
 
@@ -487,6 +598,13 @@ const get_finding_assignments_for_action = async (req: Request) => {
           role: true,
           account: { select: { email: true, profile: { select: { fullName: true } } } },
         },
+      },
+      // Slice 5: exactly one of orgMember/externalOrgMember is populated per
+      // row (mirrors the two mutually-exclusive partial unique indexes on
+      // FindingAssignment) — including both relations lets the caller render
+      // either kind without a second lookup.
+      externalOrgMember: {
+        select: { id: true, role: true, email: true, fullName: true },
       },
     },
   });
@@ -520,6 +638,106 @@ const get_my_finding_assignments = async (req: Request) => {
   });
 };
 
+/**
+ * Slice 5: external-member counterpart to get_my_finding_assignments — same
+ * shape and same "every status, not just ACTIVE" reasoning, keyed by
+ * externalOrgMemberId instead of orgMemberId. Called from a route gated by
+ * authExternal, not auth('ORGANIZATION'), so there's no internal
+ * CallerOrgContext to resolve here at all.
+ */
+const get_my_finding_assignments_external = async (req: Request) => {
+  const externalMember = req.externalMember as ExternalCallerContext;
+
+  return prisma.findingAssignment.findMany({
+    where: { externalOrgMemberId: externalMember.externalOrgMemberId },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      action: {
+        select: { id: true, actionTitle: true, inspectionId: true, status: true },
+      },
+    },
+  });
+};
+
+/**
+ * Slice 5: external-member counterpart to get_single_action_from_db — an
+ * external Light User may view exactly the findings they hold a live
+ * FindingAssignment for, nothing else, so this doesn't go through
+ * applyActionScope at all (that function has no external-member branch —
+ * see hasActiveFindingAssignmentForExternalMember's docstring in
+ * org_scope.ts). Uses the targeted single-id check, not
+ * getAssignedActionIdsForExternalMember — this only needs a yes/no answer
+ * for one action, not the member's full assignment list.
+ */
+const get_single_action_for_external_member = async (req: Request) => {
+  const externalMember = req.externalMember as ExternalCallerContext;
+  const { id } = req.params as Record<string, string>;
+
+  const isAssigned = await hasActiveFindingAssignmentForExternalMember(
+    externalMember.externalOrgMemberId,
+    id,
+  );
+  if (!isAssigned) {
+    throw new AppError('Action not found', 404);
+  }
+
+  const result = await prisma.action.findFirst({
+    where: { id, orgAccountId: externalMember.organizationId },
+    include: {
+      messages: {
+        select: {
+          id: true,
+          message: true,
+          senderAccountId: true,
+          createdAt: true,
+          updatedAt: true,
+          account: {
+            select: {
+              profile: { select: { fullName: true, profilePhoto: true } },
+              organizationProfile: {
+                select: { organizationName: true, organizationLogo: true },
+              },
+            },
+          },
+        },
+      },
+      site: { select: { name: true, id: true } },
+    },
+  });
+  if (!result) throw new AppError('Action not found', 404);
+  return result;
+};
+
+/**
+ * Slice 5: external-member counterpart to update_action_into_db — same
+ * limited field set, gated by assertCanWriteToActionForExternalMember
+ * instead of assertCanWriteToAction (no CallerOrgContext to check ADMIN/
+ * LEAD_AUDITOR against here; an external Light User's only possible
+ * authority over an Action is a live FindingAssignment).
+ */
+const update_action_for_external_member = async (req: Request) => {
+  const externalMember = req.externalMember as ExternalCallerContext;
+  const { id } = req.params as Record<string, string>;
+  const existing = await prisma.action.findFirst({
+    where: { id, orgAccountId: externalMember.organizationId },
+  });
+  if (!existing) throw new AppError('Action not found', 404);
+  await assertCanWriteToActionForExternalMember(externalMember.externalOrgMemberId, {
+    id: existing.id,
+  });
+  const result = await prisma.action.update({
+    where: { id },
+    data: {
+      ...(req.body.actionTitle !== undefined && { actionTitle: req.body.actionTitle }),
+      ...(req.body.actionDisc !== undefined && { actionDisc: req.body.actionDisc }),
+      ...(req.body.priority !== undefined && { priority: req.body.priority }),
+      ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
+      ...(req.body.status !== undefined && { status: req.body.status }),
+    },
+  });
+  return result;
+};
+
 export const action_service = {
   get_all_action_from_db,
   get_single_action_from_db,
@@ -528,8 +746,12 @@ export const action_service = {
   delete_action_from_db,
   assign_light_user_to_action,
   unassign_light_user_from_action,
+  unassign_external_light_user_from_action,
   approve_finding_assignment,
   reject_finding_assignment,
   get_finding_assignments_for_action,
   get_my_finding_assignments,
+  get_my_finding_assignments_external,
+  get_single_action_for_external_member,
+  update_action_for_external_member,
 };

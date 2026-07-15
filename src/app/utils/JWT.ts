@@ -25,10 +25,27 @@ const generateAccessToken = (account: { email: string; role: string; accountId: 
     configs.jwt.access_expires as string,
   );
 
+// Slice 5 (#55): external (non-Account) member session token. Deliberately a
+// distinct `type` discriminator rather than reusing `role` — an internal
+// JwtPayloadType's `role` is always one of ADMIN/USER/ORGANIZATION (checked
+// by auth()'s roles.includes(...) gate), so a value here that ever collided
+// with one of those would let a stolen internal token be replayed against an
+// external-only route, or vice versa, if either middleware's check were ever
+// loosened. Short-lived (12h) — external access is meant to be re-verified
+// periodically via a fresh OTP, not a long-lived session like an internal
+// account's.
+const generateExternalAccessToken = (member: { externalOrgMemberId: string }) =>
+  generateToken(
+    { externalOrgMemberId: member.externalOrgMemberId, type: 'EXTERNAL_ORG_MEMBER' },
+    configs.jwt.access_token as string,
+    '12h',
+  );
+
 export const jwtHelpers = {
   generateToken,
   verifyToken,
   generateAccessToken,
+  generateExternalAccessToken,
 };
 export type JwtPayloadType = JwtPayload & {
   email: string;
@@ -38,3 +55,10 @@ export type JwtPayloadType = JwtPayload & {
   exp: number;
 };
 export type JwtTokenType = string | JwtPayloadType | null;
+
+export type ExternalJwtPayloadType = JwtPayload & {
+  externalOrgMemberId: string;
+  type: 'EXTERNAL_ORG_MEMBER';
+  iat: number;
+  exp: number;
+};
