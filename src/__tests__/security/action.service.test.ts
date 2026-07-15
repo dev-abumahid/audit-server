@@ -16,6 +16,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
+    question: {
+      findFirst: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -50,6 +53,7 @@ import { action_service } from '../../app/modules/action/action.service.js';
 
 const db = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbInspection = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const dbQuestion = prisma.question as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const assignmentDb = prisma.inspectionAssignment as unknown as Record<
@@ -173,6 +177,60 @@ describe('action service — org scoping (ticket #6)', () => {
 
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.orgAccountId).toBe(ORG_A); // always caller, never body value
+    });
+
+    it('allows creating an action with no questionId at all (it is optional)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'No question' } }),
+      );
+
+      expect(dbQuestion.findFirst).not.toHaveBeenCalled();
+      expect(db.create).toHaveBeenCalled();
+    });
+
+    it('verifies questionId belongs to the caller org before creating action (issue #50)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      dbQuestion.findFirst.mockResolvedValue({ id: 'q1' });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'Has question', questionId: 'q1' } }),
+      );
+
+      expect(dbQuestion.findFirst).toHaveBeenCalledWith({
+        where: { id: 'q1', page: { template: { orgAccountId: ORG_A } } },
+      });
+      expect(db.create).toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT create when questionId belongs to another org (issue #50)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      dbQuestion.findFirst.mockResolvedValue(null); // org-B question not found for org-A
+
+      await expect(
+        action_service.create_action_into_db(
+          makeReq({
+            body: { inspectionId: 'insp-1', title: 'IDOR attempt', questionId: 'org-b-question' },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.create).not.toHaveBeenCalled();
     });
   });
 

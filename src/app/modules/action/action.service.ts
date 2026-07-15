@@ -135,6 +135,20 @@ const create_action_into_db = async (req: Request) => {
   await assertCanWriteToInspection(ctx, inspection.id);
   body.siteId = inspection.siteId;
 
+  // questionId is optional but, when present, was stored with no ownership
+  // check at all — the same IDOR pattern already fixed for inspectionId/
+  // siteId/templateId elsewhere (issues #23-26), just not covered by that
+  // pass. A caller who owns inspectionId (checked above) could otherwise
+  // pass a questionId belonging to a completely different org's template,
+  // associating/leaking that org's question content into their own action
+  // record. Found by independent review (issue #50).
+  if (body.questionId) {
+    const question = await prisma.question.findFirst({
+      where: { id: body.questionId, page: { template: { orgAccountId: ctx.organizationId } } },
+    });
+    if (!question) throw new AppError('Question not found', 404);
+  }
+
   const action = await prisma.action.create({
     data: {
       orgAccountId: ctx.organizationId,
