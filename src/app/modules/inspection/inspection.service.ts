@@ -185,6 +185,34 @@ const create_inspection_into_db = async (req: Request) => {
   });
   if (!template || !site) throw new AppError('Template or Site not found', 404);
 
+  // Every questionAnswers[].questionId is client-supplied and was stored
+  // with no check that it belongs to a Question under the caller's own org
+  // — the same IDOR pattern already fixed for Action.questionId (issue #50).
+  // A caller could otherwise supply a questionId belonging to a completely
+  // different org's template, linking that org's question content to their
+  // own inspection via the QuestionAnswer FK. Batched into a single count
+  // query rather than one findFirst per item. Found by independent review
+  // (issue #84).
+  if (body.questionAnswers.length) {
+    // `id: { in: [...] }` counts distinct matching rows — a repeated
+    // questionId in the input (double-submit, a UI that doesn't dedupe)
+    // would make `count` come back lower than the raw array length even
+    // when every id IS legitimately owned, wrongly rejecting a valid
+    // request. Compare against the deduplicated id count instead. Found by
+    // independent review.
+    const questionIds = [
+      ...new Set(
+        body.questionAnswers.map((item: { questionId: string }) => item.questionId) as string[],
+      ),
+    ];
+    const ownedCount = await prisma.question.count({
+      where: { id: { in: questionIds }, page: { template: { orgAccountId: ctx.organizationId } } },
+    });
+    if (ownedCount !== questionIds.length) {
+      throw new AppError('One or more questions not found', 404);
+    }
+  }
+
   const result = await prisma.inspection.create({
     data: {
       orgAccountId: ctx.organizationId,

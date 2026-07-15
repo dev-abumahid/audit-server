@@ -25,6 +25,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    question: {
+      count: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
@@ -53,6 +56,7 @@ const noteDb = prisma.note as unknown as Record<string, ReturnType<typeof vi.fn>
 const templateDb = prisma.template as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const qaDb = prisma.questionAnswer as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const questionDb = prisma.question as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const assignmentDb = prisma.inspectionAssignment as unknown as Record<
@@ -173,6 +177,88 @@ describe('inspection service — org scoping (ticket #6)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(inspectionDb.create).not.toHaveBeenCalled();
+    });
+
+    it('verifies every questionAnswers[].questionId belongs to the caller org before creating (issue #84)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      siteDb.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
+      questionDb.count.mockResolvedValue(2);
+      inspectionDb.create.mockResolvedValue({});
+
+      await inspection_service.create_inspection_into_db(
+        makeReq({
+          body: {
+            templateId: 't1',
+            siteId: 's1',
+            inspectorProfileId: 'p1',
+            questionAnswers: [
+              { questionId: 'q1', answer: 'yes' },
+              { questionId: 'q2', answer: 'no' },
+            ],
+          },
+        }),
+      );
+
+      expect(questionDb.count).toHaveBeenCalledWith({
+        where: { id: { in: ['q1', 'q2'] }, page: { template: { orgAccountId: ORG_A } } },
+      });
+      expect(inspectionDb.create).toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT create when a questionId belongs to another org (issue #84)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      siteDb.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
+      // Only 1 of the 2 supplied questionIds actually resolves under the
+      // caller's org — the other belongs to a different org's template.
+      questionDb.count.mockResolvedValue(1);
+
+      await expect(
+        inspection_service.create_inspection_into_db(
+          makeReq({
+            body: {
+              templateId: 't1',
+              siteId: 's1',
+              inspectorProfileId: 'p1',
+              questionAnswers: [
+                { questionId: 'q1', answer: 'yes' },
+                { questionId: 'org-b-question', answer: 'no' },
+              ],
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(inspectionDb.create).not.toHaveBeenCalled();
+    });
+
+    it('does NOT wrongly reject a legitimate request with a repeated questionId (issue #84 follow-up)', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      siteDb.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
+      // Only one DISTINCT questionId is supplied (q1, twice) — count() only
+      // ever sees 1 distinct matching row, so the check must compare against
+      // the deduplicated id count, not the raw array length (2), or this
+      // legitimate request would be wrongly rejected.
+      questionDb.count.mockResolvedValue(1);
+      inspectionDb.create.mockResolvedValue({});
+
+      await inspection_service.create_inspection_into_db(
+        makeReq({
+          body: {
+            templateId: 't1',
+            siteId: 's1',
+            inspectorProfileId: 'p1',
+            questionAnswers: [
+              { questionId: 'q1', answer: 'yes' },
+              { questionId: 'q1', answer: 'edited' },
+            ],
+          },
+        }),
+      );
+
+      expect(questionDb.count).toHaveBeenCalledWith({
+        where: { id: { in: ['q1'] }, page: { template: { orgAccountId: ORG_A } } },
+      });
+      expect(inspectionDb.create).toHaveBeenCalled();
     });
   });
 
