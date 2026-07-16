@@ -250,17 +250,23 @@ const get_pending_invitations_from_db = async (req: Request) => {
 };
 
 /**
- * Admin-only. Lists the caller's org members with their OrgMember.id —
- * without this, there is no way for an admin to ever discover the
- * orgMemberId that inspection.service.ts's assign_member_to_inspection
- * requires, making that endpoint unreachable through the actual product
- * surface despite being correctly implemented and scoped. Found by
- * independent review tracing the real admin workflow (invite -> accept ->
- * assign) end to end rather than testing each endpoint in isolation.
+ * Lists the caller's org members with their OrgMember.id — any active
+ * member, not just admins. Two callers depend on this: an admin needs it to
+ * discover the orgMemberId that inspection.service.ts's
+ * assign_member_to_inspection requires (found by independent review tracing
+ * the real admin workflow end to end), and any member creating a finding
+ * needs it to populate the "Assigned Responsible" picker with their
+ * teammates (#40). Deliberately not admin-gated like the sibling endpoints
+ * in this file — seeing who else is in your own org isn't the sensitive
+ * operation here, changing their access is (see update_org_member_in_db,
+ * which stays admin-only).
  */
 const get_org_members_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
-  const callerMembership = await requireCallerIsOrgAdmin(user?.accountId);
+  const callerMembership = await findActiveMembership(user?.accountId);
+  if (!callerMembership) {
+    throw new AppError('You are not a member of any organization.', 403);
+  }
 
   const members = await prisma.orgMember.findMany({
     where: { organizationId: callerMembership.organizationId },

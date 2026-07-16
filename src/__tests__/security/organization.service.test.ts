@@ -770,7 +770,10 @@ describe('organization service — list org members', () => {
     expect(orgMemberDb.findMany).not.toHaveBeenCalled();
   });
 
-  it('rejects a non-admin member', async () => {
+  it('allows a non-admin (LEAD_AUDITOR) member to list their own org, scoped the same way as an admin (#40)', async () => {
+    // Any active member can see the roster — this endpoint is how the
+    // "Assigned Responsible" picker on a finding gets populated, not just
+    // an admin tool. See the doc comment on get_org_members_from_db.
     orgMemberDb.findUnique.mockResolvedValue({
       organizationId: ORG_1,
       accountId: 'lead-1',
@@ -778,12 +781,26 @@ describe('organization service — list org members', () => {
       status: 'ACTIVE',
       expiresAt: null,
     });
+    const members = [
+      {
+        id: 'member-1',
+        role: 'LEAD_AUDITOR',
+        status: 'ACTIVE',
+        expiresAt: null,
+        createdAt: new Date(),
+        account: { email: 'auditor@test.com', profile: { fullName: 'Auditor One' } },
+      },
+    ];
+    orgMemberDb.findMany.mockResolvedValue(members);
 
-    await expect(
-      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'lead-1' } })),
-    ).rejects.toMatchObject({ statusCode: 403 });
+    const result = await organization_services.get_org_members_from_db(
+      makeReq({ user: { accountId: 'lead-1' } }),
+    );
 
-    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
+    expect(orgMemberDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organizationId: ORG_1 } }),
+    );
+    expect(result).toEqual(members.map((m) => ({ ...m, isExpired: false })));
   });
 
   it('rejects a SUSPENDED admin', async () => {
@@ -797,6 +814,22 @@ describe('organization service — list org members', () => {
 
     await expect(
       organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'admin-1' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(orgMemberDb.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SUSPENDED non-admin member', async () => {
+    orgMemberDb.findUnique.mockResolvedValue({
+      organizationId: ORG_1,
+      accountId: 'lead-1',
+      role: 'LEAD_AUDITOR',
+      status: 'SUSPENDED',
+      expiresAt: null,
+    });
+
+    await expect(
+      organization_services.get_org_members_from_db(makeReq({ user: { accountId: 'lead-1' } })),
     ).rejects.toMatchObject({ statusCode: 403 });
 
     expect(orgMemberDb.findMany).not.toHaveBeenCalled();

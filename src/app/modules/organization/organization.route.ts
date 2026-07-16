@@ -17,10 +17,10 @@ router.post(
 
 router.get('/invitations', auth('ORGANIZATION'), organization_controller.get_pending_invitations);
 
-// Admin-only (enforced in the service via requireCallerIsOrgAdmin). Without
-// this, an admin has no way to discover the OrgMember.id that
-// POST /inspection/:id/assignments requires — found by independent review
-// tracing the real invite -> accept -> assign workflow end to end.
+// Any active org member, not just admins (see get_org_members_from_db's
+// doc comment for why) — an admin needs it to discover the OrgMember.id
+// that POST /inspection/:id/assignments requires, and any member needs it
+// to populate the finding-assignment picker (#40).
 router.get('/members', auth('ORGANIZATION'), organization_controller.get_org_members);
 
 // Admin-only (enforced in the service via requireCallerIsOrgAdmin). The only
