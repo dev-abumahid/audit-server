@@ -101,6 +101,29 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(result.data).toEqual([orgARecord]);
       expect(result.data.every((r: any) => r.orgAccountId === ORG_A)).toBe(true);
     });
+
+    it('includes inspectionId in the WHERE clause when provided', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq({ query: { inspectionId: 'insp-1' } }));
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orgAccountId: ORG_A, inspectionId: 'insp-1' },
+        }),
+      );
+    });
+
+    it('does not filter by inspectionId when not provided', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const callArg = db.findMany.mock.calls[0][0];
+      expect(callArg.where).not.toHaveProperty('inspectionId');
+    });
   });
 
   // ── getSingle ─────────────────────────────────────────────────────────────
