@@ -9,7 +9,7 @@ const router = Router();
 
 router.patch(
   '/',
-  auth('USER'),
+  auth('ADMIN', 'ORGANIZATION'),
   uploader.single('file'),
   (req, res, next) => {
     req.body = JSON.parse(req?.body?.data);

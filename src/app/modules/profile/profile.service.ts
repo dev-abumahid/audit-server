@@ -12,11 +12,21 @@ const update_profile_into_db = async (req: Request) => {
     const cloudRes = await uploadCloud(file);
     payload.profilePhoto = cloudRes?.secure_url;
   }
-  const result = await prisma.profile.update({
+  // Self-signed-up accounts (the org anchor) never get a Profile row created
+  // at signup time — only invited members do (organization.service.ts's
+  // accept-invite path). Update alone would 404 the anchor account on its
+  // first-ever profile edit; upsert makes this route work for every account
+  // that can reach it, not just the ones an org-invite flow happened to touch.
+  const result = await prisma.profile.upsert({
     where: {
       accountId: user.accountId as string,
     },
-    data: payload,
+    update: payload,
+    create: {
+      accountId: user.accountId as string,
+      fullName: payload.fullName ?? '',
+      profilePhoto: payload.profilePhoto,
+    },
   });
   return result;
 };
