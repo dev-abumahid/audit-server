@@ -37,7 +37,9 @@ jobs:
           script: |
             cd /root/risk-management
 
+            sed -i '/^SESSION_SECRET=/d; /^AI_INTERNAL_SECRET=/d' .env
             echo "SESSION_SECRET=${{ secrets.SESSION_SECRET }}" >> .env
+            echo "AI_INTERNAL_SECRET=${{ secrets.AI_INTERNAL_SECRET }}" >> .env
 
             echo "Pulling latest image..."
             docker compose pull
