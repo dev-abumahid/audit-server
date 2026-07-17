@@ -102,6 +102,16 @@ const reset_password_using_token = catchAsync(async (req, res) => {
   });
 });
 
+const get_social_providers = catchAsync(async (_req, res) => {
+  const result = account_services.get_social_providers();
+  manageResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: 'Social providers fetched successfully',
+    data: result,
+  });
+});
+
 export const account_controller = {
   create_account,
   login_user,
@@ -112,4 +122,5 @@ export const account_controller = {
   verify_account_using_link,
   forget_password_generate_reset_token,
   reset_password_using_token,
+  get_social_providers,
 };

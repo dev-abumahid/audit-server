@@ -1,5 +1,5 @@
 import bcrypt from 'bcrypt';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeReq } from '../helpers/makeReq.js';
 
 vi.mock('../../app/lib/prisma.js', () => ({
@@ -370,6 +370,50 @@ describe('account service', () => {
       );
 
       expect(db.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'acc-1' } }));
+    });
+  });
+
+  describe('get_social_providers', () => {
+    const original = {
+      google: configs.google_login_config.is_google_login,
+      facebook: configs.facebook_login_config.is_facebook_login,
+      twitter: configs.twitter.is_twitter_login,
+      github: configs.github.is_github_login,
+    };
+
+    afterEach(() => {
+      configs.google_login_config.is_google_login = original.google;
+      configs.facebook_login_config.is_facebook_login = original.facebook;
+      configs.twitter.is_twitter_login = original.twitter;
+      configs.github.is_github_login = original.github;
+    });
+
+    it('reflects each provider config flag independently', () => {
+      configs.google_login_config.is_google_login = true;
+      configs.facebook_login_config.is_facebook_login = false;
+      configs.twitter.is_twitter_login = true;
+      configs.github.is_github_login = false;
+
+      expect(account_services.get_social_providers()).toEqual({
+        google: true,
+        facebook: false,
+        twitter: true,
+        github: false,
+      });
+    });
+
+    it('returns all-false when no provider is configured', () => {
+      configs.google_login_config.is_google_login = false;
+      configs.facebook_login_config.is_facebook_login = false;
+      configs.twitter.is_twitter_login = false;
+      configs.github.is_github_login = false;
+
+      expect(account_services.get_social_providers()).toEqual({
+        google: false,
+        facebook: false,
+        twitter: false,
+        github: false,
+      });
     });
   });
 });

@@ -232,4 +232,15 @@ export const accountSwaggerDocs = {
       },
     },
   },
+  '/api/auth/social-providers': {
+    get: {
+      tags: ['social auth'],
+      summary: 'Which social login providers are enabled',
+      description:
+        'Returns which of google/facebook/twitter/github have real OAuth credentials configured. Render only the buttons for providers that are true.',
+      responses: {
+        200: { description: 'Social providers fetched successfully' },
+      },
+    },
+  },
 };

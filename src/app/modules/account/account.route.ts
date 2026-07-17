@@ -18,6 +18,19 @@ const sessionCheckLimiter = rateLimit({
   store: makeRedisStore('rl:auth:me:'),
 });
 
+// Same generous ceiling and reasoning as sessionCheckLimiter (fires on every
+// sign-in modal open, no credential risk) but its own Redis prefix — sharing
+// sessionCheckLimiter's instance would mean /me and /social-providers drew
+// from a single combined 500/15min budget instead of each getting 500 of
+// their own. Found by independent review.
+const socialProvidersLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeRedisStore('rl:auth:social-providers:'),
+});
+
 const accountRouter = Router();
 
 accountRouter.post(
@@ -72,6 +85,19 @@ accountRouter.put(
   sensitiveAuthLimiter,
   RequestValidator(account_validation.reset_pass),
   account_controller.reset_password_using_token,
+);
+
+// Lets the frontend render only "Sign in with X" buttons for providers that
+// actually have real OAuth credentials configured (see the is_*_login
+// gates below) — no auth required, this is read before a session exists,
+// same as sign-in/sign-up. Uses socialProvidersLimiter (not
+// sensitiveAuthLimiter) for the same reason /me's sessionCheckLimiter does:
+// fires on every sign-in modal open, no credential risk — but its own
+// limiter instance, not a shared budget with /me.
+accountRouter.get(
+  '/social-providers',
+  socialProvidersLimiter,
+  account_controller.get_social_providers,
 );
 
 //  Social provider login (Google)

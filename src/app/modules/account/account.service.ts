@@ -406,6 +406,20 @@ const reset_password_using_token_into_db = async (req: Request) => {
   return '';
 };
 
+/**
+ * Which social providers are actually usable right now — config-gated the
+ * same way the /social/:provider routes themselves are (account.route.ts).
+ * Not DB-backed: exists so the frontend can render only buttons that will
+ * actually work, instead of guessing which of the 4 passport strategies
+ * have real OAuth credentials configured in this environment.
+ */
+const get_social_providers = () => ({
+  google: configs.google_login_config.is_google_login,
+  facebook: configs.facebook_login_config.is_facebook_login,
+  twitter: configs.twitter.is_twitter_login,
+  github: configs.github.is_github_login,
+});
+
 export const account_services = {
   create_account_into_db,
   login_user_into_db,
@@ -416,4 +430,5 @@ export const account_services = {
   verify_account_using_link_into_db,
   forget_password_generate_reset_token_from_db,
   reset_password_using_token_into_db,
+  get_social_providers,
 };

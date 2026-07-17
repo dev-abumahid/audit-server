@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
  *                      PUT /verify-otp, /resend-otp,
  *                      /forget-password, /reset-password        — sensitiveAuthLimiter, 10/15min
  *                      GET /me                                  — sessionCheckLimiter, 500/15min
+ *                      GET /social-providers                    — socialProvidersLimiter, 500/15min
  *                      PUT /verify-link, /change-password        — no auth-specific limiter
  *
  * Every account route still sits under apiLimiter too (mounted broadly on
@@ -25,7 +26,15 @@ import { describe, expect, it } from 'vitest';
  * proportionate maxes for the broad/session limiters (300/500 would just be
  * slow to literally exhaust) — with an in-memory store instead of Redis.
  */
-function buildApp({ apiMax, sessionMax }: { apiMax: number; sessionMax: number }) {
+function buildApp({
+  apiMax,
+  sessionMax,
+  socialProvidersMax = 100,
+}: {
+  apiMax: number;
+  sessionMax: number;
+  socialProvidersMax?: number;
+}) {
   const app = express();
 
   const apiLimiter = rateLimit({
@@ -47,6 +56,16 @@ function buildApp({ apiMax, sessionMax }: { apiMax: number; sessionMax: number }
     standardHeaders: true,
     legacyHeaders: false,
   });
+  // Own instance, distinct from sessionCheckLimiter — account.route.ts used
+  // to share sessionCheckLimiter between /me and /social-providers (a bug,
+  // fixed once independent review caught it: the two routes were drawing
+  // from a single combined budget instead of each having their own).
+  const socialProvidersLimiter = rateLimit({
+    windowMs: 60_000,
+    max: socialProvidersMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   app.use('/api', apiLimiter);
 
@@ -57,6 +76,9 @@ function buildApp({ apiMax, sessionMax }: { apiMax: number; sessionMax: number }
     res.status(200).json({ ok: true }),
   );
   app.get('/api/auth/me', sessionCheckLimiter, (_req, res) => res.status(200).json({ ok: true }));
+  app.get('/api/auth/social-providers', socialProvidersLimiter, (_req, res) =>
+    res.status(200).json({ ok: true }),
+  );
   // No auth-specific limiter on these two — only the broad apiLimiter applies
   app.put('/api/auth/verify-link', (_req, res) => res.status(200).json({ ok: true }));
   app.put('/api/auth/change-password', (_req, res) => res.status(200).json({ ok: true }));
@@ -118,6 +140,26 @@ describe('rate limiter config shape (mirrors app.ts + account.route.ts)', () => 
     const thirdRes = await request(app).get('/api/auth/me');
 
     expect(thirdRes.status).toBe(429);
+  });
+
+  it('exhausting /me does not affect /social-providers, and vice versa', async () => {
+    const app = buildApp({ apiMax: 100, sessionMax: 2, socialProvidersMax: 2 });
+
+    // Exhaust /me's budget (2)
+    await request(app).get('/api/auth/me');
+    await request(app).get('/api/auth/me');
+    const meBlocked = await request(app).get('/api/auth/me');
+    expect(meBlocked.status).toBe(429);
+
+    // /social-providers has its own separate budget, untouched by the above
+    const providersOk1 = await request(app).get('/api/auth/social-providers');
+    const providersOk2 = await request(app).get('/api/auth/social-providers');
+    expect(providersOk1.status).toBe(200);
+    expect(providersOk2.status).toBe(200);
+
+    // Now exhaust /social-providers too, and confirm /me was never touched by it
+    const providersBlocked = await request(app).get('/api/auth/social-providers');
+    expect(providersBlocked.status).toBe(429);
   });
 
   it('routes with no auth-specific limiter still fall under the broad apiLimiter', async () => {
