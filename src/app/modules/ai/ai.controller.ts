@@ -42,6 +42,16 @@ const generate_recommendation_with_inspection = catchAsync(async (req, res) => {
     meta: {},
   });
 });
+const analyze_site_risks = catchAsync(async (req, res) => {
+  const result = await ai_service.analyze_site_risks_with_ai(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Site risk analysis generated successfully.',
+    data: result,
+    meta: {},
+  });
+});
 const upload_pdf_into_pinecone = catchAsync(async (req, res) => {
   const result = await ai_service.upload_pdf_into_pinecone_via_ai(req);
   manageResponse(res, {
@@ -78,6 +88,7 @@ export const ai_controller = {
   generate_template_with_pdf,
   generate_template_with_risk,
   generate_recommendation_with_inspection,
+  analyze_site_risks,
   upload_pdf_into_pinecone,
   get_all_pinecone_data,
   delete_pinecone_data,

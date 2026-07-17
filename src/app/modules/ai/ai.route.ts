@@ -32,6 +32,12 @@ router.post(
   ai_controller.generate_recommendation_with_inspection,
 );
 router.post(
+  '/analyze-site-risks',
+  auth('ORGANIZATION'),
+  RequestValidator(ai_validations.analyze_site_risks),
+  ai_controller.analyze_site_risks,
+);
+router.post(
   '/upload-pdf-into-pinecone',
   auth('ORGANIZATION'),
   uploader.single('file'),

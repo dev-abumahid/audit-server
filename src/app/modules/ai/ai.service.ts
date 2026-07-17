@@ -12,6 +12,7 @@ import {
 import { recommendation_validations } from '../recommendation/recommendation.validation.js';
 import { mapTemplateData } from '../template/template.utils.js';
 import { template_validations } from '../template/template.validation.js';
+import { ai_validations } from './ai.validation.js';
 
 // Every outbound call to aexa-ai must carry this — the AI service enforces
 // it as a global app-level auth dependency and rejects requests without it.
@@ -186,6 +187,63 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
       error?.message || 'Failed to generate template from risk',
       error?.statusCode || 500,
     );
+  }
+};
+
+// Generates candidate risks for a site from aexa-ai's /risk_analysis
+// endpoint. Unlike the other AI proxies above, this one does not persist
+// anything — it returns the raw suggestions so the caller can review and
+// selectively import them via the existing POST /risk route (same pattern
+// SitesEntities.tsx's manual "add risk" flow already uses), rather than
+// auto-creating Risk rows the user never asked for.
+const analyze_site_risks_with_ai = async (req: Request) => {
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
+    const siteId = req?.body?.siteId as string;
+
+    const site = await prisma.site.findUnique({
+      where: {
+        id: siteId,
+        org_account_id: ctx.organizationId,
+      },
+    });
+
+    if (!site) {
+      throw new AppError('Site not found', 404);
+    }
+
+    // Deliberately not including a system_prompt field — see the comment on
+    // ai_validations.analyze_site_risks. site_legal_entity has no analog on
+    // the Site model yet, so it's sent empty rather than guessed.
+    const aiResponse = await fetch(`${configs.ai_server_end_point}/risk_analysis`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...AI_INTERNAL_SECRET_HEADER,
+      },
+      body: JSON.stringify({
+        site_name: site.name,
+        site_location: site.location || '',
+        site_legal_entity: '',
+        site_primary_activity: site.activity || '',
+        site_country: site.country || '',
+        site_revenue: String(site.revenue),
+        site_employees: String(site.employees_count),
+        site_type: site.site_type,
+      }),
+    });
+
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
+    const data = await aiResponse.json();
+    const parsed = await ai_validations.risk_analysis_response.parseAsync(data);
+
+    return parsed.risks;
+  } catch (error: any) {
+    throw new AppError(error?.message || 'Failed to analyze site risks', error?.statusCode || 500);
   }
 };
 
@@ -412,6 +470,7 @@ export const ai_service = {
   generate_template_with_pdf_with_ai,
   generate_template_with_risk_with_ai,
   generate_recommendation_with_inspection_from_ai,
+  analyze_site_risks_with_ai,
   upload_pdf_into_pinecone_via_ai,
   get_all_pinecone_data_from_database,
   delete_pinecone_data_from_database,
