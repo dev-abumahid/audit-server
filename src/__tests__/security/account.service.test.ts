@@ -330,7 +330,9 @@ describe('account service', () => {
 
       const [, payload] = mockResetQueueAdd.mock.calls[0];
       const resetLink = (payload as { resetLink: string }).resetLink;
-      const token = resetLink.split('?=')[1];
+      expect(resetLink).toMatch(/^.*\/reset-password\?token=/);
+      const token = new URL(resetLink).searchParams.get('token');
+      if (!token) throw new Error('Expected a token query param on the reset link');
 
       // Must verify successfully against reset_secret...
       expect(() => jwtHelpers.verifyToken(token, configs.jwt.reset_secret as string)).not.toThrow();

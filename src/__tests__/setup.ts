@@ -15,3 +15,10 @@ process.env.REFRESH_TOKEN = 'test-refresh-token-secret';
 process.env.VERIFIED_TOKEN = 'test-verified-token-secret';
 process.env.RESET_SECRET = 'test-reset-secret-distinct-from-verified';
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test_db';
+// Must be an absolute URL — account.service.ts builds reset/verification
+// links as `${front_end_url}/...`, and a test asserting on the resulting
+// link's shape parses it with `new URL(...)`, which throws on a relative
+// value (e.g. the bare `undefined` this is left as when unset). Not set in
+// CI's environment, only picked up locally from a gitignored .env — found
+// when this exact gap turned green locally and red in CI.
+process.env.FRONT_END_URL = 'http://localhost:5173';

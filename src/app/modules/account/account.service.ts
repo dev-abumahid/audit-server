@@ -354,7 +354,13 @@ const forget_password_generate_reset_token_from_db = async (req: Request) => {
     configs.jwt.reset_secret as string,
     '5m',
   );
-  const verificationLink = `${configs.jwt.front_end_url}/verify/token?=${verificationToken}`;
+  // Distinct from the email-verification link's /verify/token route (used
+  // by sign-up and resend-OTP, elsewhere in this file) — this is a
+  // different flow with a different token/secret. Was previously
+  // `/verify/token?=${token}` (no key name before `=`), which happened to
+  // be parseable via URLSearchParams().get("") but was never actually
+  // exercised by any frontend consumer (#73) to catch that it was wrong.
+  const verificationLink = `${configs.jwt.front_end_url}/reset-password?token=${verificationToken}`;
 
   await resetEmailQueue.add('reset-email-queue', {
     email,
