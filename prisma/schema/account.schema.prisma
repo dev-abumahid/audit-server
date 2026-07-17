@@ -37,6 +37,8 @@ model Account {
     actions             Action[]
     pineconeDocuments   PineconeDocument[]
     notes               Note[]
+    kris                Kri[]
+    alerts              Alert[]
 
     // Org membership — nullable/optional since not every account has one
     // until the slice-1 backfill script runs (see src/scripts/backfill-org-membership.ts).

@@ -7,6 +7,8 @@ import { templateSwaggerDocs } from './app/modules/template/template.swagger.js'
 import { siteSwaggerDocs } from './app/modules/site/site.swagger.js';
 import { actionSwaggerDocs } from './app/modules/action/action.swagger.js';
 import { riskSwaggerDocs } from './app/modules/risk/risk.swagger.js';
+import { kriSwaggerDocs } from './app/modules/kri/kri.swagger.js';
+import { alertSwaggerDocs } from './app/modules/alert/alert.swagger.js';
 import { aiSwaggerDocs } from './app/modules/ai/ai.swagger.js';
 import { inspectionSwaggerDocs } from './app/modules/inspection/inspection.swagger.js';
 import { recommendationSwaggerDocs } from './app/modules/recommendation/recommendation.swagger.js';
@@ -30,6 +32,8 @@ export const swaggerOptions = {
       ...siteSwaggerDocs,
       ...actionSwaggerDocs,
       ...riskSwaggerDocs,
+      ...kriSwaggerDocs,
+      ...alertSwaggerDocs,
       ...aiSwaggerDocs,
       ...inspectionSwaggerDocs,
       ...recommendationSwaggerDocs,

@@ -1,0 +1,19 @@
+model Alert {
+    id             String   @id @default(uuid())
+    org_account_id String
+    account        Account  @relation(fields: [org_account_id], references: [id])
+    kri_id         String?
+    kri            Kri?     @relation(fields: [kri_id], references: [id], onDelete: SetNull)
+    source         String
+    type           String
+    severity       String
+    title          String
+    description    String?
+    is_read        Boolean  @default(false)
+    ai_generated   Boolean  @default(false)
+    createdAt      DateTime @default(now())
+    updatedAt      DateTime @updatedAt
+
+    @@index([org_account_id])
+    @@index([kri_id])
+}

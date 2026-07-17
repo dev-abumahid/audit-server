@@ -1,0 +1,20 @@
+model Kri {
+    id              String   @id @default(uuid())
+    org_account_id  String
+    account         Account  @relation(fields: [org_account_id], references: [id])
+    risk_id         String
+    risk            Risk     @relation(fields: [risk_id], references: [id], onDelete: Cascade)
+    name            String
+    unit            String
+    current_value   Float
+    alert_threshold Float
+    target_value    Float
+    frequency       String?
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+
+    alerts Alert[]
+
+    @@index([org_account_id])
+    @@index([risk_id])
+}

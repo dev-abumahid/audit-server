@@ -82,7 +82,7 @@ Field naming is inconsistent across models — check the schema before writing a
 | Models                                             | Field name                    |
 | -------------------------------------------------- | ----------------------------- |
 | action, recommendation, template, inspection, note | `orgAccountId` (camelCase)    |
-| site, risk                                         | `org_account_id` (snake_case) |
+| site, risk, kri, alert                             | `org_account_id` (snake_case) |
 
 Missing org scope = cross-tenant data leak. PRs that add queries without org scoping will be rejected.
 

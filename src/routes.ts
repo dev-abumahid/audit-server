@@ -2,7 +2,9 @@ import { Router } from 'express';
 import accountRouter from './app/modules/account/account.route.js';
 import actionRoute from './app/modules/action/action.route.js';
 import aiRoute from './app/modules/ai/ai.route.js';
+import alertRoute from './app/modules/alert/alert.route.js';
 import externalAuthRoute from './app/modules/external-auth/external-auth.route.js';
+import kriRoute from './app/modules/kri/kri.route.js';
 import inspectionRoute from './app/modules/inspection/inspection.route.js';
 import noteRoute from './app/modules/note/note.route.js';
 import organizationRoute from './app/modules/organization/organization.route.js';
@@ -20,6 +22,8 @@ const moduleRoutes = [
   { path: '/inspection', route: inspectionRoute },
   { path: '/ai', route: aiRoute },
   { path: '/risk', route: riskRoute },
+  { path: '/kri', route: kriRoute },
+  { path: '/alert', route: alertRoute },
   { path: '/action', route: actionRoute },
   { path: '/site', route: siteRoute },
   { path: '/template', route: templateRoute },
