@@ -37,9 +37,17 @@ jobs:
           script: |
             cd /root/risk-management
 
-            sed -i '/^SESSION_SECRET=/d; /^AI_INTERNAL_SECRET=/d' .env
+            sed -i '/^SESSION_SECRET=/d; /^AI_INTERNAL_SECRET=/d; /^IS_GOOGLE_LOGIN=/d; /^GOOGLE_CLIENT_ID=/d; /^GOOGLE_CLIENT_SECRET=/d; /^GOOGLE_CALLBACK_URL=/d' .env
             echo "SESSION_SECRET=${{ secrets.SESSION_SECRET }}" >> .env
             echo "AI_INTERNAL_SECRET=${{ secrets.AI_INTERNAL_SECRET }}" >> .env
+            # IS_GOOGLE_LOGIN/GOOGLE_CALLBACK_URL aren't sensitive (the callback
+            # URL is publicly visible in the OAuth redirect itself) — only the
+            # client ID/secret pair is a real secret, so only those two go
+            # through GitHub Actions secrets.
+            echo "IS_GOOGLE_LOGIN=true" >> .env
+            echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}" >> .env
+            echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}" >> .env
+            echo "GOOGLE_CALLBACK_URL=https://api.globalriskcore.com/api/auth/social/google/callback" >> .env
 
             echo "Pulling latest image..."
             docker compose pull
