@@ -3,6 +3,7 @@ import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
+import uploadCloud from '../../utils/cloudinary.js';
 import {
   applyActionScope,
   assertCanWriteToAction,
@@ -164,6 +165,7 @@ const create_action_into_db = async (req: Request) => {
       priority: body.priority,
       dueDate: body.dueDate,
       status: body.status,
+      attachments: body.attachments ?? [],
       messages: {
         create:
           body.messages?.map((msg: { message: string }) => ({
@@ -198,9 +200,30 @@ const update_action_into_db = async (req: Request) => {
       ...(req.body.priority !== undefined && { priority: req.body.priority }),
       ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
       ...(req.body.status !== undefined && { status: req.body.status }),
+      ...(req.body.attachments !== undefined && { attachments: req.body.attachments }),
     },
   });
   return result;
+};
+
+/**
+ * Uploads a corrective-action attachment to S3 and returns its URL. This is
+ * a two-step flow, same as inspection's upload-file-aws: the frontend
+ * uploads the file here first, then includes the returned URL in the
+ * `attachments` array on a subsequent create/update call — this endpoint
+ * itself doesn't touch any Action row, so it only needs auth, not
+ * org-scoped lookup. Response shape ({ url }) intentionally differs from
+ * upload-file-aws's bare-string response — this one matches what
+ * aexa-frontend's InspectionActions.tsx already expects (`json.data?.url`),
+ * fixed by consumer, not by this endpoint choosing its own shape freely.
+ */
+const upload_action_attachment_into_aws = async (req: Request) => {
+  const file = req.file;
+  if (!file) {
+    throw new AppError('File is required', 400);
+  }
+  const result = await uploadCloud(file);
+  return { url: result.secure_url };
 };
 
 const delete_action_from_db = async (req: Request) => {
@@ -761,6 +784,7 @@ export const action_service = {
   get_single_action_from_db,
   create_action_into_db,
   update_action_into_db,
+  upload_action_attachment_into_aws,
   delete_action_from_db,
   assign_light_user_to_action,
   unassign_light_user_from_action,

@@ -35,6 +35,7 @@ model Action {
     priority    PRIORITY
     dueDate     DateTime
     status      STATUS   @default(TO_DO)
+    attachments String[] @default([])
 
     // Relation
     messages ActionMessage[]

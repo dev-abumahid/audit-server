@@ -46,6 +46,17 @@ const update_action = catchAsync(async (req, res) => {
   });
 });
 
+const upload_action_attachment = catchAsync(async (req, res) => {
+  const result = await action_service.upload_action_attachment_into_aws(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Attachment uploaded successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 const delete_action = catchAsync(async (req, res) => {
   const result = await action_service.delete_action_from_db(req);
   manageResponse(res, {
@@ -172,6 +183,7 @@ export const action_controller = {
   get_single_action,
   create_action,
   update_action,
+  upload_action_attachment,
   delete_action,
   assign_light_user,
   unassign_light_user,

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import authExternal from '../../middlewares/auth_external.js';
 import RequestValidator from '../../middlewares/request_validator.js';
+import uploader from '../../middlewares/uploader.js';
 import { action_controller } from './action.controller.js';
 import { action_validations } from './action.validation.js';
 
@@ -13,6 +14,12 @@ router.post(
   auth('ORGANIZATION'),
   RequestValidator(action_validations.create_action),
   action_controller.create_action,
+);
+router.post(
+  '/attachment',
+  auth('ORGANIZATION'),
+  uploader.single('file'),
+  action_controller.upload_action_attachment,
 );
 router.get('/:id', auth('ORGANIZATION'), action_controller.get_single_action);
 router.patch(

@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, ORG_B, makeReq } from '../helpers/makeReq.js';
 
+vi.mock('../../app/utils/cloudinary.js', () => ({
+  default: vi.fn(),
+}));
+
 // Mock Prisma before importing the service
 vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
@@ -50,6 +54,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
 
 import { prisma } from '../../app/lib/prisma.js';
 import { action_service } from '../../app/modules/action/action.service.js';
+import uploadCloud from '../../app/utils/cloudinary.js';
+
+const mockUploadCloud = vi.mocked(uploadCloud);
 
 const db = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbInspection = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -255,6 +262,44 @@ describe('action service — org scoping (ticket #6)', () => {
 
       expect(db.create).not.toHaveBeenCalled();
     });
+
+    it('persists attachments when provided', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({
+          body: {
+            inspectionId: 'insp-1',
+            title: 'With attachment',
+            attachments: ['https://s3/one.jpg'],
+          },
+        }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.attachments).toEqual(['https://s3/one.jpg']);
+    });
+
+    it('defaults attachments to an empty array when not provided', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'No attachment' } }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.attachments).toEqual([]);
+    });
   });
 
   // ── update ────────────────────────────────────────────────────────────────
@@ -281,6 +326,56 @@ describe('action service — org scoping (ticket #6)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('updates attachments when provided', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { attachments: ['https://s3/two.jpg'] } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.attachments).toEqual(['https://s3/two.jpg']);
+    });
+
+    it('leaves attachments untouched when not provided', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { actionTitle: 'Renamed' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('attachments');
+    });
+  });
+
+  // ── attachment upload ────────────────────────────────────────────────────
+  describe('upload_action_attachment_into_aws', () => {
+    beforeEach(() => {
+      mockUploadCloud.mockReset();
+    });
+
+    it('uploads the file and returns its URL', async () => {
+      mockUploadCloud.mockResolvedValue({ secure_url: 'https://s3/uploaded.jpg', key: 'k1' });
+
+      const result = await action_service.upload_action_attachment_into_aws(
+        makeReq({ file: { path: '/tmp/x.jpg' } } as any),
+      );
+
+      expect(mockUploadCloud).toHaveBeenCalled();
+      expect(result).toEqual({ url: 'https://s3/uploaded.jpg' });
+    });
+
+    it('throws 400 when no file is present', async () => {
+      await expect(
+        action_service.upload_action_attachment_into_aws(makeReq()),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(mockUploadCloud).not.toHaveBeenCalled();
     });
   });
 

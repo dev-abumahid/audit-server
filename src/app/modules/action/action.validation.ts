@@ -1,5 +1,17 @@
 import { z } from 'zod';
 
+// z.string().url() alone accepts any URL the WHATWG URL constructor parses,
+// which includes javascript:/data: schemes — not just http(s). Attachment
+// URLs are rendered as links/images, so the scheme itself must be checked,
+// not just "is this URL-shaped".
+const httpUrl = z
+  .string()
+  .url()
+  .max(2048)
+  .refine((value) => /^https?:\/\//i.test(value), {
+    message: 'Attachment URL must be http(s)',
+  });
+
 const PRIORITY_ENUM = z.enum(['Low', 'Medium', 'High']);
 
 const STATUS_ENUM = z.enum(['TO_DO', 'IN_PROGRESS', 'COMPLETE', 'CANT_DO']);
@@ -26,6 +38,17 @@ const create_action = z.object({
   dueDate: z.coerce.date(),
 
   status: STATUS_ENUM.optional().default('TO_DO'),
+
+  // File URLs returned by POST /action/attachment (uploaded separately,
+  // then attached to the action by URL — same two-step pattern as
+  // inspection's upload-file-aws flow). Restricted to http(s) URLs and
+  // capped in count/length: this field is set directly by the client, not
+  // just via the upload endpoint, so it's a real input-validation boundary —
+  // an unrestricted array of unrestricted strings would allow a
+  // javascript:/data: URI stored wherever attachments are later rendered as
+  // links or images, plus an unbounded per-row storage footprint. Found by
+  // independent review.
+  attachments: z.array(httpUrl).max(10).optional(),
 
   // relation
   messages: z.array(actionMessageSchema).optional(),
