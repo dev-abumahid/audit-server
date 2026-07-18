@@ -17,6 +17,10 @@ model Inspection {
     // main data set
     questionAnswers QuestionAnswer[]
     unSplitText     String?
+    // Inspection-level attachments (as opposed to per-question mediaFiles on
+    // QuestionAnswer) — see #53. Same S3-upload-then-PATCH-URL-array pattern
+    // as Action.attachments.
+    attachments     String[]         @default([])
 
     // Relations
     account   Account  @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)

@@ -285,6 +285,51 @@ describe('inspection service — org scoping (ticket #6)', () => {
 
       expect(inspectionDb.update).not.toHaveBeenCalled();
     });
+
+    it('writes the attachments array when provided (#53)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'i1', orgAccountId: ORG_A });
+      inspectionDb.update.mockResolvedValue({});
+
+      await inspection_service.update_inspection_into_db(
+        makeReq({
+          params: { id: 'i1' },
+          body: { attachments: ['https://cdn.example.com/a.pdf'] },
+        }),
+      );
+
+      expect(inspectionDb.update).toHaveBeenCalledWith({
+        where: { id: 'i1' },
+        data: { attachments: ['https://cdn.example.com/a.pdf'] },
+      });
+    });
+
+    it('clears attachments when an empty array is explicitly sent, not silently dropped like a falsy field', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'i1', orgAccountId: ORG_A });
+      inspectionDb.update.mockResolvedValue({});
+
+      await inspection_service.update_inspection_into_db(
+        makeReq({ params: { id: 'i1' }, body: { attachments: [] } }),
+      );
+
+      expect(inspectionDb.update).toHaveBeenCalledWith({
+        where: { id: 'i1' },
+        data: { attachments: [] },
+      });
+    });
+
+    it('does not touch attachments when the field is omitted entirely', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'i1', orgAccountId: ORG_A });
+      inspectionDb.update.mockResolvedValue({});
+
+      await inspection_service.update_inspection_into_db(
+        makeReq({ params: { id: 'i1' }, body: { status: 'COMPLETED' } }),
+      );
+
+      expect(inspectionDb.update).toHaveBeenCalledWith({
+        where: { id: 'i1' },
+        data: { status: 'COMPLETED' },
+      });
+    });
   });
 
   describe('delete_inspection_from_db', () => {

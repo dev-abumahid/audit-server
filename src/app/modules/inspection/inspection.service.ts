@@ -252,6 +252,10 @@ const update_inspection_into_db = async (req: Request) => {
     data: {
       ...(req.body.siteId && { siteId: req.body.siteId }),
       ...(req.body.status && { status: req.body.status }),
+      // attachments is a full-array replace, same as Action.attachments —
+      // `undefined` check (not truthy) so an intentional empty-array clear
+      // isn't silently dropped like a falsy siteId/status would be.
+      ...(req.body.attachments !== undefined && { attachments: req.body.attachments }),
     },
   });
   return result;
