@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
 
+vi.mock('fs', () => ({
+  readFileSync: vi.fn(() => Buffer.from('')),
+}));
+
+vi.mock('../../app/utils/cloudinary.js', () => ({
+  default: vi.fn(),
+}));
+
 vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     note: {
@@ -28,8 +36,10 @@ vi.mock('../../app/lib/prisma.js', () => ({
 }));
 
 import { prisma } from '../../app/lib/prisma.js';
+import uploadCloud from '../../app/utils/cloudinary.js';
 import { note_service } from '../../app/modules/note/note.service.js';
 
+const mockUploadCloud = vi.mocked(uploadCloud);
 const db = prisma.note as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -61,6 +71,7 @@ const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER'
 describe('note service — org scoping', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
     // Default: no OrgMember row — ADMIN-of-self fallback (org anchor ===
     // caller's own accountId), same as every pre-org-scoping-migration test
     // in this file expects.
@@ -246,6 +257,8 @@ describe('note service — org scoping', () => {
   });
 
   describe('extract_note_from_any_file_or_image_and_save_into_db', () => {
+    const FILE = { path: '/tmp/whatever', mimetype: 'application/pdf', originalname: 'a.pdf' };
+
     it('throws 404 and does NOT proceed to file processing when the inspectionId belongs to another org', async () => {
       inspectionDb.findFirst.mockResolvedValue(null);
 
@@ -253,7 +266,7 @@ describe('note service — org scoping', () => {
         note_service.extract_note_from_any_file_or_image_and_save_into_db(
           makeReq({
             body: { inspectionId: 'org-b-inspection' },
-            file: { path: '/tmp/whatever', mimetype: 'application/pdf', originalname: 'a.pdf' },
+            file: FILE,
           } as never),
         ),
       ).rejects.toMatchObject({ statusCode: 404 });
@@ -263,6 +276,44 @@ describe('note service — org scoping', () => {
       });
       expect(db.findFirst).not.toHaveBeenCalled();
       expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('uploads the source file and stores its URL in attachments (#54)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ title: 'T', extracted_text: 'X' }),
+      });
+      mockUploadCloud.mockResolvedValue({ secure_url: 'https://s3.example.com/a.pdf' } as never);
+      db.create.mockResolvedValue({});
+
+      await note_service.extract_note_from_any_file_or_image_and_save_into_db(
+        makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+      );
+
+      expect(mockUploadCloud).toHaveBeenCalledWith(FILE);
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.attachments).toEqual(['https://s3.example.com/a.pdf']);
+    });
+
+    it('still creates the note with empty attachments when the source-file upload fails (extraction already succeeded)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ title: 'T', extracted_text: 'X' }),
+      });
+      mockUploadCloud.mockRejectedValue(new Error('S3 unreachable'));
+      db.create.mockResolvedValue({});
+
+      await note_service.extract_note_from_any_file_or_image_and_save_into_db(
+        makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.attachments).toEqual([]);
+      expect(callArg.data.extracted_text).toBe('X');
     });
   });
 
@@ -289,6 +340,37 @@ describe('note service — org scoping', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('writes attachments when provided', async () => {
+      db.findFirst.mockResolvedValue({ id: 'n1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await note_service.update_note_into_db(
+        makeReq({
+          params: { id: 'n1' },
+          body: { attachments: ['https://s3.example.com/replacement.pdf'] },
+        }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith({
+        where: { id: 'n1' },
+        data: { attachments: ['https://s3.example.com/replacement.pdf'] },
+      });
+    });
+
+    it('clears attachments on an explicit empty array, not silently dropped', async () => {
+      db.findFirst.mockResolvedValue({ id: 'n1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await note_service.update_note_into_db(
+        makeReq({ params: { id: 'n1' }, body: { attachments: [] } }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith({
+        where: { id: 'n1' },
+        data: { attachments: [] },
+      });
     });
   });
 

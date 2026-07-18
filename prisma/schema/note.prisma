@@ -4,6 +4,13 @@ model Note {
     // body data
     title          String
     extracted_text String
+    // The original file this note was extracted from (if any) — kept for
+    // "I cannot visualize it" (see #54): previously extract_note_from_any_
+    // file_or_image_and_save_into_db read the uploaded file, sent it to AI
+    // for text extraction, and discarded it, so the source file itself was
+    // never visible again after upload. Same shape as Action/Inspection
+    // attachments.
+    attachments    String[]         @default([])
 
     // foreign key
     orgAccountId String

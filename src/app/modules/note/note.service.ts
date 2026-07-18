@@ -9,6 +9,8 @@ import {
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { AppError } from '../../utils/app_error.js';
+import uploadCloud from '../../utils/cloudinary.js';
+import { logger } from '../../lib/logger.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 
@@ -141,11 +143,35 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
   }
   const data = await aiResponse.json();
 
+  // Previously the uploaded file was read for AI text extraction and then
+  // discarded — extracted_text survived but the original file itself was
+  // never visible again (see #54: "I cannot visualize it"). Uploading it
+  // here too means a failed/slow S3 upload doesn't block note creation from
+  // the AI extraction that already succeeded above — attachments best-effort,
+  // not a hard requirement for the note to exist.
+  let attachments: string[] = [];
+  try {
+    const uploadResult = await uploadCloud(file);
+    attachments = [uploadResult.secure_url];
+  } catch (err) {
+    // Swallowed deliberately: extraction already succeeded, and losing the
+    // source-file attachment is strictly better than losing the note itself.
+    // Still logged, same as the other best-effort operations in this
+    // codebase (enqueueInviteEmailOrThrow, OrgAuditLog writes) — otherwise a
+    // misconfigured S3/AWS setup silently produces attachment-less notes
+    // forever with zero operational signal. Found by independent review.
+    logger.error(
+      { err, inspectionId: body.inspectionId },
+      'Failed to upload note source file to S3',
+    );
+  }
+
   // db payload
   const payload = {
     ...data,
     orgAccountId: ctx.organizationId,
     inspectionId: body.inspectionId,
+    attachments,
   };
 
   const result = await prisma.note.create({ data: payload });
@@ -169,6 +195,9 @@ const update_note_into_db = async (req: Request) => {
       ...(body.extracted_text !== undefined && {
         extracted_text: body.extracted_text,
       }),
+      // undefined check (not truthy), same as Action/Inspection.attachments —
+      // an intentional empty-array clear must not be silently dropped.
+      ...(body.attachments !== undefined && { attachments: body.attachments }),
     },
   });
 
