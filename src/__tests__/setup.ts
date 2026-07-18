@@ -15,6 +15,7 @@ process.env.REFRESH_TOKEN = 'test-refresh-token-secret';
 process.env.VERIFIED_TOKEN = 'test-verified-token-secret';
 process.env.RESET_SECRET = 'test-reset-secret-distinct-from-verified';
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test_db';
+process.env.AI_INTERNAL_SECRET = 'test-ai-internal-secret';
 // Must be an absolute URL — account.service.ts builds reset/verification
 // links as `${front_end_url}/...`, and a test asserting on the resulting
 // link's shape parses it with `new URL(...)`, which throws on a relative

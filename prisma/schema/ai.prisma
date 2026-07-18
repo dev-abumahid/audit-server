@@ -13,3 +13,23 @@ model PineconeDocument {
     account      Account  @relation(fields: [orgAccountId], references: [id])
     createdAt    DateTime @default(now())
 }
+
+// Completion signal for async aexa-ai work (currently: PDF-to-Pinecone
+// knowledge-base uploads) — see #96. Posted by aexa-ai's
+// POST /api/notification webhook, verified via the same shared
+// AI_INTERNAL_SECRET aexa-server already sends outbound, checked the other
+// way (verify_ai_internal_secret middleware).
+model Notification {
+    id           String   @id @default(uuid())
+    orgAccountId String
+    account      Account  @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
+    title        String
+    description  String
+    // Whether the underlying async operation (e.g. the PDF upload) succeeded
+    // — not whether the notification itself was delivered.
+    status       Boolean
+    isRead       Boolean  @default(false)
+    createdAt    DateTime @default(now())
+
+    @@index([orgAccountId])
+}
