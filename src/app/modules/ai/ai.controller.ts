@@ -62,6 +62,16 @@ const upload_pdf_into_pinecone = catchAsync(async (req, res) => {
     meta: {},
   });
 });
+const check_upload_file_status = catchAsync(async (req, res) => {
+  const result = await ai_service.check_upload_file_status_from_ai(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Upload status fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
 const get_all_pinecone_data = catchAsync(async (req, res) => {
   const result = await ai_service.get_all_pinecone_data_from_database(req);
   manageResponse(res, {
@@ -90,6 +100,7 @@ export const ai_controller = {
   generate_recommendation_with_inspection,
   analyze_site_risks,
   upload_pdf_into_pinecone,
+  check_upload_file_status,
   get_all_pinecone_data,
   delete_pinecone_data,
 };

@@ -10,7 +10,12 @@ vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     template: { create: vi.fn() },
     recommendation: { create: vi.fn(), findFirst: vi.fn() },
-    pineconeDocument: { create: vi.fn(), findMany: vi.fn(), deleteMany: vi.fn() },
+    pineconeDocument: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      deleteMany: vi.fn(),
+      findFirst: vi.fn(),
+    },
     risk: { findUnique: vi.fn() },
     site: { findUnique: vi.fn() },
     inspection: { findFirst: vi.fn() },
@@ -401,5 +406,51 @@ describe('ai service — Pinecone delete upstream-failure handling (issue #55 fo
     await ai_service.delete_pinecone_data_from_database(makeReq({ query: { fileName: 'a.pdf' } }));
 
     expect(pineconeDb.deleteMany).toHaveBeenCalled();
+  });
+});
+
+describe('ai service — check_upload_file_status_from_ai (issue #35)', () => {
+  const pineconeDb = prisma.pineconeDocument as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  it('throws 404 and does NOT call aexa-ai when the fileId belongs to another org', async () => {
+    pineconeDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      ai_service.check_upload_file_status_from_ai(makeReq({ params: { id: 'org-b-file' } })),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(pineconeDb.findFirst).toHaveBeenCalledWith({
+      where: { fileId: 'org-b-file', orgAccountId: ORG_A },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('proxies the real job status once the fileId is confirmed to belong to the caller org', async () => {
+    pineconeDb.findFirst.mockResolvedValue({ id: 'doc-1', fileId: 'file-1', orgAccountId: ORG_A });
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ status: 'completed', message: 'file.pdf uploaded' }),
+    });
+
+    const result = await ai_service.check_upload_file_status_from_ai(
+      makeReq({ params: { id: 'file-1' } }),
+    );
+
+    expect(result).toEqual({ status: 'completed', message: 'file.pdf uploaded' });
+  });
+
+  it('throws 502 when the upstream AI service errors', async () => {
+    pineconeDb.findFirst.mockResolvedValue({ id: 'doc-1', fileId: 'file-1', orgAccountId: ORG_A });
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500 });
+
+    await expect(
+      ai_service.check_upload_file_status_from_ai(makeReq({ params: { id: 'file-1' } })),
+    ).rejects.toMatchObject({ statusCode: 502 });
   });
 });

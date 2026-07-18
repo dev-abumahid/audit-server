@@ -420,6 +420,39 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
   }
 };
 
+// Closes #35 — aexa-ai's GET /upload-status/{file_id} had no caller anywhere.
+// The upload itself already returns a synchronous "success" (a
+// PineconeDocument row is created as soon as aexa-ai hands back a file_id),
+// but the actual embedding into Pinecone runs async in the background on
+// the aexa-ai side — so that immediate response doesn't mean the file is
+// actually queryable yet. This proxies aexa-ai's real job-status store.
+const check_upload_file_status_from_ai = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id } = req.params as { id: string };
+
+  // fileId (not the PineconeDocument's own id) is what aexa-ai's job store
+  // is keyed on — org-scoped lookup so a caller can't poll another org's
+  // upload status by guessing/enumerating file ids.
+  const document = await prisma.pineconeDocument.findFirst({
+    where: { fileId: id, orgAccountId: ctx.organizationId },
+  });
+  if (!document) {
+    throw new AppError('Upload not found', 404);
+  }
+
+  const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-status/${id}`, {
+    headers: AI_INTERNAL_SECRET_HEADER,
+  });
+  if (aiResponse.status === 404) {
+    throw new AppError('Upload status not found', 404);
+  }
+  if (!aiResponse.ok) {
+    throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+  }
+  return aiResponse.json();
+};
+
 const get_all_pinecone_data_from_database = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
@@ -472,6 +505,7 @@ export const ai_service = {
   generate_recommendation_with_inspection_from_ai,
   analyze_site_risks_with_ai,
   upload_pdf_into_pinecone_via_ai,
+  check_upload_file_status_from_ai,
   get_all_pinecone_data_from_database,
   delete_pinecone_data_from_database,
 };

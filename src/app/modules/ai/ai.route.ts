@@ -53,5 +53,10 @@ router.delete(
   auth('ORGANIZATION'),
   ai_controller.delete_pinecone_data,
 );
+router.get(
+  '/check-upload-file-status/:id',
+  auth('ORGANIZATION'),
+  ai_controller.check_upload_file_status,
+);
 
 export default router;
