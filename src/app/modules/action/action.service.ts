@@ -20,6 +20,39 @@ import {
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 
+// Shared by every read path that returns an Action, so "assignBy" is always
+// shaped the same way the frontend's TAssignBy[] type expects ({id, name}),
+// not the raw nested Prisma relation shape.
+const RESPONSIBLE_INCLUDE = {
+  responsibleAssignees: {
+    include: {
+      orgMember: {
+        include: { account: { include: { profile: { select: { fullName: true } } } } },
+      },
+    },
+  },
+} satisfies Prisma.ActionInclude;
+
+type ActionWithResponsibles = Prisma.ActionGetPayload<{ include: typeof RESPONSIBLE_INCLUDE }>;
+
+// aexa-frontend's IAction.assignBy is TAssignBy[] ({id, name}) — id is the
+// OrgMember id (see ActionResponsible's schema comment for why), name falls
+// back to email when no profile fullName is set, matching how member lists
+// are already displayed elsewhere (organization.service.ts).
+const shapeResponsibleAssignees = (action: ActionWithResponsibles) => {
+  const { responsibleAssignees, ...rest } = action;
+  return {
+    ...rest,
+    // Every real Prisma call above always passes RESPONSIBLE_INCLUDE, so
+    // this is only ever undefined in a test double that doesn't bother
+    // replicating the full nested include shape — not a real-world case.
+    assignBy: (responsibleAssignees ?? []).map((r) => ({
+      id: r.orgMemberId,
+      name: r.orgMember.account.profile?.fullName || r.orgMember.account.email,
+    })),
+  };
+};
+
 const get_all_action_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
@@ -78,6 +111,7 @@ const get_all_action_from_db = async (req: Request) => {
           },
         },
         site: { select: { name: true, id: true } },
+        ...RESPONSIBLE_INCLUDE,
       },
     }),
     prisma.action.count({ where: whereCondition }),
@@ -85,7 +119,7 @@ const get_all_action_from_db = async (req: Request) => {
 
   return {
     meta: { page, limit, total, totalPage: Math.ceil(total / limit) },
-    data,
+    data: data.map(shapeResponsibleAssignees),
   };
 };
 
@@ -115,10 +149,11 @@ const get_single_action_from_db = async (req: Request) => {
         },
       },
       site: { select: { name: true, id: true } },
+      ...RESPONSIBLE_INCLUDE,
     },
   });
   if (!result) throw new AppError('Action not found', 404);
-  return result;
+  return shapeResponsibleAssignees(result);
 };
 
 const create_action_into_db = async (req: Request) => {
@@ -154,6 +189,26 @@ const create_action_into_db = async (req: Request) => {
     if (!question) throw new AppError('Question not found', 404);
   }
 
+  // Every assignBy id must be a real OrgMember in the caller's own org —
+  // without this, any org could tag an arbitrary orgMemberId from a
+  // completely different org as "responsible" for their finding, the same
+  // IDOR class as the questionId check above. 404s (via
+  // requireOrgScopedMember) before the Action is ever created.
+  //
+  // requireOrgScopedMember filters by the real Organization.id, NOT
+  // ctx.organizationId (that's the anchor Account.id used by legacy
+  // orgAccountId columns -- see requireCallerOrganizationId's own doc
+  // comment). Passing ctx.organizationId here would 404 every legitimate
+  // assignBy id in production, since those two ids are never equal. Only
+  // resolved when actually needed so an ADMIN-of-self account (no real
+  // OrgMember row, the pre-multi-tenant fallback) isn't broken by
+  // requireCallerOrganizationId's 403 on a plain create with no assignees.
+  const assigneeIds: string[] = body.assignBy ?? [];
+  if (assigneeIds.length > 0) {
+    const organizationId = await requireCallerOrganizationId(ctx);
+    await Promise.all(assigneeIds.map((id) => requireOrgScopedMember(id, organizationId)));
+  }
+
   const action = await prisma.action.create({
     data: {
       orgAccountId: ctx.organizationId,
@@ -173,11 +228,14 @@ const create_action_into_db = async (req: Request) => {
             message: msg.message,
           })) || [],
       },
+      responsibleAssignees: {
+        create: assigneeIds.map((orgMemberId) => ({ orgMemberId })),
+      },
     },
-    include: { messages: true },
+    include: { messages: true, ...RESPONSIBLE_INCLUDE },
   });
 
-  return action;
+  return shapeResponsibleAssignees(action);
 };
 
 const update_action_into_db = async (req: Request) => {
@@ -192,6 +250,22 @@ const update_action_into_db = async (req: Request) => {
   // sub-assigned to this specific finding can update it — e.g. mark it
   // IN_PROGRESS/COMPLETE — without gaining any broader inspection access.
   await assertCanWriteToAction(ctx, { id: existing.id, inspectionId: existing.inspectionId });
+
+  // Same org-scope check as create — only run when assignBy is actually
+  // part of this update, same as every other optional field here. See the
+  // matching comment in create_action_into_db for why this resolves the
+  // real Organization.id via requireCallerOrganizationId instead of using
+  // ctx.organizationId directly.
+  if (req.body.assignBy !== undefined) {
+    const assigneeIds: string[] = req.body.assignBy;
+    if (assigneeIds.length > 0) {
+      const organizationId = await requireCallerOrganizationId(ctx);
+      await Promise.all(
+        assigneeIds.map((memberId) => requireOrgScopedMember(memberId, organizationId)),
+      );
+    }
+  }
+
   const result = await prisma.action.update({
     where: { id },
     data: {
@@ -201,9 +275,18 @@ const update_action_into_db = async (req: Request) => {
       ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
       ...(req.body.status !== undefined && { status: req.body.status }),
       ...(req.body.attachments !== undefined && { attachments: req.body.attachments }),
+      // Full replace, not a merge — matches how the frontend's multi-select
+      // submits the complete desired set every time, not a delta.
+      ...(req.body.assignBy !== undefined && {
+        responsibleAssignees: {
+          deleteMany: {},
+          create: (req.body.assignBy as string[]).map((orgMemberId) => ({ orgMemberId })),
+        },
+      }),
     },
+    include: { ...RESPONSIBLE_INCLUDE },
   });
-  return result;
+  return shapeResponsibleAssignees(result);
 };
 
 /**
@@ -743,10 +826,11 @@ const get_single_action_for_external_member = async (req: Request) => {
         },
       },
       site: { select: { name: true, id: true } },
+      ...RESPONSIBLE_INCLUDE,
     },
   });
   if (!result) throw new AppError('Action not found', 404);
-  return result;
+  return shapeResponsibleAssignees(result);
 };
 
 /**
@@ -766,6 +850,11 @@ const update_action_for_external_member = async (req: Request) => {
   await assertCanWriteToActionForExternalMember(externalMember.externalOrgMemberId, {
     id: existing.id,
   });
+  // assignBy deliberately not accepted here — an external Light User can
+  // update the finding they were sub-assigned, not reassign who else is
+  // responsible for it. Still included on the read-back below so the
+  // response shape matches IAction the same as every other endpoint that
+  // returns an Action.
   const result = await prisma.action.update({
     where: { id },
     data: {
@@ -775,8 +864,9 @@ const update_action_for_external_member = async (req: Request) => {
       ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
       ...(req.body.status !== undefined && { status: req.body.status }),
     },
+    include: { ...RESPONSIBLE_INCLUDE },
   });
-  return result;
+  return shapeResponsibleAssignees(result);
 };
 
 export const action_service = {

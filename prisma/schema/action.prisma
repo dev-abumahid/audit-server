@@ -51,6 +51,16 @@ model Action {
     // Slice-1 (#55) prep
     findingAssignments FindingAssignment[]
 
+    // "Assigned Responsible" — who's nominally on the hook for this
+    // finding. Deliberately NOT FindingAssignment: that model is a real
+    // access-control mechanism (Light User sub-assignment, approval-gated,
+    // grants actual authority over the Action — see its own schema
+    // comment). This is a plain informational tag any org member can carry,
+    // set directly on finding creation/edit, no approval, no elevated
+    // access implied. Conflating the two would silently grant real
+    // authority to whoever's tagged here. (#52)
+    responsibleAssignees ActionResponsible[]
+
     @@index([orgAccountId])
 }
 
@@ -73,4 +83,27 @@ model ActionMessage {
     // Date time
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
+}
+
+// A finding's assignee list is submitted as OrgMember ids, not Account ids
+// — confirmed against aexa-frontend's actual GET /organization/members
+// response shape (organization.service.ts's get_org_members_from_db only
+// selects the top-level OrgMember.id, never account.id) and
+// CreateNewFindingModal.tsx's checkbox `value`/`key`, both keyed off
+// `user.id` from that same response. onDelete: Cascade on orgMember is
+// deliberate and safe here — it only removes this join row when a member
+// leaves the org, not the Action itself (that would need onDelete on the
+// `action` relation, which stays Cascade only from Action's own deletion).
+model ActionResponsible {
+    id          String @id @default(uuid())
+    actionId    String
+    orgMemberId String
+
+    createdAt DateTime @default(now())
+
+    action    Action    @relation(fields: [actionId], references: [id], onDelete: Cascade)
+    orgMember OrgMember @relation(fields: [orgMemberId], references: [id], onDelete: Cascade)
+
+    @@unique([actionId, orgMemberId])
+    @@index([orgMemberId])
 }

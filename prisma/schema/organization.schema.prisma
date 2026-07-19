@@ -67,6 +67,7 @@ model OrgMember {
 
     inspectionAssignments        InspectionAssignment[]
     findingAssignmentsAsAssignee FindingAssignment[]    @relation("FindingAssigneeMember")
+    actionResponsibilities       ActionResponsible[]
 
     @@index([organizationId])
 }

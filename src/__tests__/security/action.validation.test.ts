@@ -64,3 +64,76 @@ describe('action_validations.update_action — attachments (partial)', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('action_validations.create_action — assignBy (issue #52)', () => {
+  it('accepts an array of member ids', () => {
+    const result = action_validations.create_action.safeParse({
+      ...BASE,
+      assignBy: ['member-1', 'member-2'],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts an empty array', () => {
+    const result = action_validations.create_action.safeParse({ ...BASE, assignBy: [] });
+    expect(result.success).toBe(true);
+  });
+
+  it('allows omitting assignBy entirely', () => {
+    const result = action_validations.create_action.safeParse(BASE);
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an empty-string id', () => {
+    const result = action_validations.create_action.safeParse({
+      ...BASE,
+      assignBy: [''],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects more than 20 assignees', () => {
+    const result = action_validations.create_action.safeParse({
+      ...BASE,
+      assignBy: Array.from({ length: 21 }, (_, i) => `member-${i}`),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a duplicate id (would otherwise hit the DB unique constraint as a raw 500)', () => {
+    const result = action_validations.create_action.safeParse({
+      ...BASE,
+      assignBy: ['member-1', 'member-1'],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('allows the same id to NOT repeat', () => {
+    const result = action_validations.create_action.safeParse({
+      ...BASE,
+      assignBy: ['member-1', 'member-2'],
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('action_validations.update_action — assignBy (partial, issue #52)', () => {
+  it('accepts assignBy on its own with no other fields', () => {
+    const result = action_validations.update_action.safeParse({ assignBy: ['member-1'] });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects more than 20 assignees on a partial update too', () => {
+    const result = action_validations.update_action.safeParse({
+      assignBy: Array.from({ length: 21 }, (_, i) => `member-${i}`),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a duplicate id on a partial update too', () => {
+    const result = action_validations.update_action.safeParse({
+      assignBy: ['member-1', 'member-1'],
+    });
+    expect(result.success).toBe(false);
+  });
+});

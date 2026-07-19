@@ -50,6 +50,24 @@ const create_action = z.object({
   // independent review.
   attachments: z.array(httpUrl).max(10).optional(),
 
+  // "Assigned Responsible" — a plain informational tag, not access control
+  // (see ActionResponsible's own schema comment for why this is a separate
+  // model from FindingAssignment). OrgMember ids, not Account ids —
+  // confirmed against what aexa-frontend's CreateNewFindingModal.tsx
+  // actually submits. Capped in count for the same reason attachments is:
+  // client-set field, real input-validation boundary. Rejected here (not
+  // silently deduped) if the same id appears twice — ActionResponsible has
+  // a DB-level @@unique([actionId, orgMemberId]), so a duplicate would
+  // otherwise reach Prisma as an unhandled unique-constraint error instead
+  // of a clean 4xx. Found by independent review.
+  assignBy: z
+    .array(z.string().min(1))
+    .max(20)
+    .optional()
+    .refine((ids) => !ids || new Set(ids).size === ids.length, {
+      message: 'assignBy contains duplicate ids',
+    }),
+
   // relation
   messages: z.array(actionMessageSchema).optional(),
 });

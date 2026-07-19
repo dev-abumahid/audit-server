@@ -76,6 +76,25 @@ const externalOrgMemberDb = prisma.externalOrgMember as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 
+// requireCallerOrganizationId needs a real OrgMember row for the caller
+// (ctx.orgMemberId non-null) to resolve the real Organization.id -- the
+// default beforeEach mock (orgMemberDb.findUnique -> null) is the
+// ADMIN-of-self fallback, which has no real Organization to resolve. Used
+// by every assignBy test below that needs the org-scope check to actually
+// run rather than short-circuit on an empty array.
+const REAL_ORG_ID = 'real-org-00000000-0000-0000-0000-000000000099';
+const mockRealOrgMembership = () => {
+  orgMemberDb.findUnique.mockResolvedValue({
+    id: 'caller-member-00000000-0000-0000-0000-000000000099',
+    organizationId: REAL_ORG_ID,
+    accountId: ORG_A,
+    role: 'ADMIN',
+    status: 'ACTIVE',
+    expiresAt: null,
+  });
+  organizationDb.findUnique.mockResolvedValue({ id: REAL_ORG_ID, anchorAccountId: ORG_A });
+};
+
 describe('action service — org scoping (ticket #6)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -105,7 +124,10 @@ describe('action service — org scoping (ticket #6)', () => {
 
       const result = await action_service.get_all_action_from_db(makeReq());
 
-      expect(result.data).toEqual([orgARecord]);
+      // shapeResponsibleAssignees adds assignBy: [] (no responsibleAssignees
+      // in this mock's minimal record) — the org-scoping assertion this test
+      // actually cares about is the second line below.
+      expect(result.data).toEqual([{ ...orgARecord, assignBy: [] }]);
       expect(result.data.every((r: any) => r.orgAccountId === ORG_A)).toBe(true);
     });
 
@@ -159,6 +181,45 @@ describe('action service — org scoping (ticket #6)', () => {
       await expect(
         action_service.get_single_action_from_db(makeReq({ params: { id: 'a1' } })),
       ).resolves.toBeDefined();
+    });
+
+    it('shapes responsibleAssignees into assignBy: {id, name}[] (issue #52)', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'a1',
+        orgAccountId: ORG_A,
+        responsibleAssignees: [
+          {
+            orgMemberId: 'member-1',
+            orgMember: { account: { email: 'a@x.com', profile: { fullName: 'Alice' } } },
+          },
+          {
+            // No profile row -- falls back to email, same pattern already
+            // used for member lists elsewhere in this codebase.
+            orgMemberId: 'member-2',
+            orgMember: { account: { email: 'b@x.com', profile: null } },
+          },
+        ],
+      });
+
+      const result = await action_service.get_single_action_from_db(
+        makeReq({ params: { id: 'a1' } }),
+      );
+
+      expect(result.assignBy).toEqual([
+        { id: 'member-1', name: 'Alice' },
+        { id: 'member-2', name: 'b@x.com' },
+      ]);
+      expect(result).not.toHaveProperty('responsibleAssignees');
+    });
+
+    it('returns an empty assignBy array when no one is assigned', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, responsibleAssignees: [] });
+
+      const result = await action_service.get_single_action_from_db(
+        makeReq({ params: { id: 'a1' } }),
+      );
+
+      expect(result.assignBy).toEqual([]);
     });
   });
 
@@ -300,6 +361,74 @@ describe('action service — org scoping (ticket #6)', () => {
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.attachments).toEqual([]);
     });
+
+    it('creates responsibleAssignees rows for valid assignBy ids (issue #52)', async () => {
+      mockRealOrgMembership();
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      orgMemberDb.findFirst = vi
+        .fn()
+        .mockResolvedValue({ id: 'member-1', organizationId: REAL_ORG_ID });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({
+          body: { inspectionId: 'insp-1', title: 'Assigned', assignBy: ['member-1'] },
+        }),
+      );
+
+      // The real Organization.id, NOT ctx.organizationId (ORG_A, the anchor
+      // Account.id) -- passing the wrong one here 404s every legitimate
+      // assignBy id in production (found by independent review).
+      expect(orgMemberDb.findFirst).toHaveBeenCalledWith({
+        where: { id: 'member-1', organizationId: REAL_ORG_ID },
+      });
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.responsibleAssignees).toEqual({
+        create: [{ orgMemberId: 'member-1' }],
+      });
+    });
+
+    it('throws 404 and does NOT create when an assignBy id belongs to another org (issue #52)', async () => {
+      mockRealOrgMembership();
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      // Org-B's member -- findFirst scoped to the caller's real org finds nothing.
+      orgMemberDb.findFirst = vi.fn().mockResolvedValue(null);
+
+      await expect(
+        action_service.create_action_into_db(
+          makeReq({
+            body: { inspectionId: 'insp-1', title: 'IDOR attempt', assignBy: ['org-b-member'] },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('defaults responsibleAssignees to an empty create list when assignBy is not provided', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'No assignee' } }),
+      );
+
+      expect(orgMemberDb.findFirst).not.toHaveBeenCalled();
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.responsibleAssignees).toEqual({ create: [] });
+    });
   });
 
   // ── update ────────────────────────────────────────────────────────────────
@@ -350,6 +479,67 @@ describe('action service — org scoping (ticket #6)', () => {
 
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data).not.toHaveProperty('attachments');
+    });
+
+    it('replaces responsibleAssignees (delete + recreate) when assignBy is provided (issue #52)', async () => {
+      mockRealOrgMembership();
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      orgMemberDb.findFirst = vi
+        .fn()
+        .mockResolvedValue({ id: 'member-2', organizationId: REAL_ORG_ID });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { assignBy: ['member-2'] } }),
+      );
+
+      expect(orgMemberDb.findFirst).toHaveBeenCalledWith({
+        where: { id: 'member-2', organizationId: REAL_ORG_ID },
+      });
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.responsibleAssignees).toEqual({
+        deleteMany: {},
+        create: [{ orgMemberId: 'member-2' }],
+      });
+    });
+
+    it('clears all assignees when assignBy is an empty array (not the same as omitted)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { assignBy: [] } }),
+      );
+
+      expect(orgMemberDb.findFirst).not.toHaveBeenCalled();
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.responsibleAssignees).toEqual({ deleteMany: {}, create: [] });
+    });
+
+    it('leaves responsibleAssignees untouched when assignBy is not provided at all', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { actionTitle: 'Renamed' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('responsibleAssignees');
+    });
+
+    it('throws 404 and does NOT update when a new assignBy id belongs to another org (issue #52)', async () => {
+      mockRealOrgMembership();
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      orgMemberDb.findFirst = vi.fn().mockResolvedValue(null);
+
+      await expect(
+        action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { assignBy: ['org-b-member'] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
     });
   });
 
