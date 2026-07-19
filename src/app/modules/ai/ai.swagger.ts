@@ -171,4 +171,29 @@ export const aiSwaggerDocs = {
       },
     },
   },
+  '/api/ai/check-upload-file-status/{fileId}': {
+    get: {
+      tags: ['AI Routes'],
+      summary: 'Check uploaded file status',
+      description: '',
+      parameters: [
+        {
+          name: 'fileId',
+          in: 'path',
+          required: true,
+          schema: {
+            type: 'string',
+          },
+        },
+      ],
+      responses: {
+        200: {
+          description: 'File Status fetch successful',
+        },
+        500: {
+          description: 'Validation error or internal server error',
+        },
+      },
+    },
+  },
 };

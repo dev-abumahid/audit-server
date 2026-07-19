@@ -429,19 +429,19 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
 const check_upload_file_status_from_ai = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  const { id } = req.params as { id: string };
+  const { fileId } = req.params as { fileId: string };
 
   // fileId (not the PineconeDocument's own id) is what aexa-ai's job store
   // is keyed on — org-scoped lookup so a caller can't poll another org's
   // upload status by guessing/enumerating file ids.
   const document = await prisma.pineconeDocument.findFirst({
-    where: { fileId: id, orgAccountId: ctx.organizationId },
+    where: { fileId: fileId, orgAccountId: ctx.organizationId },
   });
   if (!document) {
     throw new AppError('Upload not found', 404);
   }
 
-  const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-status/${id}`, {
+  const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-status/${fileId}`, {
     headers: AI_INTERNAL_SECRET_HEADER,
   });
   if (aiResponse.status === 404) {

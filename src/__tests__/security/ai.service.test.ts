@@ -446,7 +446,7 @@ describe('ai service — check_upload_file_status_from_ai (issue #35)', () => {
     pineconeDb.findFirst.mockResolvedValue(null);
 
     await expect(
-      ai_service.check_upload_file_status_from_ai(makeReq({ params: { id: 'org-b-file' } })),
+      ai_service.check_upload_file_status_from_ai(makeReq({ params: { fileId: 'org-b-file' } })),
     ).rejects.toMatchObject({ statusCode: 404 });
 
     expect(pineconeDb.findFirst).toHaveBeenCalledWith({
@@ -464,9 +464,21 @@ describe('ai service — check_upload_file_status_from_ai (issue #35)', () => {
     });
 
     const result = await ai_service.check_upload_file_status_from_ai(
-      makeReq({ params: { id: 'file-1' } }),
+      makeReq({ params: { fileId: 'file-1' } }),
     );
 
+    // Asserting the actual call args, not just that the mocks resolved --
+    // both mocks resolve unconditionally regardless of input, so without
+    // these the test would still pass even if `fileId` came through as
+    // undefined (e.g. the :id -> :fileId param rename regressing). Found
+    // by independent review.
+    expect(pineconeDb.findFirst).toHaveBeenCalledWith({
+      where: { fileId: 'file-1', orgAccountId: ORG_A },
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/upload-status/file-1'),
+      expect.anything(),
+    );
     expect(result).toEqual({ status: 'completed', message: 'file.pdf uploaded' });
   });
 
@@ -475,7 +487,12 @@ describe('ai service — check_upload_file_status_from_ai (issue #35)', () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500 });
 
     await expect(
-      ai_service.check_upload_file_status_from_ai(makeReq({ params: { id: 'file-1' } })),
+      ai_service.check_upload_file_status_from_ai(makeReq({ params: { fileId: 'file-1' } })),
     ).rejects.toMatchObject({ statusCode: 502 });
+
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/upload-status/file-1'),
+      expect.anything(),
+    );
   });
 });
