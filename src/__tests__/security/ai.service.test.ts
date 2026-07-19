@@ -407,6 +407,31 @@ describe('ai service — Pinecone delete upstream-failure handling (issue #55 fo
 
     expect(pineconeDb.deleteMany).toHaveBeenCalled();
   });
+
+  it('still deletes the local record when aexa-ai reports no matching vectors (404, issue #30)', async () => {
+    // A 404 here means aexa-ai genuinely found nothing to delete, not that
+    // the service call itself failed -- the desired end state (no vector,
+    // no local record) already holds, so this should NOT be treated the
+    // same as the 500 case above.
+    mockMembership('ADMIN');
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 404 });
+    pineconeDb.deleteMany.mockResolvedValue({ count: 1 });
+
+    await ai_service.delete_pinecone_data_from_database(makeReq({ query: { fileName: 'a.pdf' } }));
+
+    expect(pineconeDb.deleteMany).toHaveBeenCalled();
+  });
+
+  it('still does NOT delete the local record for a genuine non-404 failure', async () => {
+    mockMembership('ADMIN');
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 503 });
+
+    await expect(
+      ai_service.delete_pinecone_data_from_database(makeReq({ query: { fileName: 'a.pdf' } })),
+    ).rejects.toMatchObject({ statusCode: 502 });
+
+    expect(pineconeDb.deleteMany).not.toHaveBeenCalled();
+  });
 });
 
 describe('ai service — check_upload_file_status_from_ai (issue #35)', () => {

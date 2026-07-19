@@ -485,7 +485,12 @@ const delete_pinecone_data_from_database = async (req: Request) => {
   // failed upstream delete (network blip, secret mismatch, file already
   // gone) with no error surfaced to the caller. Found by independent
   // review.
-  if (!aiResponse.ok) {
+  //
+  // 404 specifically means aexa-ai found no vectors matching this file
+  // (aexa-ai#30) -- not a service failure. The desired end state (no
+  // vector, no local record) is already true, so this falls through to
+  // the same local cleanup as a genuine deletion instead of aborting it.
+  if (!aiResponse.ok && aiResponse.status !== 404) {
     throw new AppError(`AI service error: ${aiResponse.status}`, 502);
   }
 
