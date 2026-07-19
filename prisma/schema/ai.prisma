@@ -12,6 +12,8 @@ model PineconeDocument {
     orgAccountId String
     account      Account  @relation(fields: [orgAccountId], references: [id])
     createdAt    DateTime @default(now())
+
+    @@index([orgAccountId])
 }
 
 // Completion signal for async aexa-ai work (currently: PDF-to-Pinecone
