@@ -93,10 +93,18 @@ const assign_light_user = z
 export type ActionInput = z.infer<typeof create_action>;
 export type ActionMessageInput = z.infer<typeof actionMessageSchema>;
 
+const update_action_messages = z.object({
+  // .min(1) to match actionMessageSchema's convention for the same
+  // conceptual field -- without it an empty string passes validation and
+  // creates an empty message row. Found by independent review.
+  message: z.string('Message text is required!').min(1),
+});
+
 // Export
 export const action_validations = {
   create_action,
   update_action,
   actionMessageSchema,
   assign_light_user,
+  update_action_messages,
 };

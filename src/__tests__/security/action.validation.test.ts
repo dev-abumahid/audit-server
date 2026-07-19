@@ -137,3 +137,22 @@ describe('action_validations.update_action — assignBy (partial, issue #52)', (
     expect(result.success).toBe(false);
   });
 });
+
+describe('action_validations.update_action_messages (issue #51)', () => {
+  it('accepts a non-empty message', () => {
+    const result = action_validations.update_action_messages.safeParse({
+      message: 'Hi there',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an empty message (matches actionMessageSchema's .min(1) convention)", () => {
+    const result = action_validations.update_action_messages.safeParse({ message: '' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a missing message', () => {
+    const result = action_validations.update_action_messages.safeParse({});
+    expect(result.success).toBe(false);
+  });
+});

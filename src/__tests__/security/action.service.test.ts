@@ -543,6 +543,69 @@ describe('action service — org scoping (ticket #6)', () => {
     });
   });
 
+  // ── update messages ──────────────────────────────────────────────────────
+  describe('update_action_messages_into_db (issue #51)', () => {
+    it('verifies ownership before adding a message', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, inspectionId: 'insp-1' });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_messages_into_db(
+        makeReq({ params: { id: 'a1' }, body: { message: 'Hi there' } }),
+      );
+
+      expect(db.findFirst).toHaveBeenCalledWith({ where: { id: 'a1', orgAccountId: ORG_A } });
+      expect(db.update).toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT create a message when the action belongs to another org', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.update_action_messages_into_db(
+          makeReq({ params: { id: 'org-b-action' }, body: { message: 'IDOR attempt' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('creates the message with the authenticated caller as sender, not a client-supplied value', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, inspectionId: 'insp-1' });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_messages_into_db(
+        makeReq({
+          params: { id: 'a1' },
+          body: { message: 'Hi there', senderAccountId: 'someone-else' },
+        }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.messages.create).toEqual({
+        senderAccountId: ORG_A,
+        message: 'Hi there',
+      });
+    });
+
+    it('returns the updated messages list, not just responsibleAssignees', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, inspectionId: 'insp-1' });
+      db.update.mockResolvedValue({
+        id: 'a1',
+        messages: [{ id: 'msg-1', message: 'Hi there', senderAccountId: ORG_A }],
+      });
+
+      const result = await action_service.update_action_messages_into_db(
+        makeReq({ params: { id: 'a1' }, body: { message: 'Hi there' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.include).toMatchObject({ messages: expect.anything() });
+      expect(result.messages).toEqual([
+        { id: 'msg-1', message: 'Hi there', senderAccountId: ORG_A },
+      ]);
+    });
+  });
+
   // ── attachment upload ────────────────────────────────────────────────────
   describe('upload_action_attachment_into_aws', () => {
     beforeEach(() => {

@@ -28,6 +28,12 @@ router.patch(
   RequestValidator(action_validations.update_action),
   action_controller.update_action,
 );
+router.put(
+  '/:id',
+  auth('ORGANIZATION'),
+  RequestValidator(action_validations.update_action_messages),
+  action_controller.update_action_messages,
+);
 router.delete('/:id', auth('ORGANIZATION'), action_controller.delete_action);
 
 // Slice 4 (#55): sub-assign one finding to an internal Light User member.

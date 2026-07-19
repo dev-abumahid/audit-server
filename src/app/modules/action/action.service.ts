@@ -33,13 +33,43 @@ const RESPONSIBLE_INCLUDE = {
   },
 } satisfies Prisma.ActionInclude;
 
+// Was duplicated identically across get_all_action_from_db,
+// get_single_action_from_db, and get_single_action_for_external_member —
+// extracted once a 4th call site (update_action_messages_into_db) needed
+// the same shape. Found by independent review.
+const MESSAGES_INCLUDE = {
+  messages: {
+    select: {
+      id: true,
+      message: true,
+      senderAccountId: true,
+      createdAt: true,
+      updatedAt: true,
+      account: {
+        select: {
+          profile: { select: { fullName: true, profilePhoto: true } },
+          organizationProfile: {
+            select: { organizationName: true, organizationLogo: true },
+          },
+        },
+      },
+    },
+  },
+} satisfies Prisma.ActionInclude;
+
 type ActionWithResponsibles = Prisma.ActionGetPayload<{ include: typeof RESPONSIBLE_INCLUDE }>;
 
 // aexa-frontend's IAction.assignBy is TAssignBy[] ({id, name}) — id is the
 // OrgMember id (see ActionResponsible's schema comment for why), name falls
 // back to email when no profile fullName is set, matching how member lists
 // are already displayed elsewhere (organization.service.ts).
-const shapeResponsibleAssignees = (action: ActionWithResponsibles) => {
+//
+// Generic so callers that also include messages/site (get_single_action_from_db
+// etc.) get those fields preserved in the return type -- a non-generic
+// parameter type here would silently narrow them away even though they're
+// genuinely present on the runtime object, same class of gap as issue #52's
+// original assignBy bug. Found by independent review.
+const shapeResponsibleAssignees = <T extends ActionWithResponsibles>(action: T) => {
   const { responsibleAssignees, ...rest } = action;
   return {
     ...rest,
@@ -93,23 +123,7 @@ const get_all_action_from_db = async (req: Request) => {
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: {
-        messages: {
-          select: {
-            id: true,
-            message: true,
-            senderAccountId: true,
-            createdAt: true,
-            updatedAt: true,
-            account: {
-              select: {
-                profile: { select: { fullName: true, profilePhoto: true } },
-                organizationProfile: {
-                  select: { organizationName: true, organizationLogo: true },
-                },
-              },
-            },
-          },
-        },
+        ...MESSAGES_INCLUDE,
         site: { select: { name: true, id: true } },
         ...RESPONSIBLE_INCLUDE,
       },
@@ -131,23 +145,7 @@ const get_single_action_from_db = async (req: Request) => {
   const result = await prisma.action.findFirst({
     where: whereCondition,
     include: {
-      messages: {
-        select: {
-          id: true,
-          message: true,
-          senderAccountId: true,
-          createdAt: true,
-          updatedAt: true,
-          account: {
-            select: {
-              profile: { select: { fullName: true, profilePhoto: true } },
-              organizationProfile: {
-                select: { organizationName: true, organizationLogo: true },
-              },
-            },
-          },
-        },
-      },
+      ...MESSAGES_INCLUDE,
       site: { select: { name: true, id: true } },
       ...RESPONSIBLE_INCLUDE,
     },
@@ -808,23 +806,7 @@ const get_single_action_for_external_member = async (req: Request) => {
   const result = await prisma.action.findFirst({
     where: { id, orgAccountId: externalMember.organizationId },
     include: {
-      messages: {
-        select: {
-          id: true,
-          message: true,
-          senderAccountId: true,
-          createdAt: true,
-          updatedAt: true,
-          account: {
-            select: {
-              profile: { select: { fullName: true, profilePhoto: true } },
-              organizationProfile: {
-                select: { organizationName: true, organizationLogo: true },
-              },
-            },
-          },
-        },
-      },
+      ...MESSAGES_INCLUDE,
       site: { select: { name: true, id: true } },
       ...RESPONSIBLE_INCLUDE,
     },
@@ -869,6 +851,38 @@ const update_action_for_external_member = async (req: Request) => {
   return shapeResponsibleAssignees(result);
 };
 
+// update specific action messages
+const update_action_messages_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id } = req.params as Record<string, string>;
+  const existing = await prisma.action.findFirst({
+    where: { id, orgAccountId: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Action not found', 404);
+  await assertCanWriteToAction(ctx, { id: existing.id, inspectionId: existing.inspectionId });
+
+  const result = await prisma.action.update({
+    where: { id },
+    data: {
+      ...(req?.body?.message !== undefined && {
+        messages: {
+          create: {
+            senderAccountId: user.accountId,
+            message: req?.body?.message,
+          },
+        },
+      }),
+    },
+    // Returns the updated messages list (not just responsibleAssignees) --
+    // this endpoint's whole purpose is adding a message, so the caller
+    // needs to see it without a separate refetch. Found by independent
+    // review.
+    include: { ...MESSAGES_INCLUDE, ...RESPONSIBLE_INCLUDE },
+  });
+  return shapeResponsibleAssignees(result);
+};
+
 export const action_service = {
   get_all_action_from_db,
   get_single_action_from_db,
@@ -886,4 +900,5 @@ export const action_service = {
   get_my_finding_assignments_external,
   get_single_action_for_external_member,
   update_action_for_external_member,
+  update_action_messages_into_db,
 };

@@ -178,6 +178,17 @@ const update_action_external = catchAsync(async (req, res) => {
   });
 });
 
+const update_action_messages = catchAsync(async (req, res) => {
+  const result = await action_service.update_action_messages_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'action message update successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const action_controller = {
   get_all_action,
   get_single_action,
@@ -195,4 +206,5 @@ export const action_controller = {
   get_my_finding_assignments_external,
   get_single_action_external,
   update_action_external,
+  update_action_messages,
 };
