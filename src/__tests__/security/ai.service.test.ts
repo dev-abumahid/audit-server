@@ -129,6 +129,83 @@ describe('ai service — AI response error handling', () => {
 
       expect(db.recommendation.create).not.toHaveBeenCalled();
     });
+
+    // Issue #130 — fetch-then-check existence oracle. The org filter must be
+    // part of the findFirst `where` itself (not a post-fetch ownership
+    // check), and a cross-org id must be indistinguishable from a genuinely
+    // nonexistent one: both 404 with the same message, never 403.
+    it('scopes the inspection lookup by org in the query itself', async () => {
+      db.inspection.findFirst.mockResolvedValue(null);
+
+      await expect(
+        ai_service.generate_recommendation_with_inspection_from_ai(
+          makeReq({ body: { inspectionId: 'org-b-inspection' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.inspection.findFirst).toHaveBeenCalledWith({
+        where: { id: 'org-b-inspection', orgAccountId: ORG_A },
+        include: {
+          questionAnswers: {
+            include: {
+              question: {
+                select: {
+                  question: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('returns an identical 404 for a cross-org inspection id and a genuinely nonexistent id (no existence oracle)', async () => {
+      db.inspection.findFirst.mockResolvedValue(null);
+
+      const crossOrgResult = await ai_service
+        .generate_recommendation_with_inspection_from_ai(
+          makeReq({ body: { inspectionId: 'org-b-inspection' } }),
+        )
+        .catch((error) => error);
+
+      const nonexistentResult = await ai_service
+        .generate_recommendation_with_inspection_from_ai(
+          makeReq({ body: { inspectionId: 'does-not-exist' } }),
+        )
+        .catch((error) => error);
+
+      expect(crossOrgResult).toMatchObject({ statusCode: 404, message: 'Inspection not found' });
+      expect(nonexistentResult).toMatchObject({
+        statusCode: 404,
+        message: 'Inspection not found',
+      });
+      expect(crossOrgResult.statusCode).toBe(nonexistentResult.statusCode);
+      expect(crossOrgResult.message).toBe(nonexistentResult.message);
+    });
+
+    it('does not leak the recommendation-already-exists 400 as a way to distinguish an org-owned inspection from a cross-org one', async () => {
+      // Sanity check the happy path still finds the inspection when it IS
+      // in the caller's org, so the 404 tests above are actually exercising
+      // the org filter and not a universally-null mock.
+      db.inspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        orgAccountId: ORG_A,
+        questionAnswers: [],
+      });
+      db.recommendation.findFirst.mockResolvedValue({ id: 'rec-1' });
+
+      await expect(
+        ai_service.generate_recommendation_with_inspection_from_ai(
+          makeReq({ body: { inspectionId: 'insp-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(db.inspection.findFirst).toHaveBeenCalledWith({
+        where: { id: 'insp-1', orgAccountId: ORG_A },
+        include: expect.anything(),
+      });
+    });
   });
 
   describe('upload_pdf_into_pinecone_via_ai', () => {

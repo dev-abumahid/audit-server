@@ -252,10 +252,15 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
   const ctx = await resolveCallerOrgContext(user.accountId);
   const inspectionId = req?.body?.inspectionId as string;
 
-  // check inspection exist or not
+  // check inspection exist or not — org filter is part of the query itself
+  // (not a post-fetch check) so a cross-org id and a genuinely nonexistent
+  // id are indistinguishable to the caller: both 404, no existence oracle.
+  // Same shape as the fixed IDORs in inspection.service.ts's
+  // update_inspection_into_db / delete_inspection_from_db.
   const isInspectionExist = await prisma.inspection.findFirst({
     where: {
       id: inspectionId,
+      orgAccountId: ctx.organizationId,
     },
     include: {
       questionAnswers: {
@@ -271,10 +276,7 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
   });
 
   if (!isInspectionExist) {
-    throw new AppError('Inspection Not found !!', 404);
-  }
-  if (isInspectionExist.orgAccountId !== ctx.organizationId) {
-    throw new AppError('You are not authorized to access this inspection !!', 403);
+    throw new AppError('Inspection not found', 404);
   }
   await assertCanWriteToInspection(ctx, inspectionId);
 
