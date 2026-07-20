@@ -53,6 +53,7 @@ accountRouter.put(
 );
 accountRouter.put(
   '/verify-link',
+  sensitiveAuthLimiter,
   RequestValidator(account_validation.verify_link),
   account_controller.verify_account_using_link,
 );

@@ -13,10 +13,11 @@ import { describe, expect, it } from 'vitest';
  *   app.ts:           app.use('/api', apiLimiter)              — 300/15min, all API traffic
  *   account.route.ts: POST /sign-up, /sign-in,
  *                      PUT /verify-otp, /resend-otp,
- *                      /forget-password, /reset-password        — sensitiveAuthLimiter, 10/15min
+ *                      /forget-password, /reset-password,
+ *                      /verify-link                             — sensitiveAuthLimiter, 10/15min
  *                      GET /me                                  — sessionCheckLimiter, 500/15min
  *                      GET /social-providers                    — socialProvidersLimiter, 500/15min
- *                      PUT /verify-link, /change-password        — no auth-specific limiter
+ *                      PUT /change-password                     — no auth-specific limiter
  *
  * Every account route still sits under apiLimiter too (mounted broadly on
  * /api in app.ts), so sensitive routes are double-counted: the tight
@@ -75,12 +76,14 @@ function buildApp({
   app.put('/api/auth/verify-otp', sensitiveAuthLimiter, (_req, res) =>
     res.status(200).json({ ok: true }),
   );
+  app.put('/api/auth/verify-link', sensitiveAuthLimiter, (_req, res) =>
+    res.status(200).json({ ok: true }),
+  );
   app.get('/api/auth/me', sessionCheckLimiter, (_req, res) => res.status(200).json({ ok: true }));
   app.get('/api/auth/social-providers', socialProvidersLimiter, (_req, res) =>
     res.status(200).json({ ok: true }),
   );
-  // No auth-specific limiter on these two — only the broad apiLimiter applies
-  app.put('/api/auth/verify-link', (_req, res) => res.status(200).json({ ok: true }));
+  // No auth-specific limiter here — only the broad apiLimiter applies
   app.put('/api/auth/change-password', (_req, res) => res.status(200).json({ ok: true }));
 
   return app;
@@ -101,10 +104,11 @@ describe('rate limiter config shape (mirrors app.ts + account.route.ts)', () => 
 
   it('shares one sensitive-auth budget across all sensitive routes (sign-in + OTP together)', async () => {
     // account.route.ts declares sensitiveAuthLimiter ONCE and reuses that same
-    // instance as middleware on sign-up/sign-in/verify-otp/resend-otp/forget-password/
-    // reset-password — so attempts across different sensitive endpoints share one
-    // counter. This is the correct anti-brute-force design (an attacker can't reset
-    // their budget by switching endpoints), not a bug — this test locks it in.
+    // instance as middleware on sign-up/sign-in/verify-otp/verify-link/resend-otp/
+    // forget-password/reset-password — so attempts across different sensitive
+    // endpoints share one counter. This is the correct anti-brute-force design
+    // (an attacker can't reset their budget by switching endpoints), not a bug —
+    // this test locks it in.
     const app = buildApp({ apiMax: 100, sessionMax: 100 });
 
     for (let i = 0; i < 6; i++) {
@@ -116,9 +120,26 @@ describe('rate limiter config shape (mirrors app.ts + account.route.ts)', () => 
     // Budget of 10 now exhausted across both routes combined
     const signInBlocked = await request(app).post('/api/auth/sign-in');
     const otpBlocked = await request(app).put('/api/auth/verify-otp');
+    const verifyLinkBlocked = await request(app).put('/api/auth/verify-link');
 
     expect(signInBlocked.status).toBe(429);
     expect(otpBlocked.status).toBe(429);
+    expect(verifyLinkBlocked.status).toBe(429);
+  });
+
+  it('rate-limits /verify-link under the sensitive-auth limiter (regression test for #110)', async () => {
+    // /verify-link consumes real credential-adjacent tokens (email verification
+    // links) — it must sit under sensitiveAuthLimiter like the other auth routes,
+    // not rely solely on the broad apiLimiter.
+    const app = buildApp({ apiMax: 100, sessionMax: 100 });
+
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).put('/api/auth/verify-link');
+      expect(res.status).toBe(200);
+    }
+    const eleventh = await request(app).put('/api/auth/verify-link');
+    expect(eleventh.status).toBe(429);
+    expect(eleventh.body.message).toMatch(/too many attempts/i);
   });
 
   it('does not rate-limit /me under the sensitive-auth limiter', async () => {
@@ -163,13 +184,13 @@ describe('rate limiter config shape (mirrors app.ts + account.route.ts)', () => 
   });
 
   it('routes with no auth-specific limiter still fall under the broad apiLimiter', async () => {
-    // verify-link and change-password have no per-route limiter in account.route.ts —
-    // apiLimiter (mounted on all of /api in app.ts) is the only thing protecting them.
+    // change-password has no per-route limiter in account.route.ts —
+    // apiLimiter (mounted on all of /api in app.ts) is the only thing protecting it.
     const app = buildApp({ apiMax: 2, sessionMax: 100 });
 
-    await request(app).put('/api/auth/verify-link');
     await request(app).put('/api/auth/change-password');
-    const thirdRes = await request(app).put('/api/auth/verify-link');
+    await request(app).get('/api/auth/me');
+    const thirdRes = await request(app).put('/api/auth/change-password');
 
     expect(thirdRes.status).toBe(429);
   });
