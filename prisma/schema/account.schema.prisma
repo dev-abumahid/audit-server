@@ -33,6 +33,7 @@ model Account {
     risks               Risk[]
     inspections         Inspection[]
     recommendations     Recommendation[]
+    templates           Template[]
     actionMessages      ActionMessage[]
     actions             Action[]
     pineconeDocuments   PineconeDocument[]

@@ -10,7 +10,8 @@ model Template {
     access      TemplateAccess[]
     inspections Inspection[]
 
-    risk Risk? @relation(fields: [riskId], references: [id], onDelete: Cascade)
+    account Account @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
+    risk    Risk?   @relation(fields: [riskId], references: [id], onDelete: Cascade)
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
