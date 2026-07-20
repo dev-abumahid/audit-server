@@ -78,8 +78,8 @@ const get_all_pinecone_data = catchAsync(async (req, res) => {
     success: true,
     statusCode: 200,
     message: 'Pinecone data fetched successfully.',
-    data: result,
-    meta: {},
+    data: result.data,
+    meta: result.meta,
   });
 });
 const delete_pinecone_data = catchAsync(async (req, res) => {

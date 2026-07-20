@@ -15,6 +15,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findMany: vi.fn(),
       deleteMany: vi.fn(),
       findFirst: vi.fn(),
+      count: vi.fn(),
     },
     risk: { findUnique: vi.fn() },
     site: { findUnique: vi.fn() },
@@ -536,6 +537,57 @@ describe('ai service — Pinecone delete upstream-failure handling (issue #55 fo
     expect(pineconeDb.deleteMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ fileName: trickyFileName }) }),
     );
+  });
+});
+
+describe('ai service — get_all_pinecone_data_from_database (issue #132)', () => {
+  const pineconeDb = prisma.pineconeDocument as unknown as Record<string, ReturnType<typeof vi.fn>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  it('filters findMany and count by caller org', async () => {
+    pineconeDb.findMany.mockResolvedValue([]);
+    pineconeDb.count.mockResolvedValue(0);
+
+    await ai_service.get_all_pinecone_data_from_database(makeReq());
+
+    const [findManyArg] = pineconeDb.findMany.mock.calls[0];
+    expect(findManyArg.where).toMatchObject({ orgAccountId: ORG_A });
+    const [countArg] = pineconeDb.count.mock.calls[0];
+    expect(countArg.where).toMatchObject({ orgAccountId: ORG_A });
+  });
+
+  // Was an unconditional findMany with no skip/take, unlike every other
+  // list endpoint in this codebase (note/template/recommendation all
+  // paginate) — an org with many uploaded documents got an unbounded
+  // response. See issue #132.
+  it('paginates results', async () => {
+    pineconeDb.findMany.mockResolvedValue([]);
+    pineconeDb.count.mockResolvedValue(25);
+
+    const result = await ai_service.get_all_pinecone_data_from_database(
+      makeReq({ query: { page: '2', limit: '10' } }),
+    );
+
+    const [findManyArg] = pineconeDb.findMany.mock.calls[0];
+    expect(findManyArg.skip).toBe(10);
+    expect(findManyArg.take).toBe(10);
+    expect(result.meta).toEqual({ page: 2, limit: 10, skip: 10, total: 25, totalPage: 3 });
+  });
+
+  it('defaults to page 1, limit 10 when no query params are given', async () => {
+    pineconeDb.findMany.mockResolvedValue([]);
+    pineconeDb.count.mockResolvedValue(3);
+
+    const result = await ai_service.get_all_pinecone_data_from_database(makeReq());
+
+    const [findManyArg] = pineconeDb.findMany.mock.calls[0];
+    expect(findManyArg.skip).toBe(0);
+    expect(findManyArg.take).toBe(10);
+    expect(result.meta).toEqual({ page: 1, limit: 10, skip: 0, total: 3, totalPage: 1 });
   });
 });
 

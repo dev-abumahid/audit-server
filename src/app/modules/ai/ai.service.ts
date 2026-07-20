@@ -9,6 +9,7 @@ import {
   assertCanWriteToInspection,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { recommendation_validations } from '../recommendation/recommendation.validation.js';
 import { mapTemplateData } from '../template/template.utils.js';
 import { template_validations } from '../template/template.validation.js';
@@ -465,12 +466,33 @@ const check_upload_file_status_from_ai = async (req: Request) => {
 const get_all_pinecone_data_from_database = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  const data = await prisma.pineconeDocument.findMany({
-    where: {
-      orgAccountId: ctx.organizationId,
-    },
+  const whereCondition = { orgAccountId: ctx.organizationId };
+
+  // Was an unconditional findMany with no limit, unlike every other list
+  // endpoint in this codebase (see note/template/recommendation list
+  // endpoints) — an org with many uploaded documents got an unbounded
+  // response. See issue #132.
+  const pagination = paginationHelper({
+    page: req.query.page as string,
+    limit: req.query.limit as string,
   });
-  return data;
+  const [data, total] = await Promise.all([
+    prisma.pineconeDocument.findMany({
+      where: whereCondition,
+      skip: pagination.skip,
+      take: pagination.limit,
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.pineconeDocument.count({ where: whereCondition }),
+  ]);
+
+  return {
+    data,
+    meta: {
+      ...buildPaginationMeta(pagination, total),
+      totalPage: Math.ceil(total / pagination.limit),
+    },
+  };
 };
 const delete_pinecone_data_from_database = async (req: Request) => {
   const user = req.user as JwtPayloadType;

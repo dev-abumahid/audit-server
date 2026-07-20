@@ -136,6 +136,20 @@ export const aiSwaggerDocs = {
       tags: ['AI Routes'],
       summary: 'Get all files from pinecone',
       description: '',
+      parameters: [
+        {
+          name: 'page',
+          in: 'query',
+          required: false,
+          schema: { type: 'number' },
+        },
+        {
+          name: 'limit',
+          in: 'query',
+          required: false,
+          schema: { type: 'number' },
+        },
+      ],
       responses: {
         201: {
           description: 'PDF uploaded successfully',
