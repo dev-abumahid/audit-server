@@ -478,8 +478,17 @@ const delete_pinecone_data_from_database = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const fileName = req.query.fileName as string;
 
+  // file_name comes straight from the query string and can contain
+  // characters (&, =, #, spaces, unicode) that would otherwise get
+  // misparsed by aexa-ai or truncate/merge with organization_username.
+  // URLSearchParams encodes both values consistently. (#131)
+  const deleteParams = new URLSearchParams({
+    file_name: fileName,
+    organization_username: ctx.organizationId,
+  });
+
   const aiResponse = await fetch(
-    `${configs.ai_server_end_point}/delete-vectors-by-filename?file_name=${fileName}&organization_username=${ctx.organizationId}`,
+    `${configs.ai_server_end_point}/delete-vectors-by-filename?${deleteParams.toString()}`,
     {
       method: 'DELETE',
       headers: {
