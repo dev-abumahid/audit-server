@@ -2,6 +2,7 @@ import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import RequestValidator from '../../middlewares/request_validator.js';
 import uploader from '../../middlewares/uploader.js';
+import { AppError } from '../../utils/app_error.js';
 import { template_controller } from './template.controller.js';
 import { template_validations } from './template.validation.js';
 
@@ -13,7 +14,11 @@ router.post(
   auth('ORGANIZATION'),
   uploader.single('file'),
   (req, res, next) => {
-    req.body = JSON.parse(req?.body?.data);
+    try {
+      req.body = JSON.parse(req?.body?.data);
+    } catch {
+      return next(new AppError('Invalid JSON in request body', 400));
+    }
     next();
   },
   RequestValidator(template_validations.create_template),
@@ -65,7 +70,11 @@ router.patch(
   auth('ORGANIZATION'),
   uploader.single('file'),
   (req, res, next) => {
-    req.body = JSON.parse(req?.body?.data);
+    try {
+      req.body = JSON.parse(req?.body?.data);
+    } catch {
+      return next(new AppError('Invalid JSON in request body', 400));
+    }
     next();
   },
   RequestValidator(template_validations.update_template),
