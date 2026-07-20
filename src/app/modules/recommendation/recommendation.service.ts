@@ -43,10 +43,7 @@ const get_all_recommendation_from_db = async (req: Request) => {
 
   return {
     data,
-    meta: {
-      ...buildPaginationMeta(pagination, total),
-      totalPage: Math.ceil(total / pagination.limit),
-    },
+    meta: buildPaginationMeta(pagination, total),
   };
 };
 

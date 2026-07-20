@@ -119,6 +119,41 @@ describe('site service — org scoping (ticket #6)', () => {
       const [callArg] = db.findMany.mock.calls[0];
       expect(callArg.where).toMatchObject({ org_account_id: ORG_A });
     });
+
+    // Qiyrix/aexa-server#115 — meta was missing totalPage entirely, unlike
+    // every other list endpoint (action/inspection/risk). Now built via the
+    // shared paginationHelper/buildPaginationMeta pair.
+    it('includes totalPage in meta, computed via the shared pagination helper', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(23);
+
+      const result = await site_service.get_all_site_from_db(
+        makeReq({ query: { page: '2', limit: '10' } }),
+      );
+
+      expect(result.meta).toEqual({
+        page: 2,
+        limit: 10,
+        skip: 10,
+        total: 23,
+        totalPage: 3,
+      });
+    });
+
+    it('defaults to page 1 / limit 10 when no query params are supplied', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      const result = await site_service.get_all_site_from_db(makeReq({ query: {} }));
+
+      expect(result.meta).toEqual({
+        page: 1,
+        limit: 10,
+        skip: 0,
+        total: 0,
+        totalPage: 0,
+      });
+    });
   });
 
   describe('get_single_site_from_db', () => {

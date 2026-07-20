@@ -4,15 +4,15 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 const get_all_site_from_db = async (req: Request) => {
-  const { searchTerm, page = '1', limit = '10' } = req.query;
+  const { searchTerm, page, limit } = req.query;
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
 
-  const pageNumber = parseInt(page as string, 10) || 1;
-  const limitNumber = parseInt(limit as string, 10) || 10;
-  const skip = (pageNumber - 1) * limitNumber;
+  const pagination = paginationHelper({ page: page as string, limit: limit as string });
+  const { skip, limit: limitNumber } = pagination;
 
   const whereCondition: Prisma.SiteWhereInput = {
     org_account_id: ctx.organizationId,
@@ -60,12 +60,7 @@ const get_all_site_from_db = async (req: Request) => {
 
   return {
     data,
-    meta: {
-      page: pageNumber,
-      limit: limitNumber,
-      skip,
-      total,
-    },
+    meta: buildPaginationMeta(pagination, total),
   };
 };
 

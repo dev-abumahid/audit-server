@@ -54,8 +54,14 @@ describe('paginationHelper', () => {
     expect(result.skip).toBeGreaterThanOrEqual(0);
   });
 
-  it('buildPaginationMeta attaches total to the pagination result', () => {
+  it('buildPaginationMeta attaches total and totalPage to the pagination result', () => {
     const base = paginationHelper({ page: 1, limit: 10 });
-    expect(buildPaginationMeta(base, 42)).toEqual({ page: 1, limit: 10, skip: 0, total: 42 });
+    expect(buildPaginationMeta(base, 42)).toEqual({
+      page: 1,
+      limit: 10,
+      skip: 0,
+      total: 42,
+      totalPage: 5,
+    });
   });
 });

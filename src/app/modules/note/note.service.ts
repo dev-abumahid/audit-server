@@ -42,10 +42,7 @@ const get_all_note_from_db = async (req: Request) => {
 
   return {
     data,
-    meta: {
-      ...buildPaginationMeta(pagination, total),
-      totalPage: Math.ceil(total / pagination.limit),
-    },
+    meta: buildPaginationMeta(pagination, total),
   };
 };
 

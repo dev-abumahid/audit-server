@@ -5,6 +5,8 @@ vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     template: {
       findFirst: vi.fn(),
+      findMany: vi.fn(),
+      count: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -262,6 +264,48 @@ describe('template service — access member ownership scoping (ticket #31)', ()
       );
 
       expect(templateAccessDb.deleteMany).toHaveBeenCalled();
+    });
+  });
+});
+
+describe('template service — get_all_template_from_db pagination (ticket #116)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  // Qiyrix/aexa-server#116 — meta (via buildPaginationMeta) was missing
+  // totalPage, unlike action/inspection/risk. Now built via the shared
+  // paginationHelper/buildPaginationMeta pair, same as those endpoints.
+  it('includes totalPage in meta, computed via the shared pagination helper', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(23);
+
+    const result = await template_service.get_all_template_from_db(
+      makeReq({ query: { page: '2', limit: '10' } }),
+    );
+
+    expect(result.meta).toEqual({
+      page: 2,
+      limit: 10,
+      skip: 10,
+      total: 23,
+      totalPage: 3,
+    });
+  });
+
+  it('defaults to page 1 / limit 10 when no query params are supplied', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(0);
+
+    const result = await template_service.get_all_template_from_db(makeReq({ query: {} }));
+
+    expect(result.meta).toEqual({
+      page: 1,
+      limit: 10,
+      skip: 0,
+      total: 0,
+      totalPage: 0,
     });
   });
 });

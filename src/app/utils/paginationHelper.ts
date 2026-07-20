@@ -33,9 +33,16 @@ export const paginationHelper = (options: TPaginationInput): TPaginationMeta => 
   };
 };
 
+// Single shared source of truth for list-endpoint pagination meta. Every
+// list endpoint (site/template/note/recommendation and any future ones)
+// should build its `meta` via paginationHelper() + buildPaginationMeta()
+// so `totalPage` is always present and always computed the same way,
+// instead of each service re-deriving it inline (Qiyrix/aexa-server#115,
+// #116, #125).
 export const buildPaginationMeta = (base: TPaginationMeta, total: number) => {
   return {
     ...base,
     total,
+    totalPage: Math.ceil(total / base.limit),
   };
 };
