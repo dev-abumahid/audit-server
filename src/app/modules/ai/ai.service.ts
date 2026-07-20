@@ -443,9 +443,16 @@ const check_upload_file_status_from_ai = async (req: Request) => {
     throw new AppError('Upload not found', 404);
   }
 
-  const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-status/${fileId}`, {
-    headers: AI_INTERNAL_SECRET_HEADER,
-  });
+  // aexa-ai's own /upload-status/{file_id} now requires organization_username
+  // as a defense-in-depth check (issue #79 on aexa-ai) -- it returns 404 if
+  // the caller-supplied org doesn't match the org the job was created under.
+  // We already know the org from the Prisma lookup above, so pass it through.
+  const aiResponse = await fetch(
+    `${configs.ai_server_end_point}/upload-status/${fileId}?organization_username=${encodeURIComponent(ctx.organizationId)}`,
+    {
+      headers: AI_INTERNAL_SECRET_HEADER,
+    },
+  );
   if (aiResponse.status === 404) {
     throw new AppError('Upload status not found', 404);
   }

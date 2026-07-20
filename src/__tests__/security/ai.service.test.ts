@@ -559,6 +559,27 @@ describe('ai service — check_upload_file_status_from_ai (issue #35)', () => {
     expect(result).toEqual({ status: 'completed', message: 'file.pdf uploaded' });
   });
 
+  it('passes organization_username to aexa-ai so its own org check (aexa-ai#79) can enforce it', async () => {
+    // Defense-in-depth: aexa-ai's GET /upload-status/{file_id} now requires
+    // organization_username and 404s on a mismatch, on top of the org-scoped
+    // Prisma lookup this function already does. We already know the org
+    // (ctx.organizationId === ORG_A here) so it must be forwarded, not
+    // silently dropped.
+    pineconeDb.findFirst.mockResolvedValue({ id: 'doc-1', fileId: 'file-1', orgAccountId: ORG_A });
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ status: 'completed' }),
+    });
+
+    await ai_service.check_upload_file_status_from_ai(makeReq({ params: { fileId: 'file-1' } }));
+
+    const [calledUrl] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(calledUrl).toContain('/upload-status/file-1');
+    const query = new URLSearchParams(calledUrl.split('?')[1]);
+    expect(query.get('organization_username')).toBe(ORG_A);
+  });
+
   it('throws 502 when the upstream AI service errors', async () => {
     pineconeDb.findFirst.mockResolvedValue({ id: 'doc-1', fileId: 'file-1', orgAccountId: ORG_A });
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500 });
