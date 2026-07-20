@@ -124,24 +124,47 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
   if (!file) {
     throw new AppError('File is required', 400);
   }
-  const fileBuffer = fs.readFileSync(file.path);
-  const blob = new Blob([fileBuffer], {
-    type: file.mimetype,
-  });
 
-  const formData = new FormData();
+  // The AI-extraction step below reads the multer-written temp file but
+  // never itself deletes it, so on a throw here (AI service error, JSON
+  // parse failure) we must clean it up ourselves — otherwise the AppError
+  // thrown for a non-ok aiResponse skips straight past any cleanup and
+  // leaks the temp file on every failed extraction (#112).
+  //
+  // uploadCloud() (called further below, on success) already unlinks this
+  // same file itself on both its own success and error paths (see
+  // cloudinary.ts) — so this catch only covers the path where uploadCloud
+  // is never reached. An outer `finally` around the whole function would
+  // double-delete the file after uploadCloud already removed it, throwing
+  // ENOENT and replacing a successful note-creation return with an error
+  // (#112 follow-up, found by independent review).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let data: any;
+  try {
+    const fileBuffer = fs.readFileSync(file.path);
+    const blob = new Blob([fileBuffer], {
+      type: file.mimetype,
+    });
 
-  formData.append('file', blob, file.originalname);
+    const formData = new FormData();
 
-  const aiResponse = await fetch(`${configs.ai_server_end_point}/extract-text`, {
-    method: 'POST',
-    headers: AI_INTERNAL_SECRET_HEADER,
-    body: formData,
-  });
-  if (!aiResponse.ok) {
-    throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    formData.append('file', blob, file.originalname);
+
+    const aiResponse = await fetch(`${configs.ai_server_end_point}/extract-text`, {
+      method: 'POST',
+      headers: AI_INTERNAL_SECRET_HEADER,
+      body: formData,
+    });
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
+    data = await aiResponse.json();
+  } catch (err) {
+    if (file?.path) {
+      fs.unlinkSync(file.path);
+    }
+    throw err;
   }
-  const data = await aiResponse.json();
 
   // Previously the uploaded file was read for AI text extraction and then
   // discarded — extracted_text survived but the original file itself was

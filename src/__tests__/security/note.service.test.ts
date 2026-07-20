@@ -3,6 +3,7 @@ import { ORG_A, makeReq } from '../helpers/makeReq.js';
 
 vi.mock('fs', () => ({
   readFileSync: vi.fn(() => Buffer.from('')),
+  unlinkSync: vi.fn(),
 }));
 
 vi.mock('../../app/utils/cloudinary.js', () => ({
@@ -35,11 +36,13 @@ vi.mock('../../app/lib/prisma.js', () => ({
   },
 }));
 
+import * as fs from 'fs';
 import { prisma } from '../../app/lib/prisma.js';
 import uploadCloud from '../../app/utils/cloudinary.js';
 import { note_service } from '../../app/modules/note/note.service.js';
 
 const mockUploadCloud = vi.mocked(uploadCloud);
+const mockUnlinkSync = vi.mocked(fs.unlinkSync);
 const db = prisma.note as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -295,6 +298,57 @@ describe('note service — org scoping', () => {
       expect(mockUploadCloud).toHaveBeenCalledWith(FILE);
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.attachments).toEqual(['https://s3.example.com/a.pdf']);
+      // uploadCloud (mocked here) is the one that deletes the temp file on
+      // the success path in the real implementation (cloudinary.ts) — the
+      // service itself must NOT also unlink it, or it double-deletes. See
+      // the "does not double-delete" regression test below for the case
+      // that actually exercises this.
+      expect(mockUnlinkSync).not.toHaveBeenCalled();
+    });
+
+    it('deletes the temp file even when the AI service responds with a non-ok status (#112)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 502 });
+
+      await expect(
+        note_service.extract_note_from_any_file_or_image_and_save_into_db(
+          makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+        ),
+      ).rejects.toMatchObject({ statusCode: 502 });
+
+      expect(db.create).not.toHaveBeenCalled();
+      expect(mockUnlinkSync).toHaveBeenCalledTimes(1);
+      expect(mockUnlinkSync).toHaveBeenCalledWith(FILE.path);
+    });
+
+    it('does not double-delete the temp file when uploadCloud already cleaned it up (#112 follow-up)', async () => {
+      // cloudinary.ts's real uploadCloud unlinks the temp file itself once
+      // it's done with it (on both its success and error paths). If
+      // note.service.ts also tried to unlink unconditionally after a
+      // successful upload, the second fs.unlinkSync call would throw ENOENT
+      // in production and clobber the note that was just created. This
+      // mock mirrors that real behavior instead of swallowing it, so the
+      // regression shows up as an extra unlinkSync call here.
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ title: 'T', extracted_text: 'X' }),
+      });
+      mockUploadCloud.mockImplementation(async (f: unknown) => {
+        fs.unlinkSync((f as { path: string }).path);
+        return { secure_url: 'https://s3.example.com/a.pdf', key: 'a.pdf' };
+      });
+      db.create.mockResolvedValue({ id: 'note-1' });
+
+      const result = await note_service.extract_note_from_any_file_or_image_and_save_into_db(
+        makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+      );
+
+      expect(result).toEqual({ id: 'note-1' });
+      expect(mockUnlinkSync).toHaveBeenCalledTimes(1);
+      expect(mockUnlinkSync).toHaveBeenCalledWith(FILE.path);
     });
 
     it('still creates the note with empty attachments when the source-file upload fails (extraction already succeeded)', async () => {
