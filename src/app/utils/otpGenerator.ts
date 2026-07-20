@@ -14,6 +14,10 @@ export const numericVerificationCodeGenerator = (): string => {
   return crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
 };
 
+// #109: Math.random() is not cryptographically secure — its output is
+// predictable given enough samples, which makes a generated OTP guessable.
+// Uses crypto.randomInt (CSPRNG), same as numericVerificationCodeGenerator
+// above, for both per-character selection and the final shuffle.
 export const otpGenerator = (): string => {
   const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const lower = 'abcdefghijklmnopqrstuvwxyz';
@@ -22,24 +26,25 @@ export const otpGenerator = (): string => {
 
   const allChars = upper + lower + numbers + symbols;
 
-  let otp = '';
+  const otpChars: string[] = [];
 
   // Ensure at least one character from each set
-  otp += upper[Math.floor(Math.random() * upper.length)];
-  otp += lower[Math.floor(Math.random() * lower.length)];
-  otp += numbers[Math.floor(Math.random() * numbers.length)];
-  otp += symbols[Math.floor(Math.random() * symbols.length)];
+  otpChars.push(upper[crypto.randomInt(0, upper.length)]);
+  otpChars.push(lower[crypto.randomInt(0, lower.length)]);
+  otpChars.push(numbers[crypto.randomInt(0, numbers.length)]);
+  otpChars.push(symbols[crypto.randomInt(0, symbols.length)]);
 
   // Fill the rest randomly
-  for (let i = otp.length; i < 6; i++) {
-    otp += allChars[Math.floor(Math.random() * allChars.length)];
+  while (otpChars.length < 6) {
+    otpChars.push(allChars[crypto.randomInt(0, allChars.length)]);
   }
 
-  // Shuffle to remove predictable order
-  otp = otp
-    .split('')
-    .sort(() => Math.random() - 0.5)
-    .join('');
+  // Shuffle to remove predictable order (Fisher-Yates, CSPRNG-driven —
+  // Math.random()-based sort comparators are not a uniform shuffle either)
+  for (let i = otpChars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [otpChars[i], otpChars[j]] = [otpChars[j], otpChars[i]];
+  }
 
-  return otp;
+  return otpChars.join('');
 };

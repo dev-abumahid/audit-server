@@ -7,6 +7,7 @@ import { resetEmailQueue } from '../../queues/email/reset-password/reset.email.q
 import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
 import { otpGenerator } from '../../utils/otpGenerator.js';
+import { constantTimeStringEqual } from '../../utils/secureCompare.js';
 
 const create_account_into_db = async (req: Request) => {
   const payload = req?.body;
@@ -108,8 +109,14 @@ const verify_account_using_otp_into_db = async (req: Request) => {
   if (!account) {
     throw new AppError('Account not found', 404);
   }
-  // match with last otp
-  const isOtpMatch = payload.otp === account.lastOtp;
+  // match with last otp — constant-time compare (#109) so response timing
+  // can't be used to recover the OTP digit-by-digit. account.lastOtp is
+  // nullable (never-requested accounts): guard that case explicitly rather
+  // than defaulting it to '', since payload.otp is only Zod-validated as a
+  // string (empty string allowed) and '' ?? '' === '' would otherwise let
+  // an empty OTP "match" an account that never had one issued.
+  const isOtpMatch =
+    account.lastOtp !== null && constantTimeStringEqual(payload.otp, account.lastOtp);
   if (!isOtpMatch) {
     throw new AppError('Invalid OTP, Please try again!!', 401);
   }

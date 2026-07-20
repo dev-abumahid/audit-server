@@ -285,6 +285,40 @@ describe('account service', () => {
       ).rejects.toMatchObject({ statusCode: 401, message: expect.stringMatching(/invalid otp/i) });
     });
 
+    it('throws 401 (not a crash) when the submitted OTP is a different length than lastOtp (#109)', async () => {
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        lastOtp: 'ABCDEF',
+        lastOtpSendingTime: new Date(),
+      });
+
+      await expect(
+        account_services.verify_account_using_otp_into_db(
+          makeReq({ body: { email: 'a@test.com', otp: 'A' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 401, message: expect.stringMatching(/invalid otp/i) });
+
+      await expect(
+        account_services.verify_account_using_otp_into_db(
+          makeReq({ body: { email: 'a@test.com', otp: 'ABCDEFGHIJKLMNOP' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 401, message: expect.stringMatching(/invalid otp/i) });
+    });
+
+    it('throws 401 when the account has never had an OTP issued (lastOtp is null), even against an empty submitted OTP (#109)', async () => {
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        lastOtp: null,
+        lastOtpSendingTime: null,
+      });
+
+      await expect(
+        account_services.verify_account_using_otp_into_db(
+          makeReq({ body: { email: 'a@test.com', otp: '' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 401, message: expect.stringMatching(/invalid otp/i) });
+    });
+
     it('throws 401 when the OTP has expired (older than 5 minutes)', async () => {
       const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
       db.findUnique.mockResolvedValue({
