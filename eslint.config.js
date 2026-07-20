@@ -4,7 +4,7 @@ import tseslint from 'typescript-eslint';
 
 export default [
   {
-    ignores: ['node_modules', 'dist', 'prisma/generated'],
+    ignores: ['node_modules', 'dist', 'prisma/generated', '.claude'],
   },
 
   js.configs.recommended,

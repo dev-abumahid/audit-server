@@ -8,6 +8,7 @@ import { prisma } from '../../lib/prisma.js';
 import { orgInviteEmailQueue } from '../../queues/email/org-invite/org-invite.email.queue.js';
 import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
+import { passwordSchema } from '../account/account.validation.js';
 import {
   findActiveMembership,
   hasExpired,
@@ -15,13 +16,16 @@ import {
   recordOrgAuditEvent as recordAuditEvent,
 } from '../../utils/org_scope.js';
 
-// New-account password minimum, enforced here (not in the zod schema) since
-// this same `password` field also authenticates an *existing* account's
-// already-stored password in the other accept_invitation_into_db branch,
-// where a min-length check would reject a legitimately correct password
-// for any account created before an 8-char minimum existed. Found by
+// New-account password strength, enforced here (not in the zod schema)
+// since this same `password` field also authenticates an *existing*
+// account's already-stored password in the other
+// accept_invitation_into_db branch, where a strength check would reject a
+// legitimately correct password for any account created before this rule
+// existed. Reuses the same passwordSchema as account.validation.ts
+// (signup/change-password/reset-password, issue #113) so a brand-new
+// password is held to one consistent bar everywhere it's chosen, instead
+// of this branch quietly having its own, weaker minimum. Found by
 // independent review.
-const NEW_ACCOUNT_PASSWORD_MIN_LENGTH = 8;
 
 // Named constant, not a magic number — invitations are valid for this long
 // after being (re)sent.
@@ -627,12 +631,11 @@ const accept_invitation_into_db = async (req: Request) => {
 
   // Only enforced here, not in the zod schema — see the schema-side comment
   // on organization_validations.accept_invitation for why. This is the
-  // branch that's actually choosing a brand-new password.
-  if (payload.password.length < NEW_ACCOUNT_PASSWORD_MIN_LENGTH) {
-    throw new AppError(
-      `Password must be at least ${NEW_ACCOUNT_PASSWORD_MIN_LENGTH} characters.`,
-      400,
-    );
+  // branch that's actually choosing a brand-new password, so it gets the
+  // same passwordSchema strength check as signup/change-password/reset.
+  const newPasswordCheck = passwordSchema.safeParse(payload.password);
+  if (!newPasswordCheck.success) {
+    throw new AppError(newPasswordCheck.error.issues[0]?.message ?? 'Invalid password.', 400);
   }
 
   const hashPassword = bcrypt.hashSync(payload.password, 10);

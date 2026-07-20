@@ -8,7 +8,7 @@ export default defineConfig({
     // Without this, a stale `dist/` from `npm run build` gets picked up too —
     // vitest then runs both the source and compiled copies of every test
     // concurrently, which race on shared state (e.g. disk-writing tests).
-    exclude: ['**/node_modules/**', '**/dist/**'],
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.claude/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

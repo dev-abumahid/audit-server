@@ -367,7 +367,7 @@ describe('organization service — invitation acceptance', () => {
 
     const result = await organization_services.accept_invitation_into_db(
       makeReq({
-        body: { token: 'tok-1', password: 'a-decent-password', fullName: 'Brand New' },
+        body: { token: 'tok-1', password: 'a-decent-password1', fullName: 'Brand New' },
       }),
     );
 
@@ -398,6 +398,35 @@ describe('organization service — invitation acceptance', () => {
       }),
     );
     expect(result.accessToken).toEqual(expect.any(String));
+  });
+
+  it('rejects a weak password on the new-account branch (issue #113 — shared passwordSchema)', async () => {
+    const futureExpiry = new Date(Date.now() + 1000 * 60 * 60);
+    orgInvitationDb.findUnique.mockResolvedValue({
+      id: 'inv-weak',
+      organizationId: ORG_1,
+      email: 'weakpass@test.com',
+      role: 'LEAD_AUDITOR',
+      status: 'PENDING',
+      expiresAt: futureExpiry,
+      token: 'tok-weak',
+    });
+    accountDb.findFirst.mockResolvedValue(null);
+    organizationDb.findUniqueOrThrow.mockResolvedValue({ name: 'Acme' });
+
+    await expect(
+      organization_services.accept_invitation_into_db(
+        // 9 chars with a letter and a number — one short of passwordSchema's
+        // 10-char minimum, so this exercises the strength check itself
+        // rather than a missing-field or too-short-by-a-lot case.
+        makeReq({ body: { token: 'tok-weak', password: 'short12pw', fullName: 'Weak Pass' } }),
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Password must be at least 10 characters.',
+    });
+
+    expect(mockTransaction).not.toHaveBeenCalled();
   });
 
   it('attaches an existing account when the invited email already has one', async () => {
