@@ -1,7 +1,7 @@
 model Site {
     id              String   @id @default(uuid())
     org_account_id  String
-    account         Account  @relation(fields: [org_account_id], references: [id])
+    account         Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
     name            String
     location        String?
     country         String?

@@ -1,7 +1,7 @@
 model Alert {
     id             String   @id @default(uuid())
     org_account_id String
-    account        Account  @relation(fields: [org_account_id], references: [id])
+    account        Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
     kri_id         String?
     kri            Kri?     @relation(fields: [kri_id], references: [id], onDelete: SetNull)
     source         String

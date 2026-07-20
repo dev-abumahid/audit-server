@@ -10,7 +10,7 @@ model PineconeDocument {
     fileId       String?
     fileSize     String?
     orgAccountId String
-    account      Account  @relation(fields: [orgAccountId], references: [id])
+    account      Account  @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
     createdAt    DateTime @default(now())
 
     @@index([orgAccountId])
