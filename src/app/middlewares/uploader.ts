@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'fs';
 import multer from 'multer';
 import path from 'path';
@@ -11,6 +12,12 @@ const ALLOWED_MIME_TYPES = new Set([
   'image/gif',
   'application/pdf',
 ]);
+
+// Allowlist of extensions we'll ever write to disk, independent of
+// ALLOWED_MIME_TYPES (client-supplied mimetype and client-supplied filename
+// extension are both untrusted, so we don't derive one from the other).
+// Kept intentionally in sync with ALLOWED_MIME_TYPES's file types.
+const ALLOWED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf']);
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
@@ -40,8 +47,20 @@ const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
     cb(null, UPLOADS_DIR);
   },
+  // Never trust file.originalname as (or as input to) the disk filename —
+  // it's fully client-controlled and can contain path traversal sequences
+  // (`../../etc/passwd`) or collide with/overwrite another upload. Generate
+  // the disk filename server-side; the client-supplied name is still
+  // available on req.file.originalname for anything that needs it for
+  // display (e.g. ai.service.ts's PineconeDocument.fileName), untouched by
+  // this change since multer always populates it independent of `filename`.
   filename: function (_req, file, cb) {
-    cb(null, file.originalname);
+    // path.extname on the raw originalname, not a trusted value yet — only
+    // used to check membership in the allowlist below, never written
+    // directly to disk.
+    const rawExt = path.extname(file.originalname).toLowerCase();
+    const ext = ALLOWED_EXTENSIONS.has(rawExt) ? rawExt : '';
+    cb(null, `${crypto.randomUUID()}${ext}`);
   },
 });
 
