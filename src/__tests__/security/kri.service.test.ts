@@ -223,6 +223,7 @@ describe('kri service — org scoping and role gating', () => {
 
   describe('submit_kri_value_into_db — alert auto-generation', () => {
     it('creates an Alert when a reading crosses INTO ALERT status', async () => {
+      const readAt = new Date('2026-07-20T10:00:00.000Z');
       db.findFirst.mockResolvedValue({
         id: 'k1',
         org_account_id: ORG_A,
@@ -231,6 +232,7 @@ describe('kri service — org scoping and role gating', () => {
         current_value: 25,
         alert_threshold: 30,
         target_value: 20,
+        updatedAt: readAt,
       });
       db.updateMany.mockResolvedValue({ count: 1 });
       db.findFirstOrThrow.mockResolvedValue({
@@ -245,7 +247,7 @@ describe('kri service — org scoping and role gating', () => {
       );
 
       expect(db.updateMany).toHaveBeenCalledWith({
-        where: { id: 'k1', current_value: 25 },
+        where: { id: 'k1', updatedAt: readAt },
         data: { current_value: 42 },
       });
       expect(alertDb.create).toHaveBeenCalledTimes(1);
@@ -327,9 +329,10 @@ describe('kri service — org scoping and role gating', () => {
         current_value: 25,
         alert_threshold: 30,
         target_value: 20,
+        updatedAt: new Date('2026-07-20T10:00:00.000Z'),
       });
-      // Zero rows matched: another request already changed current_value out
-      // from under this one's optimistic-concurrency WHERE guard.
+      // Zero rows matched: another request already changed the row (bumping
+      // updatedAt) out from under this one's optimistic-concurrency guard.
       db.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(
@@ -340,6 +343,71 @@ describe('kri service — org scoping and role gating', () => {
 
       expect(db.findFirstOrThrow).not.toHaveBeenCalled();
       expect(alertDb.create).not.toHaveBeenCalled();
+    });
+
+    it('closes the current_value-keyed TOCTOU gap: a same-value resubmission race still gets a 409, not a double alert', async () => {
+      // Regression test for #133. The old guard was `where: { id,
+      // current_value: existing.current_value }`. If two concurrent
+      // submissions both write the SAME new value as what's already
+      // stored, current_value never actually changes across the race, so a
+      // value-keyed guard would never see a mismatch — both writes (and
+      // both alert-creation decisions) would sail through and double-fire.
+      // updatedAt changes on every write regardless of whether the value
+      // itself changed, so it correctly detects the second writer.
+      const readAt = new Date('2026-07-20T10:00:00.000Z');
+      const row = {
+        id: 'k1',
+        org_account_id: ORG_A,
+        name: 'Supplier Lead Time',
+        unit: 'days',
+        current_value: 25,
+        alert_threshold: 30,
+        target_value: 20,
+        updatedAt: readAt,
+      };
+      // Both requests read the same pre-update row.
+      db.findFirst.mockResolvedValue(row);
+
+      // Simulate the DB: the first writer's updateMany succeeds and bumps
+      // updatedAt (even though current_value ends up the same as before —
+      // both requests submit 42), so the second writer's guard (still
+      // pinned to the original readAt) no longer matches — even though
+      // BOTH requests read the row at readAt and both compute the same
+      // where clause. Track server-side state explicitly rather than just
+      // comparing against readAt, so a second call with an *identical*
+      // where clause to the first still correctly loses the race.
+      const postWriteUpdatedAt = new Date('2026-07-20T10:00:01.000Z');
+      let serverUpdatedAt = readAt;
+      db.updateMany.mockImplementation(({ where }: { where: { updatedAt: Date } }) => {
+        if (where.updatedAt.getTime() !== serverUpdatedAt.getTime()) {
+          return Promise.resolve({ count: 0 });
+        }
+        serverUpdatedAt = postWriteUpdatedAt;
+        return Promise.resolve({ count: 1 });
+      });
+      db.findFirstOrThrow.mockResolvedValue({
+        ...row,
+        current_value: 42,
+        updatedAt: postWriteUpdatedAt,
+      });
+
+      // First request wins.
+      await kri_service.submit_kri_value_into_db(
+        makeReq({ params: { id: 'k1' }, body: { current_value: 42 } }),
+      );
+      expect(alertDb.create).toHaveBeenCalledTimes(1);
+
+      // Second request raced in with a read from before the first write
+      // landed (same readAt, same new value: 42) — it must be rejected,
+      // not silently succeed and fire a duplicate alert.
+      await expect(
+        kri_service.submit_kri_value_into_db(
+          makeReq({ params: { id: 'k1' }, body: { current_value: 42 } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      // Still only the one alert from the winning request.
+      expect(alertDb.create).toHaveBeenCalledTimes(1);
     });
   });
 

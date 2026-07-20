@@ -147,14 +147,26 @@ const update_kri_into_db = async (req: Request) => {
  * alert source (see FULLBLOOM-AUDIT.md) — the 60+-external-source ingestion
  * pipeline is explicitly out of scope for this ticket.
  *
- * The update is guarded by an optimistic-concurrency WHERE clause (pinning
- * the row's current_value to the value this request read it as) rather than
- * a plain `update`. Without that guard, two near-simultaneous submissions
- * for the same KRI could both read the pre-update row, both independently
- * decide "previousStatus is not ALERT", and both insert an Alert for what is
+ * The update is guarded by an optimistic-concurrency WHERE clause pinning
+ * the row's `updatedAt` to the timestamp this request read it as, rather
+ * than a plain `update`. `updatedAt` (not `current_value`) is the lock
+ * column deliberately: `current_value` is the business value being written,
+ * and two concurrent submissions that happen to write the *same* value (a
+ * duplicate/repeated reading, or two clients both submitting "42") would
+ * leave `current_value` unchanged across the race, so a guard keyed on it
+ * would never see a mismatch and both writes — and both alert-creation
+ * decisions — would sail through. `updatedAt` changes on every write
+ * regardless of whether the value itself changed (Prisma's `@updatedAt`),
+ * so it actually detects "someone else wrote this row since I read it."
+ *
+ * Without this guard, two near-simultaneous submissions for the same KRI
+ * could both read the pre-update row, both independently decide
+ * "previousStatus is not ALERT", and both insert an Alert for what is
  * really a single logical transition. With the guard, only the first write
  * wins; the loser's updateMany affects zero rows and gets a 409 asking it to
- * retry against the now-current value, instead of silently double-firing.
+ * retry against the now-current value, instead of silently double-firing —
+ * or silently losing the update, since a count of 0 is never treated as a
+ * no-op success.
  */
 const submit_kri_value_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
@@ -180,7 +192,7 @@ const submit_kri_value_into_db = async (req: Request) => {
   );
 
   const updateOutcome = await prisma.kri.updateMany({
-    where: { id, current_value: existing.current_value },
+    where: { id, updatedAt: existing.updatedAt },
     data: { current_value },
   });
   if (updateOutcome.count === 0) {
