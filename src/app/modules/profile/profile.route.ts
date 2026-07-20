@@ -4,6 +4,7 @@ import { profile_controller } from './profile.controller.js';
 import { profile_validations } from './profile.validation.js';
 import auth from '../../middlewares/auth.js';
 import uploader from '../../middlewares/uploader.js';
+import { AppError } from '../../utils/app_error.js';
 
 const router = Router();
 
@@ -12,7 +13,11 @@ router.patch(
   auth('ADMIN', 'ORGANIZATION'),
   uploader.single('file'),
   (req, res, next) => {
-    req.body = JSON.parse(req?.body?.data);
+    try {
+      req.body = JSON.parse(req?.body?.data);
+    } catch {
+      return next(new AppError('Invalid JSON in request body', 400));
+    }
     next();
   },
   RequestValidator(profile_validations.update_profile),
