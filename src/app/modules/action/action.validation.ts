@@ -31,7 +31,11 @@ const create_action = z.object({
   questionId: z.string().optional(),
 
   actionTitle: z.string().min(1).max(255),
-  actionDisc: z.string().min(1),
+  // Deliberately optional -- aexa-frontend's CreateNewFindingModal.tsx labels
+  // this "Description (Optional)" and sends `undefined` (not "") when left
+  // blank. Matches templateDisc's String?/optional() convention (same
+  // "-Disc" naming, same "genuinely optional description" shape).
+  actionDisc: z.string().optional(),
 
   priority: PRIORITY_ENUM,
 

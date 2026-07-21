@@ -31,7 +31,11 @@ model Action {
 
     // Main body
     actionTitle String
-    actionDisc  String
+    // Nullable -- matches templateDisc's String?/optional() convention, the
+    // same "genuinely optional description" shape. Frontend labels this
+    // "Description (Optional)" and never sends an empty string, only
+    // undefined, when left blank.
+    actionDisc  String?
     priority    PRIORITY
     dueDate     DateTime
     status      STATUS   @default(TO_DO)

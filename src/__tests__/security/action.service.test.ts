@@ -568,6 +568,23 @@ describe('action service — org scoping (ticket #6)', () => {
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.responsibleAssignees).toEqual({ create: [] });
     });
+
+    it('creates an action with actionDisc omitted -- aexa-frontend sends undefined for a blank "Description (Optional)" field, and Action.actionDisc is now a nullable column', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({ id: 'new', orgAccountId: ORG_A });
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', actionTitle: 'No description' } }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.actionDisc).toBeUndefined();
+      expect(db.create).toHaveBeenCalled();
+    });
   });
 
   // ── update ────────────────────────────────────────────────────────────────
@@ -618,6 +635,18 @@ describe('action service — org scoping (ticket #6)', () => {
 
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data).not.toHaveProperty('attachments');
+    });
+
+    it('leaves actionDisc untouched when not provided on update (matches attachments/other optional-field convention)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { actionTitle: 'Renamed' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('actionDisc');
     });
 
     it('replaces responsibleAssignees (delete + recreate) when assignBy is provided (issue #52)', async () => {

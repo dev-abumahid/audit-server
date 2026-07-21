@@ -138,6 +138,36 @@ describe('action_validations.update_action — assignBy (partial, issue #52)', (
   });
 });
 
+describe('action_validations.create_action — actionDisc (optional description)', () => {
+  it('accepts a create payload with actionDisc omitted entirely — matches aexa-frontend sending undefined for a blank "Description (Optional)" field', () => {
+    const { actionDisc: _actionDisc, ...withoutDisc } = BASE;
+    const result = action_validations.create_action.safeParse(withoutDisc);
+    expect(result.success).toBe(true);
+  });
+
+  it('still rejects a non-string actionDisc', () => {
+    const result = action_validations.create_action.safeParse({ ...BASE, actionDisc: 42 });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts an explicit empty string too (frontend sends undefined, not "", but the schema should not be stricter than that)', () => {
+    const result = action_validations.create_action.safeParse({ ...BASE, actionDisc: '' });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('action_validations.update_action — actionDisc (partial)', () => {
+  it('accepts a partial update with actionDisc omitted', () => {
+    const result = action_validations.update_action.safeParse({ actionTitle: 'Renamed' });
+    expect(result.success).toBe(true);
+  });
+
+  it('still rejects a non-string actionDisc on update', () => {
+    const result = action_validations.update_action.safeParse({ actionDisc: 42 });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe('action_validations.update_action_messages (issue #51)', () => {
   it('accepts a non-empty message', () => {
     const result = action_validations.update_action_messages.safeParse({
