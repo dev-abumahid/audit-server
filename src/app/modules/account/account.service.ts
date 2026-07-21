@@ -36,6 +36,24 @@ const create_account_into_db = async (req: Request) => {
         role: 'ORGANIZATION',
         isAccountVerified: false,
       },
+      // #165: never let the bcrypt hash (or other sensitive columns) leave
+      // this function — result.account flows straight through to the HTTP
+      // response via account.controller.ts's create_account. Mirrors the
+      // select already used by get_user_account_from_db below. Only id/email
+      // are actually read downstream (OTP + verification-token logic in this
+      // function); the frontend's sign-up flow doesn't read any account
+      // field off the response either (src/pages/auth/SignUpModal.tsx in
+      // aexa-frontend only inspects error.data.message).
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        provider: true,
+        isAccountVerified: true,
+        isDeleted: true,
+        createdAt: true,
+        updatedAt: true,
+      },
     });
 
     const profile = await tx.organizationProfile.create({

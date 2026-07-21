@@ -115,6 +115,69 @@ describe('account service', () => {
       expect(bcrypt.compareSync('super-secret', capturedPassword!)).toBe(true);
     });
 
+    it('never returns the bcrypt password hash in the sign-up response (#165)', async () => {
+      db.findFirst.mockResolvedValue(null);
+      // The full raw row a real (unselected) Prisma create would produce,
+      // including the bcrypt hash. The create mock below applies the same
+      // `select` semantics Prisma itself applies — projecting the raw row
+      // down to only the requested keys — so this test actually exercises
+      // whether account.service.ts passes a `select` that excludes
+      // `password`, rather than just trusting a hand-picked mock return
+      // value.
+      const rawAccountRow = {
+        id: 'acc-1',
+        email: 'new@test.com',
+        password: bcrypt.hashSync('super-secret', 10),
+        role: 'ORGANIZATION',
+        provider: 'LOCAL',
+        isAccountVerified: false,
+        isDeleted: false,
+        lastOtp: null,
+        lastOtpSendingTime: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      const createSpy = vi
+        .fn()
+        .mockImplementation(({ select }: { select?: Record<string, boolean> }) => {
+          if (!select) return Promise.resolve(rawAccountRow);
+          const projected: Record<string, unknown> = {};
+          for (const key of Object.keys(select)) {
+            if (select[key]) projected[key] = (rawAccountRow as Record<string, unknown>)[key];
+          }
+          return Promise.resolve(projected);
+        });
+      mockTransaction.mockImplementation(async (fn) =>
+        fn({
+          account: { create: createSpy },
+          organizationProfile: { create: vi.fn().mockResolvedValue({ id: 'prof-1' }) },
+          organization: { create: vi.fn().mockResolvedValue({ id: 'org-1' }) },
+          orgMember: { create: vi.fn().mockResolvedValue({}) },
+        }),
+      );
+      db.update.mockResolvedValue({});
+
+      const result = await account_services.create_account_into_db(
+        makeReq({
+          body: { email: 'new@test.com', password: 'super-secret', organizationName: 'Acme' },
+        }),
+      );
+
+      // The service must have supplied a `select` at all (an unselected
+      // create would return the raw row, including the hash).
+      const createCallArgs = createSpy.mock.calls[0][0];
+      expect(createCallArgs.select).toBeDefined();
+      expect(createCallArgs.select.password).toBeFalsy();
+
+      // And, exercising the same select-projection logic a real Prisma
+      // client applies, the resulting account object has no password key.
+      expect(result.account).not.toHaveProperty('password');
+      // Sanity: id/email did survive the projection (otherwise the OTP /
+      // verification-token logic further down create_account_into_db, and
+      // the caller's use of result.account.id/email, would break silently).
+      expect(result.account).toMatchObject({ id: 'acc-1', email: 'new@test.com' });
+    });
+
     it('creates an Organization + ADMIN OrgMember alongside the Account (#55 slice 2)', async () => {
       db.findFirst.mockResolvedValue(null);
       const organizationCreate = vi
