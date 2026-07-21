@@ -33,3 +33,16 @@ describe('orgInviteEmailTemplate — HTML injection via organizationName', () =>
     expect(html).toContain('Bob&#39;s Auditing &amp; Sons');
   });
 });
+
+describe('orgInviteEmailTemplate — no third-party-hosted image', () => {
+  it('does not reference the third-party ibb.co logo URL (#129)', () => {
+    const html = orgInviteEmailTemplate({
+      email: 'invitee@test.com',
+      organizationName: 'Acme Inc',
+      inviteLink: 'https://app.example.com/invite/abc123/accept',
+    } as any);
+
+    expect(html).not.toContain('https://i.ibb.co.com/TnKvMyg/democompany.png');
+    expect(html).not.toMatch(/<img[^>]*ibb\.co/);
+  });
+});
