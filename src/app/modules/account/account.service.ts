@@ -8,6 +8,7 @@ import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
 import { otpGenerator } from '../../utils/otpGenerator.js';
 import { constantTimeStringEqual } from '../../utils/secureCompare.js';
+import { SAFE_ACCOUNT_SELECT } from './account.constants.js';
 
 const create_account_into_db = async (req: Request) => {
   const payload = req?.body;
@@ -36,24 +37,18 @@ const create_account_into_db = async (req: Request) => {
         role: 'ORGANIZATION',
         isAccountVerified: false,
       },
-      // #165: never let the bcrypt hash (or other sensitive columns) leave
-      // this function — result.account flows straight through to the HTTP
-      // response via account.controller.ts's create_account. Mirrors the
-      // select already used by get_user_account_from_db below. Only id/email
-      // are actually read downstream (OTP + verification-token logic in this
-      // function); the frontend's sign-up flow doesn't read any account
-      // field off the response either (src/pages/auth/SignUpModal.tsx in
-      // aexa-frontend only inspects error.data.message).
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        provider: true,
-        isAccountVerified: true,
-        isDeleted: true,
-        createdAt: true,
-        updatedAt: true,
-      },
+      // #165 / #167: never let the bcrypt hash (or other sensitive columns)
+      // leave this function — result.account flows straight through to the
+      // HTTP response via account.controller.ts's create_account. Only
+      // id/email are actually read downstream (OTP + verification-token
+      // logic in this function); the frontend's sign-up flow doesn't read
+      // any account field off the response either (src/pages/auth/
+      // SignUpModal.tsx in aexa-frontend only inspects error.data.message).
+      // Uses the shared SAFE_ACCOUNT_SELECT (also used by
+      // get_user_account_from_db below and accountCreatorHelper.ts) instead
+      // of a hand-written list, so this select can't drift from the other
+      // "fields safe to expose" lists across the codebase.
+      select: SAFE_ACCOUNT_SELECT,
     });
 
     const profile = await tx.organizationProfile.create({
@@ -259,16 +254,18 @@ const login_user_into_db = async (req: Request) => {
 const get_user_account_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
 
+  // #167: SAFE_ACCOUNT_SELECT plus the two relations this endpoint has
+  // always returned. Spreading it in (rather than hand-listing the same
+  // scalar fields again) additionally picks up `provider`/`createdAt`/
+  // `updatedAt` here, which weren't previously selected — all non-sensitive
+  // metadata, safe to add, and consistent with what create_account_into_db
+  // and accountCreatorHelper.ts now return for the same model.
   const result = await prisma.account.findUnique({
     where: {
       id: user?.accountId,
     },
     select: {
-      id: true,
-      email: true,
-      role: true,
-      isAccountVerified: true,
-      isDeleted: true,
+      ...SAFE_ACCOUNT_SELECT,
       profile: true,
       organizationProfile: true,
     },
