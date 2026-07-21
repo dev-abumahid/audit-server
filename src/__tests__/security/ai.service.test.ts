@@ -511,7 +511,7 @@ describe('ai service — Pinecone delete upstream-failure handling (issue #55 fo
     expect(pineconeDb.deleteMany).not.toHaveBeenCalled();
   });
 
-  it('URL-encodes a fileName containing &, =, and # before building the outbound request (#131)', async () => {
+  it('sends fileName in the request body, not the query string (aexa-ai#74)', async () => {
     mockMembership('ADMIN');
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, status: 200 });
     pineconeDb.deleteMany.mockResolvedValue({ count: 1 });
@@ -522,15 +522,24 @@ describe('ai service — Pinecone delete upstream-failure handling (issue #55 fo
       makeReq({ query: { fileName: trickyFileName } }),
     );
 
-    const [calledUrl] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [calledUrl, calledInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+
+    // file_name must not appear in the URL at all -- that's the point of
+    // #74 (filenames were leaking into access logs, browser history, and
+    // proxy logs via the query string).
+    expect(calledUrl as string).not.toContain('file_name');
+    expect(calledUrl as string).not.toContain(encodeURIComponent(trickyFileName));
+
+    // It must round-trip correctly through the JSON body instead, including
+    // characters (&, =, #) that used to require query-string encoding (#131)
+    // -- JSON.stringify/parse handles these natively.
+    const sentBody = JSON.parse((calledInit as RequestInit).body as string);
+    expect(sentBody).toEqual({ file_name: trickyFileName });
+
+    // organization_username remains a query param.
     const queryString = (calledUrl as string).split('?')[1];
     const parsedParams = new URLSearchParams(queryString);
-
-    // The raw value must not appear unescaped in the URL (it would corrupt
-    // the query string / get truncated at '#'), and it must round-trip
-    // back to the original string once parsed.
-    expect(calledUrl as string).not.toContain('file_name=a&b=c#d.pdf');
-    expect(parsedParams.get('file_name')).toBe(trickyFileName);
+    expect(parsedParams.has('organization_username')).toBe(true);
 
     // Local DB cleanup still uses the raw (unencoded) filename, since that's
     // what's actually stored in the database.

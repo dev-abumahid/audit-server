@@ -500,12 +500,13 @@ const delete_pinecone_data_from_database = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const fileName = req.query.fileName as string;
 
-  // file_name comes straight from the query string and can contain
-  // characters (&, =, #, spaces, unicode) that would otherwise get
-  // misparsed by aexa-ai or truncate/merge with organization_username.
-  // URLSearchParams encodes both values consistently. (#131)
+  // file_name now goes in the request body, not the query string --
+  // aexa-ai#74: a filename in the URL ends up in access logs, browser
+  // history, and proxy logs. JSON encoding also sidesteps the query-string
+  // misparsing that (&, =, #, spaces, unicode) used to cause (#131).
+  // organization_username stays a query param -- it's a tenant identifier,
+  // not user-supplied content, matching aexa-ai's endpoint contract.
   const deleteParams = new URLSearchParams({
-    file_name: fileName,
     organization_username: ctx.organizationId,
   });
 
@@ -517,6 +518,7 @@ const delete_pinecone_data_from_database = async (req: Request) => {
         'Content-Type': 'application/json',
         ...AI_INTERNAL_SECRET_HEADER,
       },
+      body: JSON.stringify({ file_name: fileName }),
     },
   );
   // Every other AI-service call in this file throws on a non-ok response;
