@@ -120,11 +120,60 @@ describe('risk service — org scoping (ticket #6)', () => {
   describe('get_all_risk_from_db', () => {
     it('filters by caller org', async () => {
       db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
 
       await risk_service.get_all_risk_from_db(makeReq());
 
       const [callArg] = db.findMany.mock.calls[0];
       expect(callArg.where).toMatchObject({ org_account_id: ORG_A });
+    });
+
+    // Issue #125: this endpoint hand-rolled `parseInt(page) || 1` pagination
+    // instead of the shared paginationHelper/buildPaginationMeta, so it
+    // never picked up the MAX_LIMIT cap.
+    it('includes totalPage in meta, computed via the shared pagination helper', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(23);
+
+      const result = await risk_service.get_all_risk_from_db(
+        makeReq({ query: { page: '2', limit: '10' } }),
+      );
+
+      expect(result.meta).toEqual({
+        page: 2,
+        limit: 10,
+        skip: 10,
+        total: 23,
+        totalPage: 3,
+      });
+    });
+
+    it('caps an oversized requested limit at MAX_LIMIT (100) instead of fetching unbounded rows', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      const result = await risk_service.get_all_risk_from_db(
+        makeReq({ query: { page: '1', limit: '1000000' } }),
+      );
+
+      expect(result.meta.limit).toBe(100);
+      const [callArg] = db.findMany.mock.calls[0];
+      expect(callArg.take).toBe(100);
+    });
+
+    it('defaults to page 1 / limit 10 when no query params are supplied', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      const result = await risk_service.get_all_risk_from_db(makeReq({ query: {} }));
+
+      expect(result.meta).toEqual({
+        page: 1,
+        limit: 10,
+        skip: 0,
+        total: 0,
+        totalPage: 0,
+      });
     });
   });
 

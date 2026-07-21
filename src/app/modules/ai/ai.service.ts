@@ -509,10 +509,7 @@ const get_all_pinecone_data_from_database = async (req: Request) => {
 
     return {
       data,
-      meta: {
-        ...buildPaginationMeta(pagination, total),
-        totalPage: Math.ceil(total / pagination.limit),
-      },
+      meta: buildPaginationMeta(pagination, total),
     };
   } catch (error) {
     return wrapAiServiceError(error, 'Failed to fetch uploaded documents');

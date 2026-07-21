@@ -13,18 +13,21 @@ import {
   requireCallerOrganizationId,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 
 const get_all_inspection_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   // query values
-  const { status, searchTerm, siteId, page = '1', limit = '10' } = req.query;
+  const { status, searchTerm, siteId } = req.query;
 
   // pagination
-  const currentPage = Number(page);
-  const perPage = Number(limit);
-  const skip = (currentPage - 1) * perPage;
+  const pagination = paginationHelper({
+    page: req.query.page as string,
+    limit: req.query.limit as string,
+  });
+  const { skip, limit: perPage } = pagination;
 
   // dynamic where condition — filtered by the org's anchor account (see
   // org_scope.ts), not the caller's own accountId, so invited (non-anchor)
@@ -100,13 +103,7 @@ const get_all_inspection_from_db = async (req: Request) => {
   });
 
   return {
-    meta: {
-      page: currentPage,
-      limit: perPage,
-      total,
-      totalPage: Math.ceil(total / perPage),
-    },
-
+    meta: buildPaginationMeta(pagination, total),
     data: result,
   };
 };

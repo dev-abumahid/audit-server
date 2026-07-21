@@ -3,21 +3,18 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 const get_all_risk_from_db = async (req: Request) => {
-  const {
-    searchTerm,
-    siteId,
-    category,
-    page = '1',
-    limit = '10',
-  } = req.query as Record<string, string>;
+  const { searchTerm, siteId, category } = req.query as Record<string, string>;
 
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  const pageNumber = parseInt(page) || 1;
-  const limitNumber = parseInt(limit) || 10;
-  const skip = (pageNumber - 1) * limitNumber;
+  const pagination = paginationHelper({
+    page: req.query.page as string,
+    limit: req.query.limit as string,
+  });
+  const { skip, limit: limitNumber } = pagination;
 
   const whereCondition: any = {
     org_account_id: ctx.organizationId,
@@ -65,12 +62,7 @@ const get_all_risk_from_db = async (req: Request) => {
   ]);
 
   return {
-    meta: {
-      page: pageNumber,
-      limit: limitNumber,
-      total,
-      totalPage: Math.ceil(total / limitNumber),
-    },
+    meta: buildPaginationMeta(pagination, total),
     data,
   };
 };

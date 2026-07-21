@@ -19,6 +19,7 @@ import {
   requireCallerOrganizationId,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 // Shared by every read path that returns an Action, so "assignBy" is always
 // shaped the same way the frontend's TAssignBy[] type expects ({id, name}),
@@ -86,13 +87,15 @@ const shapeResponsibleAssignees = <T extends ActionWithResponsibles>(action: T) 
 const get_all_action_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  const page = Number(req.query.page) || 1;
-  const limit = Number(req.query.limit) || 10;
   const searchTerm = (req.query.searchTerm as string) || '';
   const siteId = (req.query.siteId as string) || '';
   const inspectionId = (req.query.inspectionId as string) || '';
 
-  const skip = (page - 1) * limit;
+  const pagination = paginationHelper({
+    page: req.query.page as string,
+    limit: req.query.limit as string,
+  });
+  const { skip, limit } = pagination;
 
   // Filtered by the org's anchor account (see org_scope.ts), not the
   // caller's own accountId — see inspection.service.ts for why.
@@ -141,7 +144,7 @@ const get_all_action_from_db = async (req: Request) => {
   ]);
 
   return {
-    meta: { page, limit, total, totalPage: Math.ceil(total / limit) },
+    meta: buildPaginationMeta(pagination, total),
     data: data.map(shapeResponsibleAssignees),
   };
 };

@@ -87,6 +87,54 @@ describe('inspection service — org scoping (ticket #6)', () => {
       const [findArg] = inspectionDb.findMany.mock.calls[0];
       expect(findArg.where).toMatchObject({ orgAccountId: ORG_A });
     });
+
+    // Issue #125: this endpoint hand-rolled `Number(page)`/`Number(limit)`
+    // pagination instead of the shared paginationHelper/buildPaginationMeta,
+    // so it never picked up the MAX_LIMIT cap.
+    it('includes totalPage in meta, computed via the shared pagination helper', async () => {
+      inspectionDb.findMany.mockResolvedValue([]);
+      inspectionDb.count.mockResolvedValue(23);
+
+      const result = await inspection_service.get_all_inspection_from_db(
+        makeReq({ query: { page: '2', limit: '10' } }),
+      );
+
+      expect(result.meta).toEqual({
+        page: 2,
+        limit: 10,
+        skip: 10,
+        total: 23,
+        totalPage: 3,
+      });
+    });
+
+    it('caps an oversized requested limit at MAX_LIMIT (100) instead of fetching unbounded rows', async () => {
+      inspectionDb.findMany.mockResolvedValue([]);
+      inspectionDb.count.mockResolvedValue(0);
+
+      const result = await inspection_service.get_all_inspection_from_db(
+        makeReq({ query: { page: '1', limit: '1000000' } }),
+      );
+
+      expect(result.meta.limit).toBe(100);
+      const [callArg] = inspectionDb.findMany.mock.calls[0];
+      expect(callArg.take).toBe(100);
+    });
+
+    it('defaults to page 1 / limit 10 when no query params are supplied', async () => {
+      inspectionDb.findMany.mockResolvedValue([]);
+      inspectionDb.count.mockResolvedValue(0);
+
+      const result = await inspection_service.get_all_inspection_from_db(makeReq({ query: {} }));
+
+      expect(result.meta).toEqual({
+        page: 1,
+        limit: 10,
+        skip: 0,
+        total: 0,
+        totalPage: 0,
+      });
+    });
   });
 
   describe('get_single_inspection_from_db', () => {
