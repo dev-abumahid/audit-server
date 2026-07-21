@@ -52,7 +52,6 @@ app.use(
 // re-opening the DoS-via-oversized-body surface a 100mb limit allows.
 // See #114.
 app.use(express.json({ limit: '5mb' }));
-app.use(express.raw());
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
 
