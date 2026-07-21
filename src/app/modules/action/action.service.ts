@@ -123,7 +123,16 @@ const get_all_action_from_db = async (req: Request) => {
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: {
-        ...MESSAGES_INCLUDE,
+        // List rows only need a message *count* for the "Messages" badge
+        // (aexa-frontend's AllFindingsPage.tsx reads `action.messages?.length`)
+        // -- not the full nested MESSAGES_INCLUDE (sender account/profile,
+        // message bodies) that every row was paying for on every list fetch.
+        // Detail fetches (get_single_action_from_db) still use the full
+        // MESSAGES_INCLUDE below; aexa-frontend's edit-from-list flow now
+        // fetches GET /action/:id for that instead of relying on this list
+        // payload (Qiyrix/aexa-frontend#119, landing with/before this PR).
+        // See issue #162 (follow-up to #126).
+        messages: { select: { id: true } },
         site: { select: { name: true, id: true } },
         ...RESPONSIBLE_INCLUDE,
       },

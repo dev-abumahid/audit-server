@@ -153,6 +153,36 @@ describe('action service — org scoping (ticket #6)', () => {
       const callArg = db.findMany.mock.calls[0][0];
       expect(callArg.where).not.toHaveProperty('inspectionId');
     });
+
+    // Issue #162 (follow-up to #126): the list endpoint used to spread the
+    // full MESSAGES_INCLUDE (message bodies + sender account/profile) on
+    // every row just so aexa-frontend's list badge could show a count.
+    // aexa-frontend's edit-from-list flow now fetches GET /action/:id for
+    // full message bodies instead (Qiyrix/aexa-frontend#119), so the list
+    // include only needs enough to support `action.messages?.length`.
+    it('includes only message ids (not full MESSAGES_INCLUDE) on the list endpoint', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const callArg = db.findMany.mock.calls[0][0];
+      expect(callArg.include.messages).toEqual({ select: { id: true } });
+    });
+
+    it('still returns enough for the list badge to count messages accurately', async () => {
+      const orgARecord = {
+        id: 'a1',
+        orgAccountId: ORG_A,
+        messages: [{ id: 'm1' }, { id: 'm2' }],
+      };
+      db.findMany.mockResolvedValue([orgARecord]);
+      db.count.mockResolvedValue(1);
+
+      const result = await action_service.get_all_action_from_db(makeReq());
+
+      expect(result.data[0].messages).toHaveLength(2);
+    });
   });
 
   // ── getSingle ─────────────────────────────────────────────────────────────
