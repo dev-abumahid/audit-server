@@ -1,6 +1,7 @@
 import { Request } from 'express';
 import * as fs from 'fs';
 import { configs } from '../../configs/index.js';
+import { logger } from '../../lib/logger.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
@@ -21,6 +22,27 @@ import { ai_validations } from './ai.validation.js';
 // reuse the same header instead of each hand-rolling it.
 export const AI_INTERNAL_SECRET_HEADER = {
   'X-Internal-Secret': configs.ai_internal_secret,
+};
+
+// Closes #134 — every AI proxy function below re-wraps whatever it catches
+// (a ZodError from response-shape validation, a raw Prisma error, a
+// fetch/network failure, ...) as `new AppError(error?.message || ..., ...)`.
+// `error.message` on those can carry upstream/internal detail (Pinecone
+// error text, Prisma's own error strings, Zod's field-path descriptions of
+// our internal response schema) straight through to the client.
+//
+// The AppErrors we throw ourselves *within* these functions (validation
+// 400s, org-scoped 404s, and the "AI service error: <status>" 502s below)
+// are already client-safe by construction, so those are rethrown unchanged.
+// Everything else is logged with full detail server-side and replaced with
+// a generic client-facing message — never forward raw `error.message` for
+// an error we didn't craft ourselves.
+const wrapAiServiceError = (error: unknown, fallbackMessage: string): never => {
+  if (error instanceof AppError) {
+    throw error;
+  }
+  logger.error({ err: error }, fallbackMessage);
+  throw new AppError(fallbackMessage, 500);
 };
 
 const generate_template_with_prompt_with_ai = async (req: Request) => {
@@ -59,11 +81,8 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
     });
 
     return result;
-  } catch (error: any) {
-    throw new AppError(
-      error?.message || 'Failed to generate template with AI',
-      error?.statusCode || 500,
-    );
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to generate template with AI');
   }
 };
 
@@ -107,11 +126,8 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
     });
 
     return result;
-  } catch (error: any) {
-    throw new AppError(
-      error?.message || 'Failed to generate template from PDF',
-      error?.statusCode || 500,
-    );
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to generate template from PDF');
   } finally {
     if (file?.path) {
       fs.unlinkSync(file?.path);
@@ -183,11 +199,8 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
     });
 
     return result;
-  } catch (error: any) {
-    throw new AppError(
-      error?.message || 'Failed to generate template from risk',
-      error?.statusCode || 500,
-    );
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to generate template from risk');
   }
 };
 
@@ -243,66 +256,72 @@ const analyze_site_risks_with_ai = async (req: Request) => {
     const parsed = await ai_validations.risk_analysis_response.parseAsync(data);
 
     return parsed.risks;
-  } catch (error: any) {
-    throw new AppError(error?.message || 'Failed to analyze site risks', error?.statusCode || 500);
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to analyze site risks');
   }
 };
 
 const generate_recommendation_with_inspection_from_ai = async (req: Request) => {
-  const user = req?.user as JwtPayloadType;
-  const ctx = await resolveCallerOrgContext(user.accountId);
-  const inspectionId = req?.body?.inspectionId as string;
+  // Issue #134 follow-up: the org/inspection lookups below used to run
+  // outside this try block, so a raw Prisma error from them bypassed
+  // wrapAiServiceError entirely and reached the client via
+  // global_error_handler's generic `instanceof Error` fallback. The whole
+  // function body is wrapped now, same as every other AI-proxy function in
+  // this file.
+  try {
+    const user = req?.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    const inspectionId = req?.body?.inspectionId as string;
 
-  // check inspection exist or not — org filter is part of the query itself
-  // (not a post-fetch check) so a cross-org id and a genuinely nonexistent
-  // id are indistinguishable to the caller: both 404, no existence oracle.
-  // Same shape as the fixed IDORs in inspection.service.ts's
-  // update_inspection_into_db / delete_inspection_from_db.
-  const isInspectionExist = await prisma.inspection.findFirst({
-    where: {
-      id: inspectionId,
-      orgAccountId: ctx.organizationId,
-    },
-    include: {
-      questionAnswers: {
-        include: {
-          question: {
-            select: {
-              question: true,
+    // check inspection exist or not — org filter is part of the query itself
+    // (not a post-fetch check) so a cross-org id and a genuinely nonexistent
+    // id are indistinguishable to the caller: both 404, no existence oracle.
+    // Same shape as the fixed IDORs in inspection.service.ts's
+    // update_inspection_into_db / delete_inspection_from_db.
+    const isInspectionExist = await prisma.inspection.findFirst({
+      where: {
+        id: inspectionId,
+        orgAccountId: ctx.organizationId,
+      },
+      include: {
+        questionAnswers: {
+          include: {
+            question: {
+              select: {
+                question: true,
+              },
             },
           },
         },
       },
-    },
-  });
+    });
 
-  if (!isInspectionExist) {
-    throw new AppError('Inspection not found', 404);
-  }
-  await assertCanWriteToInspection(ctx, inspectionId);
+    if (!isInspectionExist) {
+      throw new AppError('Inspection not found', 404);
+    }
+    await assertCanWriteToInspection(ctx, inspectionId);
 
-  // check recommendation exist or not
-  const isRecommendationExist = await prisma.recommendation.findFirst({
-    where: {
-      inspectionId: inspectionId,
-    },
-  });
-  if (isRecommendationExist) {
-    throw new AppError('Recommendation already exist !!', 400);
-  }
-  const questions = isInspectionExist?.questionAnswers?.map((item) => ({
-    question: item.question.question,
-    answer: item.answer,
-    note: item.note,
-  }));
+    // check recommendation exist or not
+    const isRecommendationExist = await prisma.recommendation.findFirst({
+      where: {
+        inspectionId: inspectionId,
+      },
+    });
+    if (isRecommendationExist) {
+      throw new AppError('Recommendation already exist !!', 400);
+    }
+    const questions = isInspectionExist?.questionAnswers?.map((item) => ({
+      question: item.question.question,
+      answer: item.answer,
+      note: item.note,
+    }));
 
-  const aiPayload = {
-    organization_username: ctx.organizationId,
-    questions: questions,
-  };
+    const aiPayload = {
+      organization_username: ctx.organizationId,
+      questions: questions,
+    };
 
-  // Call ai api for generating recommendation
-  try {
+    // Call ai api for generating recommendation
     const aiResponse = await fetch(
       `${configs.ai_server_end_point}/generate_recommendations_from_answer`,
       {
@@ -362,11 +381,8 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
       });
       return result;
     }
-  } catch (error: any) {
-    throw new AppError(
-      error?.message || 'Failed to generate recommendation from inspection',
-      error?.statusCode || 500,
-    );
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to generate recommendation from inspection');
   }
 };
 
@@ -414,8 +430,8 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
     });
 
     return result;
-  } catch (error: any) {
-    throw new AppError(error?.message || 'Failed to upload file', error?.statusCode || 500);
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to upload file');
   } finally {
     if (file?.path) {
       fs.unlinkSync(file?.path);
@@ -430,119 +446,131 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
 // the aexa-ai side — so that immediate response doesn't mean the file is
 // actually queryable yet. This proxies aexa-ai's real job-status store.
 const check_upload_file_status_from_ai = async (req: Request) => {
-  const user = req.user as JwtPayloadType;
-  const ctx = await resolveCallerOrgContext(user.accountId);
-  const { fileId } = req.params as { fileId: string };
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    const { fileId } = req.params as { fileId: string };
 
-  // fileId (not the PineconeDocument's own id) is what aexa-ai's job store
-  // is keyed on — org-scoped lookup so a caller can't poll another org's
-  // upload status by guessing/enumerating file ids.
-  const document = await prisma.pineconeDocument.findFirst({
-    where: { fileId: fileId, orgAccountId: ctx.organizationId },
-  });
-  if (!document) {
-    throw new AppError('Upload not found', 404);
-  }
+    // fileId (not the PineconeDocument's own id) is what aexa-ai's job store
+    // is keyed on — org-scoped lookup so a caller can't poll another org's
+    // upload status by guessing/enumerating file ids.
+    const document = await prisma.pineconeDocument.findFirst({
+      where: { fileId: fileId, orgAccountId: ctx.organizationId },
+    });
+    if (!document) {
+      throw new AppError('Upload not found', 404);
+    }
 
-  // aexa-ai's own /upload-status/{file_id} now requires organization_username
-  // as a defense-in-depth check (issue #79 on aexa-ai) -- it returns 404 if
-  // the caller-supplied org doesn't match the org the job was created under.
-  // We already know the org from the Prisma lookup above, so pass it through.
-  const aiResponse = await fetch(
-    `${configs.ai_server_end_point}/upload-status/${fileId}?organization_username=${encodeURIComponent(ctx.organizationId)}`,
-    {
-      headers: AI_INTERNAL_SECRET_HEADER,
-    },
-  );
-  if (aiResponse.status === 404) {
-    throw new AppError('Upload status not found', 404);
+    // aexa-ai's own /upload-status/{file_id} now requires organization_username
+    // as a defense-in-depth check (issue #79 on aexa-ai) -- it returns 404 if
+    // the caller-supplied org doesn't match the org the job was created under.
+    // We already know the org from the Prisma lookup above, so pass it through.
+    const aiResponse = await fetch(
+      `${configs.ai_server_end_point}/upload-status/${fileId}?organization_username=${encodeURIComponent(ctx.organizationId)}`,
+      {
+        headers: AI_INTERNAL_SECRET_HEADER,
+      },
+    );
+    if (aiResponse.status === 404) {
+      throw new AppError('Upload status not found', 404);
+    }
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
+    return await aiResponse.json();
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to check upload status');
   }
-  if (!aiResponse.ok) {
-    throw new AppError(`AI service error: ${aiResponse.status}`, 502);
-  }
-  return aiResponse.json();
 };
 
 const get_all_pinecone_data_from_database = async (req: Request) => {
-  const user = req.user as JwtPayloadType;
-  const ctx = await resolveCallerOrgContext(user.accountId);
-  const whereCondition = { orgAccountId: ctx.organizationId };
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    const whereCondition = { orgAccountId: ctx.organizationId };
 
-  // Was an unconditional findMany with no limit, unlike every other list
-  // endpoint in this codebase (see note/template/recommendation list
-  // endpoints) — an org with many uploaded documents got an unbounded
-  // response. See issue #132.
-  const pagination = paginationHelper({
-    page: req.query.page as string,
-    limit: req.query.limit as string,
-  });
-  const [data, total] = await Promise.all([
-    prisma.pineconeDocument.findMany({
-      where: whereCondition,
-      skip: pagination.skip,
-      take: pagination.limit,
-      orderBy: { createdAt: 'desc' },
-    }),
-    prisma.pineconeDocument.count({ where: whereCondition }),
-  ]);
+    // Was an unconditional findMany with no limit, unlike every other list
+    // endpoint in this codebase (see note/template/recommendation list
+    // endpoints) — an org with many uploaded documents got an unbounded
+    // response. See issue #132.
+    const pagination = paginationHelper({
+      page: req.query.page as string,
+      limit: req.query.limit as string,
+    });
+    const [data, total] = await Promise.all([
+      prisma.pineconeDocument.findMany({
+        where: whereCondition,
+        skip: pagination.skip,
+        take: pagination.limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.pineconeDocument.count({ where: whereCondition }),
+    ]);
 
-  return {
-    data,
-    meta: {
-      ...buildPaginationMeta(pagination, total),
-      totalPage: Math.ceil(total / pagination.limit),
-    },
-  };
+    return {
+      data,
+      meta: {
+        ...buildPaginationMeta(pagination, total),
+        totalPage: Math.ceil(total / pagination.limit),
+      },
+    };
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to fetch uploaded documents');
+  }
 };
 const delete_pinecone_data_from_database = async (req: Request) => {
-  const user = req.user as JwtPayloadType;
-  const ctx = await resolveCallerOrgContext(user.accountId);
-  assertCanWriteOrgResource(ctx);
-  const fileName = req.query.fileName as string;
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
+    const fileName = req.query.fileName as string;
 
-  // file_name now goes in the request body, not the query string --
-  // aexa-ai#74: a filename in the URL ends up in access logs, browser
-  // history, and proxy logs. JSON encoding also sidesteps the query-string
-  // misparsing that (&, =, #, spaces, unicode) used to cause (#131).
-  // organization_username stays a query param -- it's a tenant identifier,
-  // not user-supplied content, matching aexa-ai's endpoint contract.
-  const deleteParams = new URLSearchParams({
-    organization_username: ctx.organizationId,
-  });
+    // file_name goes in the request body, not the query string --
+    // aexa-ai#74: a filename in the URL ends up in access logs, browser
+    // history, and proxy logs. JSON encoding also sidesteps the query-string
+    // misparsing that (&, =, #, spaces, unicode) used to cause (#131).
+    // organization_username stays a query param -- it's a tenant identifier,
+    // not user-supplied content, matching aexa-ai's endpoint contract.
+    const deleteParams = new URLSearchParams({
+      organization_username: ctx.organizationId,
+    });
 
-  const aiResponse = await fetch(
-    `${configs.ai_server_end_point}/delete-vectors-by-filename?${deleteParams.toString()}`,
-    {
-      method: 'DELETE',
-      headers: {
-        'Content-Type': 'application/json',
-        ...AI_INTERNAL_SECRET_HEADER,
+    const aiResponse = await fetch(
+      `${configs.ai_server_end_point}/delete-vectors-by-filename?${deleteParams.toString()}`,
+      {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          ...AI_INTERNAL_SECRET_HEADER,
+        },
+        body: JSON.stringify({ file_name: fileName }),
       },
-      body: JSON.stringify({ file_name: fileName }),
-    },
-  );
-  // Every other AI-service call in this file throws on a non-ok response;
-  // this one proceeded to delete the local DB record regardless, letting
-  // the DB and the actual Pinecone vector store drift out of sync on a
-  // failed upstream delete (network blip, secret mismatch, file already
-  // gone) with no error surfaced to the caller. Found by independent
-  // review.
-  //
-  // 404 specifically means aexa-ai found no vectors matching this file
-  // (aexa-ai#30) -- not a service failure. The desired end state (no
-  // vector, no local record) is already true, so this falls through to
-  // the same local cleanup as a genuine deletion instead of aborting it.
-  if (!aiResponse.ok && aiResponse.status !== 404) {
-    throw new AppError(`AI service error: ${aiResponse.status}`, 502);
-  }
+    );
+    // Every other AI-service call in this file throws on a non-ok response;
+    // this one proceeded to delete the local DB record regardless, letting
+    // the DB and the actual Pinecone vector store drift out of sync on a
+    // failed upstream delete (network blip, secret mismatch, file already
+    // gone) with no error surfaced to the caller. Found by independent
+    // review.
+    //
+    // 404 specifically means aexa-ai found no vectors matching this file
+    // (aexa-ai#30) -- not a service failure. The desired end state (no
+    // vector, no local record) is already true, so this falls through to
+    // the same local cleanup as a genuine deletion instead of aborting it.
+    if (!aiResponse.ok && aiResponse.status !== 404) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
 
-  const result = await prisma.pineconeDocument.deleteMany({
-    where: {
-      fileName,
-      orgAccountId: ctx.organizationId,
-    },
-  });
-  return result;
+    const result = await prisma.pineconeDocument.deleteMany({
+      where: {
+        fileName,
+        orgAccountId: ctx.organizationId,
+      },
+    });
+    return result;
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to delete uploaded document');
+  }
 };
 
 export const ai_service = {

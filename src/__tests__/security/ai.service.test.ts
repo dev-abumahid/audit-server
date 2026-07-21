@@ -6,6 +6,10 @@ vi.mock('fs', () => ({
   unlinkSync: vi.fn(),
 }));
 
+vi.mock('../../app/lib/logger.js', () => ({
+  logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+}));
+
 vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     template: { create: vi.fn() },
@@ -25,6 +29,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
   },
 }));
 
+import { logger } from '../../app/lib/logger.js';
 import { prisma } from '../../app/lib/prisma.js';
 import { ai_service } from '../../app/modules/ai/ai.service.js';
 
@@ -348,6 +353,214 @@ describe('ai service — AI response error handling', () => {
         ai_service.analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } })),
       ).rejects.toMatchObject({ statusCode: 500 });
     });
+  });
+});
+
+describe('ai service — error re-wrap does not leak internal detail (issue #134)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  it('replaces a raw Prisma error with a generic client-facing message, and logs the real one', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        data: {
+          templateName: 'Fire safety',
+          pages: [{ pageIndex: 0, title: 'Page 1', questions: [] }],
+        },
+      }),
+    });
+    const dbFailure = new Error(
+      'Invalid `prisma.template.create()` invocation: Unique constraint failed on fields: (`org_account_id`,`slug`) at postgres://user:hunter2@internal-db.prod:5432/aexa',
+    );
+    db.template.create.mockRejectedValue(dbFailure);
+
+    const rejection = await ai_service
+      .generate_template_with_prompt_with_ai(makeReq({ body: { prompt: 'fire safety' } }))
+      .catch((error) => error);
+
+    // Client never sees the raw Prisma error text (which here would leak a
+    // DB connection string) -- only the generic fallback message.
+    expect(rejection).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to generate template with AI',
+    });
+    expect(rejection.message).not.toContain('postgres://');
+    expect(rejection.message).not.toContain('hunter2');
+
+    // The real error is still captured server-side via the pino logger.
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: dbFailure }),
+      'Failed to generate template with AI',
+    );
+  });
+
+  it('replaces a Zod schema-validation error (internal response shape) with a generic message', async () => {
+    riskDb.findUnique.mockResolvedValue({ id: 'risk-1', name: 'Fire risk' });
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ data: { unexpected: 'shape' } }),
+    });
+
+    const rejection = await ai_service
+      .generate_template_with_risk_with_ai(makeReq({ body: { riskId: 'risk-1' } }))
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to generate template from risk',
+    });
+    // A raw Zod message would describe our internal schema (field paths,
+    // expected/received types) -- none of that belongs in a client response.
+    expect(rejection.message).not.toMatch(/expected|received|invalid_type/i);
+    expect(logger.error).toHaveBeenCalled();
+  });
+
+  it('replaces a raw network/fetch failure with a generic message', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('getaddrinfo ENOTFOUND internal-ai.aexa.svc.cluster.local'),
+    );
+
+    const rejection = await ai_service
+      .analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } }))
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to analyze site risks',
+    });
+    expect(rejection.message).not.toContain('ENOTFOUND');
+    expect(rejection.message).not.toContain('internal-ai.aexa.svc.cluster.local');
+  });
+
+  it('still surfaces the crafted upstream-status message unchanged (it never contained raw upstream text)', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 503 });
+
+    const rejection = await ai_service
+      .generate_template_with_prompt_with_ai(makeReq({ body: { prompt: 'fire safety' } }))
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({ statusCode: 502, message: 'AI service error: 503' });
+  });
+
+  it('still surfaces our own crafted validation/not-found messages unchanged', async () => {
+    riskDb.findUnique.mockResolvedValue(null);
+
+    const rejection = await ai_service
+      .generate_template_with_risk_with_ai(makeReq({ body: { riskId: 'org-b-risk' } }))
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({ statusCode: 404, message: 'Risk not found' });
+  });
+
+  // Follow-up: these three functions had no try/catch at all -- a raw error
+  // from any DB/auth call inside them bypassed wrapAiServiceError entirely
+  // and reached the client via global_error_handler's generic
+  // `instanceof Error` fallback (which forwards err.message verbatim).
+  // Found by independent review of the round-1 fix.
+  it('generate_recommendation_with_inspection_from_ai: replaces a raw Prisma error (from the lookup that used to run outside any try/catch) with a generic message', async () => {
+    const dbFailure = new Error(
+      'Invalid `prisma.inspection.findFirst()` invocation: connection to postgres://user:hunter2@internal-db.prod:5432/aexa timed out',
+    );
+    db.inspection.findFirst.mockRejectedValue(dbFailure);
+
+    const rejection = await ai_service
+      .generate_recommendation_with_inspection_from_ai(
+        makeReq({ body: { inspectionId: 'insp-1' } }),
+      )
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to generate recommendation from inspection',
+    });
+    expect(rejection.message).not.toContain('postgres://');
+    expect(rejection.message).not.toContain('hunter2');
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: dbFailure }),
+      'Failed to generate recommendation from inspection',
+    );
+  });
+
+  it('check_upload_file_status_from_ai: replaces a raw Prisma error with a generic message', async () => {
+    const dbFailure = new Error(
+      'Invalid `prisma.pineconeDocument.findFirst()` invocation: ECONNREFUSED 10.0.0.5:5432',
+    );
+    db.pineconeDocument.findFirst.mockRejectedValue(dbFailure);
+
+    const rejection = await ai_service
+      .check_upload_file_status_from_ai(makeReq({ params: { fileId: 'file-1' } }))
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to check upload status',
+    });
+    expect(rejection.message).not.toContain('ECONNREFUSED');
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: dbFailure }),
+      'Failed to check upload status',
+    );
+  });
+
+  it('get_all_pinecone_data_from_database: replaces a raw Prisma error with a generic message', async () => {
+    const dbFailure = new Error(
+      'Invalid `prisma.pineconeDocument.findMany()` invocation: relation "pinecone_document" does not exist on schema internal_v2',
+    );
+    db.pineconeDocument.findMany.mockRejectedValue(dbFailure);
+    db.pineconeDocument.count.mockResolvedValue(0);
+
+    const rejection = await ai_service
+      .get_all_pinecone_data_from_database(makeReq())
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to fetch uploaded documents',
+    });
+    expect(rejection.message).not.toContain('internal_v2');
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: dbFailure }),
+      'Failed to fetch uploaded documents',
+    );
+  });
+
+  it('delete_pinecone_data_from_database: replaces a raw Prisma error with a generic message', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, status: 200 });
+    const dbFailure = new Error(
+      'Invalid `prisma.pineconeDocument.deleteMany()` invocation: deadlock detected on internal_v2.pinecone_document',
+    );
+    db.pineconeDocument.deleteMany.mockRejectedValue(dbFailure);
+
+    const rejection = await ai_service
+      .delete_pinecone_data_from_database(makeReq({ query: { fileName: 'a.pdf' } }))
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to delete uploaded document',
+    });
+    expect(rejection.message).not.toContain('deadlock');
+    expect(rejection.message).not.toContain('internal_v2');
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: dbFailure }),
+      'Failed to delete uploaded document',
+    );
+  });
+
+  it('generate_recommendation_with_inspection_from_ai still surfaces its own crafted 404 unchanged now that the lookup runs inside the try/catch', async () => {
+    db.inspection.findFirst.mockResolvedValue(null);
+
+    const rejection = await ai_service
+      .generate_recommendation_with_inspection_from_ai(
+        makeReq({ body: { inspectionId: 'does-not-exist' } }),
+      )
+      .catch((error) => error);
+
+    expect(rejection).toMatchObject({ statusCode: 404, message: 'Inspection not found' });
   });
 });
 
