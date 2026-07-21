@@ -40,6 +40,19 @@ describe('paginationHelper', () => {
     expect(paginationHelper({ limit: 100.5 }).limit).toBe(100);
   });
 
+  // Regression test for #137's review round: the old kri/alert hand-rolled
+  // pagination used parseInt(page), which always produced an integer. Once
+  // those services were switched to paginationHelper, a fractional page
+  // (e.g. `?page=2.5`) flowed through unfloored and produced a non-integer
+  // `skip` passed to Prisma. `page` must be floored the same way `limit`
+  // already is.
+  it('rounds a fractional page down to an integer, keeping skip an integer', () => {
+    const result = paginationHelper({ page: 2.5, limit: 10 });
+    expect(result.page).toBe(2);
+    expect(Number.isInteger(result.skip)).toBe(true);
+    expect(result.skip).toBe(10);
+  });
+
   it('computes skip from the clamped limit, not the requested one', () => {
     const result = paginationHelper({ page: 3, limit: 1000000 });
     // limit clamps to 100, so skip should be (3 - 1) * 100 = 200

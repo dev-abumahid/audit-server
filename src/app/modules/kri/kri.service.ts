@@ -3,6 +3,7 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 export type KriStatus = 'OK' | 'ALERT' | 'WARNING';
 
@@ -43,12 +44,11 @@ const with_status = <
 });
 
 const get_all_kri_from_db = async (req: Request) => {
-  const { risk_id, page = '1', limit = '10' } = req.query as Record<string, string>;
+  const { risk_id, page, limit } = req.query as Record<string, string>;
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  const pageNumber = parseInt(page) || 1;
-  const limitNumber = parseInt(limit) || 10;
-  const skip = (pageNumber - 1) * limitNumber;
+  const pagination = paginationHelper({ page, limit });
+  const { skip, limit: limitNumber } = pagination;
 
   const whereCondition: Record<string, unknown> = { org_account_id: ctx.organizationId };
   if (risk_id) whereCondition.risk_id = risk_id;
@@ -64,12 +64,7 @@ const get_all_kri_from_db = async (req: Request) => {
   ]);
 
   return {
-    meta: {
-      page: pageNumber,
-      limit: limitNumber,
-      total,
-      totalPage: Math.ceil(total / limitNumber),
-    },
+    meta: buildPaginationMeta(pagination, total),
     data: data.map(with_status),
   };
 };

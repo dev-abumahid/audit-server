@@ -78,6 +78,55 @@ describe('alert service — org scoping and role gating', () => {
         is_read: false,
       });
     });
+
+    // Qiyrix/aexa-server#137 — this endpoint hand-rolled `parseInt(page) ||
+    // 1`-style pagination instead of using the shared paginationHelper /
+    // buildPaginationMeta, so it never picked up the MAX_LIMIT cap or
+    // totalPage that #117/#115/#116/#125 added to every other list endpoint.
+    it('includes totalPage in meta, computed via the shared pagination helper', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(23);
+
+      const result = await alert_service.get_all_alert_from_db(
+        makeReq({ query: { page: '2', limit: '10' } }),
+      );
+
+      expect(result.meta).toEqual({
+        page: 2,
+        limit: 10,
+        skip: 10,
+        total: 23,
+        totalPage: 3,
+      });
+    });
+
+    it('caps an oversized requested limit at MAX_LIMIT (100) instead of fetching unbounded rows', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      const result = await alert_service.get_all_alert_from_db(
+        makeReq({ query: { page: '1', limit: '1000000' } }),
+      );
+
+      expect(result.meta.limit).toBe(100);
+      const [callArg] = db.findMany.mock.calls[0];
+      expect(callArg.take).toBe(100);
+    });
+
+    it('defaults to page 1 / limit 10 when no query params are supplied', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      const result = await alert_service.get_all_alert_from_db(makeReq({ query: {} }));
+
+      expect(result.meta).toEqual({
+        page: 1,
+        limit: 10,
+        skip: 0,
+        total: 0,
+        totalPage: 0,
+      });
+    });
   });
 
   describe('create_alert_into_db', () => {

@@ -19,9 +19,10 @@ type TPaginationMeta = {
 const MAX_LIMIT = 100;
 
 export const paginationHelper = (options: TPaginationInput): TPaginationMeta => {
-  const page = Math.max(1, Number(options.page) || 1);
-  // Math.floor guards against a fractional limit (e.g. `?limit=100.5`)
-  // flowing through into a non-integer `skip`/`take` passed to Prisma.
+  // Math.floor guards against a fractional page/limit (e.g. `?page=2.5` or
+  // `?limit=100.5`) flowing through into a non-integer `skip`/`take` passed
+  // to Prisma.
+  const page = Math.floor(Math.max(1, Number(options.page) || 1));
   const limit = Math.floor(Math.min(MAX_LIMIT, Math.max(1, Number(options.limit) || 10)));
 
   const skip = (page - 1) * limit;
