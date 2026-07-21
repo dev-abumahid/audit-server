@@ -20,14 +20,24 @@ export const passwordSchema = z
   .regex(/[A-Za-z]/, 'Password must contain at least one letter.')
   .regex(/[0-9]/, 'Password must contain at least one number.');
 
+// Shared email format rule for every field that accepts an email address in
+// this module (signup, sign-in, verify-otp, resend-otp). Matches the
+// .email() pattern already used in organization.validation.ts and
+// external-auth.validation.ts, so an invalid-format email is rejected here
+// too instead of only being caught downstream. See issue #121.
+export const emailSchema = z
+  .string('Email is required.')
+  .email('Must be a valid email address.')
+  .max(255);
+
 const sign_up = z.object({
-  email: z.string('Email is required.'),
+  email: emailSchema,
   password: passwordSchema,
   organizationName: z.string('Full name is required.'),
 });
 
 const sing_in = z.object({
-  email: z.string('Email is required.'),
+  email: emailSchema,
   password: z.string('Password is required.'),
 });
 
@@ -37,14 +47,14 @@ const change_password = z.object({
 });
 
 const verify_otp = z.object({
-  email: z.string('Email is required'),
+  email: emailSchema,
   otp: z.string('OTP is required'),
 });
 const verify_link = z.object({
   token: z.string('Token is required '),
 });
 const resend_otp = z.object({
-  email: z.string('Email is required'),
+  email: emailSchema,
 });
 const reset_pass = z.object({
   token: z.string('Token is required'),

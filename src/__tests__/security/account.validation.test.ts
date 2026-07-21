@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   account_validation,
+  emailSchema,
   passwordSchema,
 } from '../../app/modules/account/account.validation.js';
 
@@ -35,6 +36,45 @@ describe('passwordSchema (issue #113)', () => {
   });
 });
 
+describe('emailSchema (issue #121)', () => {
+  it('rejects a string with no @', () => {
+    const result = emailSchema.safeParse('not-an-email');
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toBe('Must be a valid email address.');
+    }
+  });
+
+  it('rejects a string missing a domain', () => {
+    const result = emailSchema.safeParse('user@');
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toBe('Must be a valid email address.');
+    }
+  });
+
+  it('rejects an empty string', () => {
+    const result = emailSchema.safeParse('');
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an email longer than 255 characters', () => {
+    const longLocalPart = 'a'.repeat(250);
+    const result = emailSchema.safeParse(`${longLocalPart}@example.com`);
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a valid email address', () => {
+    const result = emailSchema.safeParse('user@example.com');
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a valid email address with a subdomain and plus-tag', () => {
+    const result = emailSchema.safeParse('user+tag@mail.example.co.uk');
+    expect(result.success).toBe(true);
+  });
+});
+
 describe('account_validation.sign_up', () => {
   const BASE = {
     email: 'user@example.com',
@@ -50,6 +90,15 @@ describe('account_validation.sign_up', () => {
     const result = account_validation.sign_up.safeParse({ ...BASE, password: 'correcthorse1' });
     expect(result.success).toBe(true);
   });
+
+  it('rejects an invalid email format at signup', () => {
+    const result = account_validation.sign_up.safeParse({
+      ...BASE,
+      email: 'not-an-email',
+      password: 'correcthorse1',
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe('account_validation.sing_in', () => {
@@ -58,6 +107,52 @@ describe('account_validation.sing_in', () => {
       email: 'user@example.com',
       password: 'old',
     });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an invalid email format at login', () => {
+    const result = account_validation.sing_in.safeParse({
+      email: 'not-an-email',
+      password: 'old',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a valid email format at login', () => {
+    const result = account_validation.sing_in.safeParse({
+      email: 'user@example.com',
+      password: 'old',
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('account_validation.verify_otp', () => {
+  it('rejects an invalid email format', () => {
+    const result = account_validation.verify_otp.safeParse({
+      email: 'not-an-email',
+      otp: '123456',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a valid email format', () => {
+    const result = account_validation.verify_otp.safeParse({
+      email: 'user@example.com',
+      otp: '123456',
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('account_validation.resend_otp', () => {
+  it('rejects an invalid email format', () => {
+    const result = account_validation.resend_otp.safeParse({ email: 'not-an-email' });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a valid email format', () => {
+    const result = account_validation.resend_otp.safeParse({ email: 'user@example.com' });
     expect(result.success).toBe(true);
   });
 });
