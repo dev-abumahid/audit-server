@@ -92,7 +92,6 @@ const delete_pinecone_data = catchAsync(async (req, res) => {
     meta: {},
   });
 });
-
 export const ai_controller = {
   generate_template_with_prompt,
   generate_template_with_pdf,
