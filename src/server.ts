@@ -22,9 +22,12 @@ async function main() {
 
 main();
 process.on('uncaughtException', (err) => {
-  console.error('UNCAUGHT EXCEPTION:', err);
+  logger.error(err, 'UNCAUGHT EXCEPTION');
+  // Process state may be corrupt after an uncaught exception; exit so the
+  // process manager can restart cleanly rather than keep serving requests.
+  process.exit(1);
 });
 
 process.on('unhandledRejection', (err) => {
-  console.error('UNHANDLED REJECTION:', err);
+  logger.error(err, 'UNHANDLED REJECTION');
 });
