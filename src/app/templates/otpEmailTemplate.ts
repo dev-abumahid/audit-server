@@ -157,11 +157,11 @@ export const otpEmailTemplate = (payload: TOtpEmailQueue) => {
             <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
                 <tr>
                     <td align="center">
-                        <!-- Logo -->
-                        <img src="https://i.ibb.co.com/TnKvMyg/democompany.png" 
-                             style="width: 75px; height: 75px; border-radius: 50%; display: block; margin: 0 auto 15px auto;" 
-                             alt="Company Logo">
-                        
+                        <!-- TODO(#129): logo removed, it pointed at a third-party-hosted
+                             placeholder image (i.ibb.co.com), not Qiyrix-controlled
+                             infrastructure. Re-add once a real logo asset is uploaded to
+                             S3/CDN under our control. -->
+
                         <!-- Company Name -->
                         <h3 style="color: #ffffff; font-size: 24px; margin: 0 0 8px 0;">Company Name</h3>
                         <p style="color: #ffffff; opacity: 0.95; margin: 0 0 25px 0;">The Support Team</p>

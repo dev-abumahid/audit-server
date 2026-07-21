@@ -111,7 +111,7 @@ Copy `.env.example` to `.env` to get started.
 ## Rate limiting
 
 - `/api/auth/*` — 10 requests / 15 min per IP
-- `/api/*` — 100 requests / 15 min per IP
+- `/api/*` — 300 requests / 15 min per IP
 
 Both use a Redis store backed by `redisConnection`.
 
