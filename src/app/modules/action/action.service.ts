@@ -204,7 +204,7 @@ const create_action_into_db = async (req: Request) => {
   const assigneeIds: string[] = body.assignBy ?? [];
   if (assigneeIds.length > 0) {
     const organizationId = await requireCallerOrganizationId(ctx);
-    await Promise.all(assigneeIds.map((id) => requireOrgScopedMember(id, organizationId)));
+    await requireOrgScopedMembers(assigneeIds, organizationId);
   }
 
   const action = await prisma.action.create({
@@ -258,9 +258,7 @@ const update_action_into_db = async (req: Request) => {
     const assigneeIds: string[] = req.body.assignBy;
     if (assigneeIds.length > 0) {
       const organizationId = await requireCallerOrganizationId(ctx);
-      await Promise.all(
-        assigneeIds.map((memberId) => requireOrgScopedMember(memberId, organizationId)),
-      );
+      await requireOrgScopedMembers(assigneeIds, organizationId);
     }
   }
 
@@ -345,6 +343,24 @@ const requireOrgScopedMember = async (orgMemberId: string, organizationId: strin
   const member = await prisma.orgMember.findFirst({ where: { id: orgMemberId, organizationId } });
   if (!member) throw new AppError('Organization member not found', 404);
   return member;
+};
+
+/**
+ * Batched counterpart to requireOrgScopedMember for the assignBy validation
+ * in create_action_into_db/update_action_into_db — those pass a whole array
+ * of candidate orgMemberIds, so this issues one `findMany({ id: { in } })`
+ * instead of a query per id (issue #135). Membership in the returned set is
+ * checked per requested id (not by comparing array lengths) so a caller-
+ * supplied duplicate id can't mask a genuinely missing/cross-org id.
+ */
+const requireOrgScopedMembers = async (orgMemberIds: string[], organizationId: string) => {
+  const members = await prisma.orgMember.findMany({
+    where: { id: { in: orgMemberIds }, organizationId },
+  });
+  const foundIds = new Set(members.map((member) => member.id));
+  const missingId = orgMemberIds.find((id) => !foundIds.has(id));
+  if (missingId) throw new AppError('Organization member not found', 404);
+  return members;
 };
 
 /**

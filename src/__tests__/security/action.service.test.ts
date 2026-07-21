@@ -369,9 +369,9 @@ describe('action service — org scoping (ticket #6)', () => {
         siteId: 'site-1',
         orgAccountId: ORG_A,
       });
-      orgMemberDb.findFirst = vi
+      orgMemberDb.findMany = vi
         .fn()
-        .mockResolvedValue({ id: 'member-1', organizationId: REAL_ORG_ID });
+        .mockResolvedValue([{ id: 'member-1', organizationId: REAL_ORG_ID }]);
       db.create.mockResolvedValue({});
 
       await action_service.create_action_into_db(
@@ -382,13 +382,45 @@ describe('action service — org scoping (ticket #6)', () => {
 
       // The real Organization.id, NOT ctx.organizationId (ORG_A, the anchor
       // Account.id) -- passing the wrong one here 404s every legitimate
-      // assignBy id in production (found by independent review).
-      expect(orgMemberDb.findFirst).toHaveBeenCalledWith({
-        where: { id: 'member-1', organizationId: REAL_ORG_ID },
+      // assignBy id in production (found by independent review). A single
+      // batched findMany (issue #135), not one findFirst per assignee.
+      expect(orgMemberDb.findMany).toHaveBeenCalledTimes(1);
+      expect(orgMemberDb.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['member-1'] }, organizationId: REAL_ORG_ID },
       });
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.responsibleAssignees).toEqual({
         create: [{ orgMemberId: 'member-1' }],
+      });
+    });
+
+    it('batches multiple assignee ids into a single findMany call, not one query per id (issue #135)', async () => {
+      mockRealOrgMembership();
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      orgMemberDb.findMany = vi.fn().mockResolvedValue([
+        { id: 'member-1', organizationId: REAL_ORG_ID },
+        { id: 'member-2', organizationId: REAL_ORG_ID },
+        { id: 'member-3', organizationId: REAL_ORG_ID },
+      ]);
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({
+          body: {
+            inspectionId: 'insp-1',
+            title: 'Assigned to three',
+            assignBy: ['member-1', 'member-2', 'member-3'],
+          },
+        }),
+      );
+
+      expect(orgMemberDb.findMany).toHaveBeenCalledTimes(1);
+      expect(orgMemberDb.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['member-1', 'member-2', 'member-3'] }, organizationId: REAL_ORG_ID },
       });
     });
 
@@ -399,13 +431,42 @@ describe('action service — org scoping (ticket #6)', () => {
         siteId: 'site-1',
         orgAccountId: ORG_A,
       });
-      // Org-B's member -- findFirst scoped to the caller's real org finds nothing.
-      orgMemberDb.findFirst = vi.fn().mockResolvedValue(null);
+      // Org-B's member -- findMany scoped to the caller's real org finds nothing.
+      orgMemberDb.findMany = vi.fn().mockResolvedValue([]);
 
       await expect(
         action_service.create_action_into_db(
           makeReq({
             body: { inspectionId: 'insp-1', title: 'IDOR attempt', assignBy: ['org-b-member'] },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT create when only SOME assignBy ids belong to the caller org', async () => {
+      mockRealOrgMembership();
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      // Only member-1 is found -- member-2 (cross-org or nonexistent) is
+      // missing from the batched result, so this must still 404 rather than
+      // silently proceeding with a partial assignee list.
+      orgMemberDb.findMany = vi
+        .fn()
+        .mockResolvedValue([{ id: 'member-1', organizationId: REAL_ORG_ID }]);
+
+      await expect(
+        action_service.create_action_into_db(
+          makeReq({
+            body: {
+              inspectionId: 'insp-1',
+              title: 'Partial IDOR attempt',
+              assignBy: ['member-1', 'org-b-member'],
+            },
           }),
         ),
       ).rejects.toMatchObject({ statusCode: 404 });
@@ -425,7 +486,7 @@ describe('action service — org scoping (ticket #6)', () => {
         makeReq({ body: { inspectionId: 'insp-1', title: 'No assignee' } }),
       );
 
-      expect(orgMemberDb.findFirst).not.toHaveBeenCalled();
+      expect(orgMemberDb.findMany).not.toHaveBeenCalled();
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.responsibleAssignees).toEqual({ create: [] });
     });
@@ -484,22 +545,43 @@ describe('action service — org scoping (ticket #6)', () => {
     it('replaces responsibleAssignees (delete + recreate) when assignBy is provided (issue #52)', async () => {
       mockRealOrgMembership();
       db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
-      orgMemberDb.findFirst = vi
+      orgMemberDb.findMany = vi
         .fn()
-        .mockResolvedValue({ id: 'member-2', organizationId: REAL_ORG_ID });
+        .mockResolvedValue([{ id: 'member-2', organizationId: REAL_ORG_ID }]);
       db.update.mockResolvedValue({});
 
       await action_service.update_action_into_db(
         makeReq({ params: { id: 'a1' }, body: { assignBy: ['member-2'] } }),
       );
 
-      expect(orgMemberDb.findFirst).toHaveBeenCalledWith({
-        where: { id: 'member-2', organizationId: REAL_ORG_ID },
+      // Single batched findMany (issue #135), not one findFirst per assignee.
+      expect(orgMemberDb.findMany).toHaveBeenCalledTimes(1);
+      expect(orgMemberDb.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['member-2'] }, organizationId: REAL_ORG_ID },
       });
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data.responsibleAssignees).toEqual({
         deleteMany: {},
         create: [{ orgMemberId: 'member-2' }],
+      });
+    });
+
+    it('batches multiple assignee ids into a single findMany call on update, not one query per id (issue #135)', async () => {
+      mockRealOrgMembership();
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      orgMemberDb.findMany = vi.fn().mockResolvedValue([
+        { id: 'member-2', organizationId: REAL_ORG_ID },
+        { id: 'member-3', organizationId: REAL_ORG_ID },
+      ]);
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { assignBy: ['member-2', 'member-3'] } }),
+      );
+
+      expect(orgMemberDb.findMany).toHaveBeenCalledTimes(1);
+      expect(orgMemberDb.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['member-2', 'member-3'] }, organizationId: REAL_ORG_ID },
       });
     });
 
@@ -511,7 +593,7 @@ describe('action service — org scoping (ticket #6)', () => {
         makeReq({ params: { id: 'a1' }, body: { assignBy: [] } }),
       );
 
-      expect(orgMemberDb.findFirst).not.toHaveBeenCalled();
+      expect(orgMemberDb.findMany).not.toHaveBeenCalled();
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data.responsibleAssignees).toEqual({ deleteMany: {}, create: [] });
     });
@@ -531,11 +613,30 @@ describe('action service — org scoping (ticket #6)', () => {
     it('throws 404 and does NOT update when a new assignBy id belongs to another org (issue #52)', async () => {
       mockRealOrgMembership();
       db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
-      orgMemberDb.findFirst = vi.fn().mockResolvedValue(null);
+      orgMemberDb.findMany = vi.fn().mockResolvedValue([]);
 
       await expect(
         action_service.update_action_into_db(
           makeReq({ params: { id: 'a1' }, body: { assignBy: ['org-b-member'] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 and does NOT update when only SOME new assignBy ids belong to the caller org', async () => {
+      mockRealOrgMembership();
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      orgMemberDb.findMany = vi
+        .fn()
+        .mockResolvedValue([{ id: 'member-2', organizationId: REAL_ORG_ID }]);
+
+      await expect(
+        action_service.update_action_into_db(
+          makeReq({
+            params: { id: 'a1' },
+            body: { assignBy: ['member-2', 'org-b-member'] },
+          }),
         ),
       ).rejects.toMatchObject({ statusCode: 404 });
 
