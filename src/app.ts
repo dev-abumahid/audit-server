@@ -11,6 +11,7 @@ import globalErrorHandler from './app/middlewares/global_error_handler.js';
 import notFound from './app/middlewares/not_found_api.js';
 import { passportConfig } from './app/passport-js/config.js';
 import { redisConnection } from './app/queues/connection.js';
+import { isDocsRouteEnabled } from './app/utils/docs_visibility.js';
 import manageResponse from './app/utils/manage_response.js';
 import appRouter from './routes.js';
 import { swaggerOptions } from './swaggerOptions.js';
@@ -29,9 +30,18 @@ const app = express();
 // trust nginx proxy so rate limiters key on real client IP, not proxy IP
 app.set('trust proxy', 1);
 
-// swagger docs
-const swaggerSpec = swaggerJSDoc(swaggerOptions);
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+// swagger docs — not mounted in production: publishes the full API attack
+// map (every route, shape, auth requirement) to anyone with no auth at all.
+// Confirmed live at api.globalriskcore.com/docs before this fix. Still
+// available in dev/staging for the team. No basic-auth/internal-only-guard
+// pattern exists anywhere else in this codebase to reuse, and building one
+// just for this single endpoint would be more surface than the problem
+// needs — disabling outright in production is simpler and at least as safe.
+// (#38)
+if (isDocsRouteEnabled(configs.env)) {
+  const swaggerSpec = swaggerJSDoc(swaggerOptions);
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+}
 
 // cors middleware
 app.use(
