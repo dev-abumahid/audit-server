@@ -12,7 +12,7 @@ Quick reference for AI coding assistants and new contributors.
 | Queues  | BullMQ + ioredis (`src/app/queues/`)              |
 | Auth    | JWT (`src/app/utils/JWT.ts`) + Passport.js social |
 | Logging | pino (`src/app/lib/logger.ts`)                    |
-| Uploads | AWS S3 + Cloudinary                               |
+| Uploads | AWS S3 (`@aws-sdk/client-s3`)                      |
 | Docs    | Swagger (`/docs`)                                 |
 
 ## Dev commands
@@ -24,9 +24,12 @@ npm run check      # tsc --noEmit — type-check only
 npm run lint       # eslint
 npm run lint:fix   # eslint --fix
 npm run format     # prettier --write
+npm test           # vitest run — the full suite
 ```
 
-No tests yet — `npm test` exits with an error. Vitest + Supertest is planned.
+Tests live in `src/__tests__/` and run under Vitest (`npm test` → `vitest run`);
+the suite currently has ~680 passing tests. Supertest is used for HTTP-level
+tests.
 
 ## Project layout
 
@@ -110,10 +113,25 @@ Copy `.env.example` to `.env` to get started.
 
 ## Rate limiting
 
-- `/api/auth/*` — 10 requests / 15 min per IP
-- `/api/*` — 300 requests / 15 min per IP
+Limiters are defined in `src/app/middlewares/rate_limiters.ts` and, for a few
+account routes, inline in `src/app/modules/account/account.route.ts`. There is
+no single blanket `/api/auth/*` rule — different routes get different limiters:
 
-Both use a Redis store backed by `redisConnection`.
+- **`apiLimiter`** — 300 req / 15 min, mounted broadly on all `/api/*` in
+  `app.ts`.
+- **`sensitiveAuthLimiter`** — 10 req / 15 min, on brute-force-sensitive
+  account routes (sign-in, sign-up, OTP, password reset, social auth
+  callbacks).
+- **`sessionCheckLimiter` / `socialProvidersLimiter`** — 500 req / 15 min, on
+  the high-frequency read routes `/me` and `/social-providers` (they fire on
+  every page load, so they get a generous ceiling rather than sharing the
+  sensitive budget).
+- Purpose-specific limiters also exist for org invites
+  (`orgInviteAcceptLimiter`, `orgInviteSendLimiter`) and external light-user
+  code flows (`externalCodeRequestLimiter`, `externalCodeVerifyLimiter`) —
+  see the file for the per-limiter reasoning.
+
+All use a Redis store backed by `redisConnection`.
 
 ## Prisma / DB notes
 
