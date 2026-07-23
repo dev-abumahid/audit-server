@@ -11,6 +11,12 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    inspection: {
+      count: vi.fn(),
+    },
+    recommendation: {
+      count: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -24,6 +30,11 @@ import { prisma } from '../../app/lib/prisma.js';
 import { risk_service } from '../../app/modules/risk/risk.service.js';
 
 const db = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const recommendationDb = prisma.recommendation as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -50,6 +61,10 @@ describe('risk service — org scoping (ticket #6)', () => {
     // caller's own accountId), same as every other org-anchor-scoped
     // service's test file in this repo.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default: risk is not in use, so the in-use delete guards are no-ops
+    // unless a specific test overrides these counts.
+    inspectionDb.count.mockResolvedValue(0);
+    recommendationDb.count.mockResolvedValue(0);
   });
 
   describe('org-anchor scoping for invited (non-anchor) members', () => {
@@ -258,6 +273,44 @@ describe('risk service — org scoping (ticket #6)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    // In-use guard (found by audit): Inspection.risk and Recommendation.risk
+    // are onDelete: Cascade, so deleting a still-referenced risk would
+    // silently destroy those records. The guard blocks the delete with a 409.
+    it('throws 409 and does NOT delete a risk still referenced by an inspection', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      inspectionDb.count.mockResolvedValue(2);
+      recommendationDb.count.mockResolvedValue(0);
+
+      await expect(
+        risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws 409 and does NOT delete a risk still referenced by a recommendation', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      inspectionDb.count.mockResolvedValue(0);
+      recommendationDb.count.mockResolvedValue(3);
+
+      await expect(
+        risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a risk when it is not referenced by any inspection or recommendation', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      inspectionDb.count.mockResolvedValue(0);
+      recommendationDb.count.mockResolvedValue(0);
+      db.delete.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } }));
+
+      expect(db.delete).toHaveBeenCalledWith({ where: { id: 'r1' } });
     });
   });
 });

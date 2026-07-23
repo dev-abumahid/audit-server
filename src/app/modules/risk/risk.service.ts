@@ -114,6 +114,24 @@ const delete_risk_from_db = async (req: Request) => {
     where: { id, org_account_id: ctx.organizationId },
   });
   if (!existing) throw new AppError('Risk not found', 404);
+
+  // In-use guard (found by audit): both Inspection.risk
+  // (prisma/schema/inspection.prisma:30) and Recommendation.risk
+  // (prisma/schema/recommendation.prisma:21) are onDelete: Cascade, so
+  // deleting a risk that inspections or recommendations still reference would
+  // silently destroy those records. Block the delete when the risk is still
+  // in use.
+  const [inspectionCount, recommendationCount] = await Promise.all([
+    prisma.inspection.count({ where: { riskId: id } }),
+    prisma.recommendation.count({ where: { riskId: id } }),
+  ]);
+  if (inspectionCount > 0 || recommendationCount > 0) {
+    throw new AppError(
+      `Cannot delete risk: ${inspectionCount} inspection(s) and ${recommendationCount} recommendation(s) reference it.`,
+      409,
+    );
+  }
+
   const result = await prisma.risk.delete({ where: { id } });
   return result;
 };

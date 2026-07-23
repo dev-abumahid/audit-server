@@ -161,6 +161,20 @@ const delete_template_from_db = async (req: Request) => {
     where: { id, orgAccountId: ctx.organizationId },
   });
   if (!existing) throw new AppError('Template not found', 404);
+
+  // In-use guard (found by audit): Inspection.template is onDelete: Cascade in
+  // the schema, so deleting a template that still has inspections would
+  // silently destroy those real audit records along with it. Block the delete
+  // instead of cascading — a template referenced by any inspection must be
+  // kept.
+  const inspectionCount = await prisma.inspection.count({ where: { templateId: id } });
+  if (inspectionCount > 0) {
+    throw new AppError(
+      `Cannot delete template: ${inspectionCount} inspection(s) reference it.`,
+      409,
+    );
+  }
+
   const result = await prisma.template.delete({
     where: { id, orgAccountId: ctx.organizationId },
   });
@@ -280,6 +294,24 @@ const delete_page_question_by_id_from_db = async (req: Request) => {
   if (!question || question.page.template.orgAccountId !== ctx.organizationId) {
     throw new AppError('Question not found', 404);
   }
+
+  // In-use guard (found by audit): both QuestionAnswer.question
+  // (prisma/schema/inspection.prisma:57) and Action.question
+  // (prisma/schema/action.prisma:47) are onDelete: Cascade, so deleting a
+  // question that has already been answered in an inspection — or that an
+  // action is attached to — would silently destroy those answers/actions.
+  // Block the delete when the question is still in use.
+  const [answerCount, actionCount] = await Promise.all([
+    prisma.questionAnswer.count({ where: { questionId: id } }),
+    prisma.action.count({ where: { questionId: id } }),
+  ]);
+  if (answerCount > 0 || actionCount > 0) {
+    throw new AppError(
+      `Cannot delete question: ${answerCount} answer(s) and ${actionCount} action(s) reference it.`,
+      409,
+    );
+  }
+
   return await prisma.question.delete({ where: { id } });
 };
 

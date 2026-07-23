@@ -23,6 +23,15 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findFirst: vi.fn(),
       delete: vi.fn(),
     },
+    inspection: {
+      count: vi.fn(),
+    },
+    questionAnswer: {
+      count: vi.fn(),
+    },
+    action: {
+      count: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -50,6 +59,12 @@ const questionDb = (prisma as unknown as { question: Record<string, ReturnType<t
   .question;
 const profileDb = (prisma as unknown as { profile: Record<string, ReturnType<typeof vi.fn>> })
   .profile;
+const inspectionDb = (prisma as unknown as { inspection: Record<string, ReturnType<typeof vi.fn>> })
+  .inspection;
+const questionAnswerDb = (
+  prisma as unknown as { questionAnswer: Record<string, ReturnType<typeof vi.fn>> }
+).questionAnswer;
+const actionDb = (prisma as unknown as { action: Record<string, ReturnType<typeof vi.fn>> }).action;
 
 const ANCHOR = ORG_A;
 const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
@@ -465,6 +480,11 @@ describe('template service — error-handling consistency (issue #55 follow-up)'
     // otherwise expects. Tests exercising the cross-org userId case (issue
     // #58) override this explicitly.
     profileDb.findUnique.mockResolvedValue({ accountId: ORG_A });
+    // Default: nothing references the template/question, so the in-use delete
+    // guards are no-ops unless a specific test overrides these counts.
+    inspectionDb.count.mockResolvedValue(0);
+    questionAnswerDb.count.mockResolvedValue(0);
+    actionDb.count.mockResolvedValue(0);
   });
 
   it('get_single_template_from_db throws 404 for another org template instead of returning null', async () => {
@@ -547,5 +567,87 @@ describe('template service — error-handling consistency (issue #55 follow-up)'
     ).rejects.toMatchObject({ statusCode: 404 });
 
     expect(questionDb.delete).not.toHaveBeenCalled();
+  });
+});
+
+describe('template service — in-use delete guards (found by audit)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+    inspectionDb.count.mockResolvedValue(0);
+    questionAnswerDb.count.mockResolvedValue(0);
+    actionDb.count.mockResolvedValue(0);
+  });
+
+  describe('delete_template_from_db', () => {
+    // Inspection.template is onDelete: Cascade, so deleting an in-use template
+    // would silently destroy its inspections. The guard blocks with a 409.
+    it('throws 409 and does NOT delete a template still referenced by an inspection', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      inspectionDb.count.mockResolvedValue(4);
+
+      await expect(
+        template_service.delete_template_from_db(makeReq({ params: { id: 't1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(inspectionDb.count).toHaveBeenCalledWith({ where: { templateId: 't1' } });
+      expect(templateDb.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a template when no inspection references it', async () => {
+      templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+      inspectionDb.count.mockResolvedValue(0);
+      templateDb.delete.mockResolvedValue({ id: 't1' });
+
+      await template_service.delete_template_from_db(makeReq({ params: { id: 't1' } }));
+
+      expect(templateDb.delete).toHaveBeenCalledWith({
+        where: { id: 't1', orgAccountId: ORG_A },
+      });
+    });
+  });
+
+  describe('delete_page_question_by_id_from_db', () => {
+    const ownedQuestion = {
+      page: { template: { orgAccountId: ORG_A } },
+    };
+
+    // QuestionAnswer.question and Action.question are both onDelete: Cascade,
+    // so deleting an answered/actioned question would silently destroy those
+    // records. The guard blocks with a 409.
+    it('throws 409 and does NOT delete a question that already has answers', async () => {
+      questionDb.findFirst.mockResolvedValue(ownedQuestion);
+      questionAnswerDb.count.mockResolvedValue(5);
+      actionDb.count.mockResolvedValue(0);
+
+      await expect(
+        template_service.delete_page_question_by_id_from_db(makeReq({ params: { id: 'q1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(questionDb.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws 409 and does NOT delete a question that an action references', async () => {
+      questionDb.findFirst.mockResolvedValue(ownedQuestion);
+      questionAnswerDb.count.mockResolvedValue(0);
+      actionDb.count.mockResolvedValue(2);
+
+      await expect(
+        template_service.delete_page_question_by_id_from_db(makeReq({ params: { id: 'q1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(questionDb.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a question when it has no answers and no actions', async () => {
+      questionDb.findFirst.mockResolvedValue(ownedQuestion);
+      questionAnswerDb.count.mockResolvedValue(0);
+      actionDb.count.mockResolvedValue(0);
+      questionDb.delete.mockResolvedValue({ id: 'q1' });
+
+      await template_service.delete_page_question_by_id_from_db(makeReq({ params: { id: 'q1' } }));
+
+      expect(questionDb.delete).toHaveBeenCalledWith({ where: { id: 'q1' } });
+    });
   });
 });
