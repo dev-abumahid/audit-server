@@ -26,7 +26,11 @@ model Inspection {
     account   Account  @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
     template  Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
     site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
-    inspector Profile? @relation(fields: [inspectorProfileId], references: [id], onDelete: Cascade)
+    // SetNull, not Cascade: inspectorProfileId is optional metadata (who
+    // performed the inspection), not ownership. Deleting a Profile/Account
+    // must not destroy the inspection record itself — it should just null out
+    // the inspector reference. Found by audit.
+    inspector Profile? @relation(fields: [inspectorProfileId], references: [id], onDelete: SetNull)
     risk      Risk?    @relation(fields: [riskId], references: [id], onDelete: Cascade)
     status    Status   @default(IN_PROGRESS)
 

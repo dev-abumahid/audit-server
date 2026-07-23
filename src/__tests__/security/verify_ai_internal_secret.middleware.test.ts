@@ -45,4 +45,18 @@ describe('verify_ai_internal_secret middleware (#96)', () => {
     ).toThrow(expect.objectContaining({ statusCode: 401 }));
     expect(next).not.toHaveBeenCalled();
   });
+
+  // A repeated X-Internal-Secret header arrives as string[]. The constant-time
+  // compare only accepts a string, so the typeof guard must reject the array
+  // with a clean 401 rather than letting a non-string reach the comparator.
+  it('throws 401 when the header is array-valued (repeated header), not a string', () => {
+    const next = makeNext();
+    const req = {
+      headers: { 'x-internal-secret': [TEST_SECRET, TEST_SECRET] },
+    } as unknown as Request;
+    expect(() => verify_ai_internal_secret(req, makeRes(), next)).toThrow(
+      expect.objectContaining({ statusCode: 401 }),
+    );
+    expect(next).not.toHaveBeenCalled();
+  });
 });

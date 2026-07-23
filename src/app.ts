@@ -24,6 +24,14 @@ if (!configs.ai_internal_secret) {
   throw new Error('AI_INTERNAL_SECRET environment variable is required');
 }
 
+// configs.port is Number(process.env.PORT); an unset or non-numeric PORT
+// yields NaN, and app.listen(NaN, ...) silently binds an OS-assigned random
+// port instead of failing — a confusing, hard-to-diagnose boot state. Fail
+// fast here, mirroring the SESSION_SECRET/AI_INTERNAL_SECRET checks above.
+if (!Number.isInteger(configs.port) || configs.port <= 0 || configs.port > 65535) {
+  throw new Error('PORT environment variable is required and must be a valid port (1-65535)');
+}
+
 // define app
 const app = express();
 
