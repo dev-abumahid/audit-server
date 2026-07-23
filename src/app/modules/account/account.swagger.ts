@@ -184,6 +184,18 @@ export const accountSwaggerDocs = {
       },
     },
   },
+  '/api/auth/logout': {
+    post: {
+      tags: ['auth'],
+      summary: 'Logout',
+      description: '',
+      responses: {
+        200: { description: 'Logout successful.' },
+        401: { description: 'unauthorized' },
+        500: { description: 'Validation error or internal server error' },
+      },
+    },
+  },
   '/api/auth/social/google': {
     get: {
       tags: ['social auth'],

@@ -87,6 +87,20 @@ accountRouter.put(
   RequestValidator(account_validation.reset_pass),
   account_controller.reset_password_using_token,
 );
+// auth() gated per issue #19's own spec. Consequence, intentional not
+// overlooked: a client with an already-expired/missing token now gets 401
+// here instead of a clean 200 + cookie clear, so "defensive logout" (call
+// this even when the session might already be dead, just to be sure the
+// cookie is gone) no longer no-ops silently. Accepted tradeoff for #19's
+// stated goal (only an authenticated caller may invalidate a session) --
+// revisit if the frontend needs a logout call that succeeds regardless of
+// token validity.
+accountRouter.post(
+  '/logout',
+  sensitiveAuthLimiter,
+  auth('USER', 'ADMIN', 'ORGANIZATION'),
+  account_controller.logout_user_from_browser_cookie,
+);
 
 // Lets the frontend render only "Sign in with X" buttons for providers that
 // actually have real OAuth credentials configured (see the is_*_login

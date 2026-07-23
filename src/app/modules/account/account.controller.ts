@@ -102,6 +102,15 @@ const reset_password_using_token = catchAsync(async (req, res) => {
   });
 });
 
+const logout_user_from_browser_cookie = catchAsync(async (_req, res) => {
+  res.clearCookie('access_token', { path: '/' });
+  manageResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: 'Logged out successfully',
+    data: null,
+  });
+});
 const get_social_providers = catchAsync(async (_req, res) => {
   const result = account_services.get_social_providers();
   manageResponse(res, {
@@ -123,4 +132,5 @@ export const account_controller = {
   forget_password_generate_reset_token,
   reset_password_using_token,
   get_social_providers,
+  logout_user_from_browser_cookie,
 };

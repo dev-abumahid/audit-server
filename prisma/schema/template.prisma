@@ -11,7 +11,7 @@ model Template {
     inspections Inspection[]
 
     account Account @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
-    risk    Risk?   @relation(fields: [riskId], references: [id], onDelete: Cascade)
+    risk    Risk?   @relation(fields: [riskId], references: [id], onDelete: SetNull)
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
