@@ -1,0 +1,43 @@
+// Compliance Obligations registry (aexa-frontend#93, Phase 1).
+//
+// Follows the AuditEngagement convention (snake_case org_account_id, loose
+// String status, org-scoped via org_account_id) rather than an enum, matching
+// the loose-typing convention Risk.status / AuditEngagement.status already use.
+//
+// site_id is optional with onDelete: SetNull — a compliance obligation can be
+// org-wide (e.g. a SOX control) or site-specific (e.g. a local environmental
+// permit), and losing the site should not destroy the compliance record
+// itself, matching the SetNull reasoning applied elsewhere in the schema.
+model ComplianceObligation {
+    id             String    @id @default(uuid())
+    org_account_id String
+    account        Account   @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+
+    site_id String?
+    site    Site?   @relation(fields: [site_id], references: [id], onDelete: SetNull)
+
+    title       String
+    description String?
+    // Scorecard grouping axis. Free-text string paired with a curated frontend
+    // constant (COMPLIANCE_DOMAINS), same pattern as Risk.category — not a DB
+    // enum.
+    domain      String
+    // Loose string, e.g. "compliant" / "non_compliant" / "in_progress" /
+    // "not_applicable" — matches the loose-typing convention Risk.status uses.
+    status      String
+    // Free-text owner name, matching AuditEngagement.lead_auditor's precedent
+    // (not an OrgMember FK).
+    owner       String?
+    due_date    DateTime?
+    // Evidence URLs, same pattern as Action.attachments (Cloudinary upload).
+    attachments String[]  @default([])
+
+    ai_generated Boolean @default(false)
+    is_edited    Boolean @default(false)
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([org_account_id])
+    @@index([site_id])
+}

@@ -10,6 +10,7 @@ import { riskSwaggerDocs } from './app/modules/risk/risk.swagger.js';
 import { kriSwaggerDocs } from './app/modules/kri/kri.swagger.js';
 import { alertSwaggerDocs } from './app/modules/alert/alert.swagger.js';
 import { auditSwaggerDocs } from './app/modules/audit/audit.swagger.js';
+import { complianceSwaggerDocs } from './app/modules/compliance/compliance.swagger.js';
 import { aiSwaggerDocs } from './app/modules/ai/ai.swagger.js';
 import { inspectionSwaggerDocs } from './app/modules/inspection/inspection.swagger.js';
 import { recommendationSwaggerDocs } from './app/modules/recommendation/recommendation.swagger.js';
@@ -36,6 +37,7 @@ export const swaggerOptions = {
       ...kriSwaggerDocs,
       ...alertSwaggerDocs,
       ...auditSwaggerDocs,
+      ...complianceSwaggerDocs,
       ...aiSwaggerDocs,
       ...inspectionSwaggerDocs,
       ...recommendationSwaggerDocs,
