@@ -57,10 +57,22 @@ const delete_audit = catchAsync(async (req, res) => {
   });
 });
 
+const upload_audit_report = catchAsync(async (req, res) => {
+  const result = await audit_service.upload_audit_report_into_storage(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Report uploaded successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const audit_controller = {
   get_all_audit,
   get_single_audit,
   create_audit,
   update_audit,
   delete_audit,
+  upload_audit_report,
 };

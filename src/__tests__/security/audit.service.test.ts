@@ -21,9 +21,15 @@ vi.mock('../../app/lib/prisma.js', () => ({
   },
 }));
 
+vi.mock('../../app/utils/cloudinary.js', () => ({
+  default: vi.fn(),
+}));
+
 import { prisma } from '../../app/lib/prisma.js';
 import { audit_service } from '../../app/modules/audit/audit.service.js';
+import uploadCloud from '../../app/utils/cloudinary.js';
 
+const uploadCloudMock = uploadCloud as unknown as ReturnType<typeof vi.fn>;
 const db = prisma.auditEngagement as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -218,6 +224,35 @@ describe('audit service — org scoping (issue #92)', () => {
       expect(db.update).toHaveBeenCalled();
     });
 
+    it('scopes the update write-clause by org_account_id too, not just id (issue #199)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { title: 'Revised' } }),
+      );
+
+      const [callArg] = db.update.mock.calls[0];
+      // The write itself must carry the org filter (defense in depth against a
+      // TOCTOU window between the findFirst check and this update).
+      expect(callArg.where).toEqual({ id: 'a1', org_account_id: ORG_A });
+    });
+
+    it('persists an explicit null closed_at through to the update data (clears the date) (issue #198)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'a1', closed_at: null });
+
+      // Simulates the post-validation body the frontend produces when a user
+      // clears the End Date field: RequestValidator has already run the zod
+      // update schema, which passes null through as null.
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { closed_at: null } }),
+      );
+
+      const [callArg] = db.update.mock.calls[0];
+      expect(callArg.data.closed_at).toBeNull();
+    });
+
     it('throws 404 and does NOT update another org engagement', async () => {
       db.findFirst.mockResolvedValue(null);
 
@@ -252,6 +287,45 @@ describe('audit service — org scoping (issue #92)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('upload_audit_report_into_storage (issue #159 backend half)', () => {
+    it('uploads the file and returns its URL for a writer role', async () => {
+      mockMembership('LEAD_AUDITOR');
+      uploadCloudMock.mockResolvedValue({
+        secure_url: 'https://s3.example.com/report-123.pdf',
+        key: 'report-123.pdf',
+      });
+
+      const result = await audit_service.upload_audit_report_into_storage(
+        makeReq({ file: { path: '/tmp/x.pdf' } as unknown as Express.Multer.File }),
+      );
+
+      expect(uploadCloudMock).toHaveBeenCalled();
+      expect(result).toEqual({ url: 'https://s3.example.com/report-123.pdf' });
+    });
+
+    it('rejects a VIEWER (read-only) trying to push a file into org storage', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        audit_service.upload_audit_report_into_storage(
+          makeReq({ file: { path: '/tmp/x.pdf' } as unknown as Express.Multer.File }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(uploadCloudMock).not.toHaveBeenCalled();
+    });
+
+    it('throws 400 when no file is attached', async () => {
+      mockMembership('LEAD_AUDITOR');
+
+      await expect(
+        audit_service.upload_audit_report_into_storage(makeReq({})),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(uploadCloudMock).not.toHaveBeenCalled();
     });
   });
 });

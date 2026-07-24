@@ -3,6 +3,7 @@ import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
+import uploadCloud from '../../utils/cloudinary.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
@@ -100,8 +101,13 @@ const update_audit_into_db = async (req: Request) => {
   // strips org_account_id since it's not in the zod schema, but stripping it
   // here too keeps the service safe independent of the route wiring.)
   const { org_account_id: _ignored, ...safeBody } = req.body;
+  // Keep org_account_id in the update's own where-clause (not just the
+  // findFirst check above): the ownership check and the write are two separate
+  // statements, so scoping the write by id alone leaves a TOCTOU window. Adding
+  // the org filter here makes the write org-scoped independent of the check,
+  // matching delete_audit_from_db's where-clause below.
   const result = await prisma.auditEngagement.update({
-    where: { id },
+    where: { id, org_account_id: ctx.organizationId },
     data: { ...safeBody, org_account_id: ctx.organizationId },
   });
   return result;
@@ -128,10 +134,34 @@ const delete_audit_from_db = async (req: Request) => {
   return result;
 };
 
+/**
+ * Uploads an audit report file to storage (Cloudinary/S3) and returns its URL.
+ * Two-step flow identical to compliance.service.ts's
+ * upload_compliance_attachment_into_aws: the frontend uploads the file here
+ * first, then persists the returned URL onto the engagement's `report_url`
+ * via a normal PATCH /audit/:id — so this endpoint itself doesn't touch any
+ * AuditEngagement row and only needs auth + write-role, not an org-scoped
+ * lookup. Response shape ({ url }) matches the compliance endpoint the frontend
+ * upload helper already expects. The role gate is applied so a read-only VIEWER
+ * can't push files into org storage.
+ */
+const upload_audit_report_into_storage = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const file = req.file;
+  if (!file) {
+    throw new AppError('File is required', 400);
+  }
+  const result = await uploadCloud(file);
+  return { url: result.secure_url };
+};
+
 export const audit_service = {
   get_all_audit_from_db,
   get_single_audit_from_db,
   create_audit_into_db,
   update_audit_into_db,
   delete_audit_from_db,
+  upload_audit_report_into_storage,
 };
