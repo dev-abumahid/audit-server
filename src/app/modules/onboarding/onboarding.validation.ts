@@ -49,7 +49,16 @@ const commit_risk = z.object({
   category: z.string('Risk category is required.').min(1).max(255),
   inherent_score: z.coerce.number().int().nullish(),
   residual_score: z.coerce.number().int().nullish(),
-  probability: z.coerce.number().int().nullish(),
+  // Probability is an integer percentage (0-100). Range-checked here as a
+  // safety net so a malformed/out-of-scale value (e.g. a 0-1 fraction that
+  // slipped through unmultiplied, or a runaway 6000) can't be persisted even
+  // if it bypasses the AI-response normalization in the service layer.
+  probability: z.coerce
+    .number()
+    .int()
+    .min(0, 'Probability must be between 0 and 100.')
+    .max(100, 'Probability must be between 0 and 100.')
+    .nullish(),
   velocity: z.string().max(255).nullish(),
   trend: z.string().max(255).nullish(),
   status: z.string().max(255).default('open'),
@@ -71,14 +80,54 @@ const commit_site = z.object({
   risks: z.array(commit_risk).default([]),
 });
 
-const commit = z.object({
-  organizationName: z.string('Organization name is required.').min(1).max(255),
-  email: z.string('Email is required.').email('Must be a valid email address.').max(255),
-  password: z.string('Password is required.').min(8, 'Password must be at least 8 characters.'),
-  sector: z.string().max(255).nullish(),
-  country: z.string().max(255).nullish(),
-  sites: z.array(commit_site).min(1, 'At least one site is required.'),
-});
+// Upper bounds on the committed tree. Everything is created as one awaited
+// insert per row inside a single interactive $transaction, so an unbounded
+// payload (an unusually large AI draft, or a malformed/malicious
+// admin-authenticated request) could exceed the transaction timeout and roll
+// the whole commit back with an opaque P2028. These caps are generous versus
+// any realistic onboarding but keep the transaction's total insert count
+// bounded. Kept as total counts (not per-parent) so the bound holds no matter
+// how the rows are distributed across sites/risks.
+const MAX_SITES = 20;
+const MAX_RISKS = 100;
+const MAX_KRIS = 200;
+
+const commit = z
+  .object({
+    organizationName: z.string('Organization name is required.').min(1).max(255),
+    email: z.string('Email is required.').email('Must be a valid email address.').max(255),
+    password: z.string('Password is required.').min(8, 'Password must be at least 8 characters.'),
+    sector: z.string().max(255).nullish(),
+    country: z.string().max(255).nullish(),
+    sites: z
+      .array(commit_site)
+      .min(1, 'At least one site is required.')
+      .max(MAX_SITES, `A maximum of ${MAX_SITES} sites can be committed at once.`),
+  })
+  .superRefine((value, ctx) => {
+    let totalRisks = 0;
+    let totalKris = 0;
+    for (const site of value.sites) {
+      totalRisks += site.risks.length;
+      for (const risk of site.risks) {
+        totalKris += risk.kris.length;
+      }
+    }
+    if (totalRisks > MAX_RISKS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sites'],
+        message: `A maximum of ${MAX_RISKS} risks can be committed at once (received ${totalRisks}).`,
+      });
+    }
+    if (totalKris > MAX_KRIS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sites'],
+        message: `A maximum of ${MAX_KRIS} KRIs can be committed at once (received ${totalKris}).`,
+      });
+    }
+  });
 
 export const onboarding_validations = {
   identify,

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
 import { logger } from '../../lib/logger.js';
@@ -50,12 +51,30 @@ const identify_company = async (req: Request) => {
   }
 };
 
+// Normalizes the LLM's risk probability into an integer percentage (0-100).
+// The AI contract is a 0-1 fraction, but a model can slip and emit a bare
+// percentage (e.g. 60 meaning 60%); multiplying that by 100 would store a
+// nonsensical 6000. So: a 0-1 value is scaled to 0-100; a plausible 1-100
+// value is treated as an already-percentage and kept as-is; anything else
+// (negative, or >100) is malformed and dropped to null rather than persisted.
+function normalizeProbability(rawProbability: unknown): number | null {
+  if (typeof rawProbability !== 'number' || !Number.isFinite(rawProbability)) {
+    return null;
+  }
+  if (rawProbability >= 0 && rawProbability <= 1) {
+    return Math.round(rawProbability * 100);
+  }
+  if (rawProbability > 1 && rawProbability <= 100) {
+    return Math.round(rawProbability);
+  }
+  return null;
+}
+
 // Maps one raw aexa-ai /risk_analysis risk into a Risk-model-shaped draft, so
 // the review screen and the commit endpoint both speak the Risk model's
 // language rather than the LLM's ad-hoc field casing.
 function mapAiRiskToDraft(raw: any) {
-  const probability =
-    typeof raw?.Probability === 'number' ? Math.round(raw.Probability * 100) : null;
+  const probability = normalizeProbability(raw?.Probability);
   const score = typeof raw?.score === 'number' ? raw.score : null;
   return {
     name: String(raw?.title ?? '').trim(),
@@ -180,87 +199,103 @@ const commit_onboarding = async (req: Request) => {
     // clean 400 rather than a P2002 aborting a half-built commit.
     await assertEmailAvailable(payload.email);
 
-    const result = await prisma.$transaction(async (tx) => {
-      const { account, organization } = await createOrgAccount(tx as unknown as PrismaTxClient, {
-        organizationName: payload.organizationName,
-        email: payload.email,
-        password: payload.password,
-        sector: payload.sector ?? null,
-        country: payload.country ?? null,
-      });
-
-      const orgId = account.id;
-      let siteCount = 0;
-      let riskCount = 0;
-      let kriCount = 0;
-
-      for (const site of payload.sites) {
-        const createdSite = await tx.site.create({
-          data: {
-            org_account_id: orgId,
-            name: site.name,
-            location: site.location ?? null,
-            country: site.country ?? null,
-            activity: site.activity ?? null,
-            revenue: site.revenue,
-            employees_count: site.employees_count,
-            site_type: site.site_type,
-            ai_generated: true,
-            source_info: site.source_info ?? null,
-          },
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const { account, organization } = await createOrgAccount(tx as unknown as PrismaTxClient, {
+          organizationName: payload.organizationName,
+          email: payload.email,
+          password: payload.password,
+          sector: payload.sector ?? null,
+          country: payload.country ?? null,
         });
-        siteCount += 1;
 
-        for (const risk of site.risks) {
-          const createdRisk = await tx.risk.create({
+        const orgId = account.id;
+        let siteCount = 0;
+        let riskCount = 0;
+        let kriCount = 0;
+
+        for (const site of payload.sites) {
+          const createdSite = await tx.site.create({
             data: {
               org_account_id: orgId,
-              site_id: createdSite.id,
-              name: risk.name,
-              description: risk.description ?? null,
-              category: risk.category,
-              inherent_score: risk.inherent_score ?? null,
-              residual_score: risk.residual_score ?? null,
-              probability: risk.probability ?? null,
-              velocity: risk.velocity ?? null,
-              trend: risk.trend ?? null,
-              status: risk.status,
+              name: site.name,
+              location: site.location ?? null,
+              country: site.country ?? null,
+              activity: site.activity ?? null,
+              revenue: site.revenue,
+              employees_count: site.employees_count,
+              site_type: site.site_type,
               ai_generated: true,
-              source_info: risk.source_info ?? null,
-              financial_impact_min: risk.financial_impact_min ?? null,
-              financial_impact_max: risk.financial_impact_max ?? null,
+              source_info: site.source_info ?? null,
             },
           });
-          riskCount += 1;
+          siteCount += 1;
 
-          for (const kri of risk.kris) {
-            await tx.kri.create({
+          for (const risk of site.risks) {
+            const createdRisk = await tx.risk.create({
               data: {
                 org_account_id: orgId,
-                risk_id: createdRisk.id,
-                name: kri.name,
-                unit: kri.unit,
-                current_value: kri.current_value,
-                alert_threshold: kri.alert_threshold,
-                target_value: kri.target_value,
-                frequency: kri.frequency ?? null,
+                site_id: createdSite.id,
+                name: risk.name,
+                description: risk.description ?? null,
+                category: risk.category,
+                inherent_score: risk.inherent_score ?? null,
+                residual_score: risk.residual_score ?? null,
+                probability: risk.probability ?? null,
+                velocity: risk.velocity ?? null,
+                trend: risk.trend ?? null,
+                status: risk.status,
                 ai_generated: true,
+                source_info: risk.source_info ?? null,
+                financial_impact_min: risk.financial_impact_min ?? null,
+                financial_impact_max: risk.financial_impact_max ?? null,
               },
             });
-            kriCount += 1;
+            riskCount += 1;
+
+            for (const kri of risk.kris) {
+              await tx.kri.create({
+                data: {
+                  org_account_id: orgId,
+                  risk_id: createdRisk.id,
+                  name: kri.name,
+                  unit: kri.unit,
+                  current_value: kri.current_value,
+                  alert_threshold: kri.alert_threshold,
+                  target_value: kri.target_value,
+                  frequency: kri.frequency ?? null,
+                  ai_generated: true,
+                },
+              });
+              kriCount += 1;
+            }
           }
         }
-      }
 
-      return {
-        account,
-        organization,
-        counts: { sites: siteCount, risks: riskCount, kris: kriCount },
-      };
-    });
+        return {
+          account,
+          organization,
+          counts: { sites: siteCount, risks: riskCount, kris: kriCount },
+        };
+      },
+      // The commit fans out to one awaited create per site/risk/kri; Prisma's
+      // default interactive-transaction timeout is ~5s, which a large (but
+      // schema-capped, see onboarding.validation.ts) payload can brush up
+      // against. Give real-but-large payloads headroom without being unbounded.
+      { timeout: 20_000 },
+    );
 
     return result;
   } catch (error) {
+    // A concurrent commit with the same email can slip past assertEmailAvailable
+    // (which runs before the transaction) and lose the race on the
+    // Account.email unique constraint inside the transaction. The rollback is
+    // correct (zero rows persist); only the surfaced error is wrong — turn the
+    // raw P2002 into the same clean 400 the pre-check returns, mirroring how
+    // organization.service.ts / inspection.service.ts map this exact race.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      throw new AppError('An account with this email already exists', 400);
+    }
     return wrapError(error, 'Failed to create organization from onboarding');
   }
 };
@@ -272,5 +307,5 @@ export const onboarding_service = {
 };
 
 // Re-exported for tests that want the pure mapping without the HTTP layer.
-export const _internal = { mapAiRiskToDraft };
+export const _internal = { mapAiRiskToDraft, normalizeProbability };
 export { onboarding_validations };

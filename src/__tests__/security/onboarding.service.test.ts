@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeReq } from '../helpers/makeReq.js';
 
@@ -19,7 +20,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
 }));
 
 import { prisma } from '../../app/lib/prisma.js';
-import { onboarding_service } from '../../app/modules/onboarding/onboarding.service.js';
+import { _internal, onboarding_service } from '../../app/modules/onboarding/onboarding.service.js';
 
 const db = prisma as unknown as Record<string, Record<string, ReturnType<typeof vi.fn>>>;
 const mockTransaction = prisma.$transaction as unknown as ReturnType<typeof vi.fn>;
@@ -293,5 +294,62 @@ describe('onboarding service — commit (Stage 4, transactional)', () => {
     expect(mockTransaction).not.toHaveBeenCalled();
     expect(db.account.create).not.toHaveBeenCalled();
     expect(db.site.create).not.toHaveBeenCalled();
+  });
+
+  it('concurrent same-email commit that loses the race inside the tx surfaces a clean 400, not a 500 (#209)', async () => {
+    // The pre-check passes (no existing account at read time)...
+    db.account.findFirst.mockResolvedValue(null);
+    // ...but a concurrent commit wins first, so this one hits the
+    // Account.email unique constraint (P2002) INSIDE the transaction.
+    const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+      code: 'P2002',
+      clientVersion: 'test',
+    });
+    mockTransaction.mockRejectedValue(p2002);
+
+    await expect(
+      onboarding_service.commit_onboarding(makeReq({ user: ADMIN, body: commitBody() })),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'An account with this email already exists',
+    });
+
+    // The pre-check ran and the transaction was attempted (the race is only
+    // detectable inside it); it's the surfaced error that must be a clean 400.
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes an explicit (non-default) transaction timeout so large payloads have headroom (#210)', async () => {
+    await onboarding_service.commit_onboarding(makeReq({ user: ADMIN, body: commitBody() }));
+
+    const [, options] = mockTransaction.mock.calls[0];
+    expect(options).toMatchObject({ timeout: expect.any(Number) });
+    expect(options.timeout).toBeGreaterThan(5000);
+  });
+});
+
+describe('onboarding service — normalizeProbability (#211)', () => {
+  const { normalizeProbability } = _internal;
+
+  it('scales a 0-1 fraction to an integer percentage', () => {
+    expect(normalizeProbability(0.6)).toBe(60);
+    expect(normalizeProbability(0)).toBe(0);
+    expect(normalizeProbability(1)).toBe(100);
+    expect(normalizeProbability(0.125)).toBe(13); // rounded
+  });
+
+  it('treats a plausible 1-100 value as an already-percentage instead of multiplying it into garbage', () => {
+    // The exact bug: a model emitting 60 (meaning 60%) must NOT become 6000.
+    expect(normalizeProbability(60)).toBe(60);
+    expect(normalizeProbability(100)).toBe(100);
+  });
+
+  it('drops a malformed out-of-range value rather than silently storing it', () => {
+    expect(normalizeProbability(6000)).toBeNull();
+    expect(normalizeProbability(-1)).toBeNull();
+    expect(normalizeProbability(Number.NaN)).toBeNull();
+    expect(normalizeProbability(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(normalizeProbability('60')).toBeNull();
+    expect(normalizeProbability(undefined)).toBeNull();
   });
 });
