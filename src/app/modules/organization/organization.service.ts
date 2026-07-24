@@ -8,6 +8,7 @@ import { prisma } from '../../lib/prisma.js';
 import { orgInviteEmailQueue } from '../../queues/email/org-invite/org-invite.email.queue.js';
 import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { passwordSchema } from '../account/account.validation.js';
 import {
   findActiveMembership,
@@ -922,7 +923,93 @@ const update_external_member_in_db = async (req: Request) => {
   return updated;
 };
 
+/**
+ * Platform-admin listing of ALL organization tenants (#162). Gated to
+ * auth('ADMIN') at the route — the SAME platform-admin gate POST /organization
+ * uses. This is deliberately NOT tenant-org-scoped the way every service in
+ * the org-scoping table is: a platform ADMIN is a distinct account from the
+ * ORGANIZATION-role tenant accounts this returns, so there is no "caller's own
+ * org" to filter to — the whole point is to see every org. The auth('ADMIN')
+ * gate IS the access control; without it this would leak every tenant's
+ * existence to any authenticated user.
+ *
+ * Backs the admin dashboard's Organizations list, which previously rendered a
+ * hardcoded dummy array (so a freshly-onboarded real org via the #96 wizard
+ * never appeared). Each ORGANIZATION Account owns exactly one
+ * OrganizationProfile (created in the same transaction as the account for both
+ * onboarding #96 and self-signup), so this lists one row per tenant account.
+ *
+ * Known scope note: an org teammate invited via accept_invitation_into_db is
+ * also created role: ORGANIZATION with its own OrganizationProfile (carrying
+ * the org's name), so it would appear here as its own row. Distinguishing
+ * anchor accounts from invited members can't be done in one clean query —
+ * Organization.anchorAccountId is a plain unique column, not a Prisma relation
+ * — and filtering to anchors risks hiding a legitimately-real tenant that
+ * predates the org-membership backfill. Listing every ORGANIZATION account is
+ * the documented, spec'd behavior for this wiring fix; tightening it to "one
+ * row per Organization" is a separate follow-up if invited-member duplication
+ * ever becomes a real problem in this admin view.
+ */
+const get_all_organizations_from_db = async (req: Request) => {
+  const { searchTerm, page, limit } = req.query;
+
+  const pagination = paginationHelper({ page: page as string, limit: limit as string });
+  const { skip, limit: limitNumber } = pagination;
+
+  const whereCondition: Prisma.AccountWhereInput = {
+    role: 'ORGANIZATION',
+    isDeleted: false,
+    ...(searchTerm && {
+      organizationProfile: {
+        organizationName: { contains: searchTerm as string, mode: 'insensitive' },
+      },
+    }),
+  };
+
+  const [accounts, total] = await Promise.all([
+    prisma.account.findMany({
+      where: whereCondition,
+      skip,
+      take: limitNumber,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        email: true,
+        isAccountVerified: true,
+        createdAt: true,
+        organizationProfile: {
+          select: {
+            organizationName: true,
+            sector: true,
+            country: true,
+            organizationLogo: true,
+          },
+        },
+      },
+    }),
+    prisma.account.count({ where: whereCondition }),
+  ]);
+
+  // Flatten to one predictable per-org shape rather than a nested profile the
+  // frontend has to null-check on every access. organizationProfile is 1:1
+  // with an ORGANIZATION account but typed optional in Prisma, so fall back to
+  // the email for a display label if a row somehow lacks a profile.
+  const data = accounts.map((account) => ({
+    id: account.id,
+    email: account.email,
+    organizationName: account.organizationProfile?.organizationName ?? account.email,
+    sector: account.organizationProfile?.sector ?? null,
+    country: account.organizationProfile?.country ?? null,
+    organizationLogo: account.organizationProfile?.organizationLogo ?? null,
+    isAccountVerified: account.isAccountVerified,
+    createdAt: account.createdAt,
+  }));
+
+  return { data, meta: buildPaginationMeta(pagination, total) };
+};
+
 export const organization_services = {
+  get_all_organizations_from_db,
   invite_member_into_db,
   get_pending_invitations_from_db,
   get_org_members_from_db,

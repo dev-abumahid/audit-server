@@ -24,6 +24,19 @@ const create_organization = catchAsync(async (req, res) => {
   });
 });
 
+// Platform-admin listing of all org tenants (#162) — backs the admin
+// dashboard's Organizations list, replacing its former hardcoded dummy array.
+const get_all_organizations = catchAsync(async (req, res) => {
+  const result = await organization_services.get_all_organizations_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Organizations fetched successfully.',
+    data: result.data,
+    meta: result.meta,
+  });
+});
+
 const invite_member = catchAsync(async (req, res) => {
   const result = await organization_services.invite_member_into_db(req);
   manageResponse(res, {
@@ -147,6 +160,7 @@ const update_external_member = catchAsync(async (req, res) => {
 
 export const organization_controller = {
   create_organization,
+  get_all_organizations,
   invite_member,
   get_pending_invitations,
   get_org_members,

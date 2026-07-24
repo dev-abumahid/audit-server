@@ -17,6 +17,11 @@ router.post(
   organization_controller.create_organization,
 );
 
+// Platform-admin listing of ALL org tenants (#162). Same auth('ADMIN')
+// platform gate as create above — NOT tenant-org-scoped (see the service's
+// doc comment). Backs the admin dashboard Organizations list.
+router.get('/', auth('ADMIN'), organization_controller.get_all_organizations);
+
 router.post(
   '/invite',
   auth('ORGANIZATION'),
