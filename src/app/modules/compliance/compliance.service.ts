@@ -76,11 +76,30 @@ const get_single_compliance_from_db = async (req: Request) => {
   return result;
 };
 
+/**
+ * A supplied site_id must belong to the caller's own org. Without this check a
+ * caller could link an obligation to another org's Site UUID (which the raw FK
+ * happily accepts), and the scorecard's `site: { name }` join would then leak
+ * that foreign org's site name back to the caller — a cross-tenant read.
+ * A null/undefined/empty site_id means "org-wide" and needs no check. Mirrors
+ * the `prisma.site.findFirst` + "Site not found" 404 pattern inspection.service.ts
+ * uses when it validates a foreign-scoped Site reference. See aexa-server#205.
+ */
+const assertSiteBelongsToOrg = async (site_id: unknown, orgAccountId: string): Promise<void> => {
+  if (typeof site_id !== 'string' || site_id === '') return;
+  const site = await prisma.site.findFirst({
+    where: { id: site_id, org_account_id: orgAccountId },
+    select: { id: true },
+  });
+  if (!site) throw new AppError('Site not found', 404);
+};
+
 const create_compliance_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   assertCanWriteOrgResource(ctx);
   const payload = req.body;
+  await assertSiteBelongsToOrg(payload.site_id, ctx.organizationId);
   payload.org_account_id = ctx.organizationId;
   const result = await prisma.complianceObligation.create({ data: payload });
   return result;
@@ -95,6 +114,9 @@ const update_compliance_into_db = async (req: Request) => {
     where: { id, org_account_id: ctx.organizationId },
   });
   if (!existing) throw new AppError('Compliance obligation not found', 404);
+  // A re-scoping update must still point at one of the caller's own sites (an
+  // explicit null clears the scope and is fine). See aexa-server#205.
+  await assertSiteBelongsToOrg(req.body.site_id, ctx.organizationId);
   // Never trust org_account_id from the request body on an update — an
   // authorized (ADMIN/LEAD_AUDITOR) caller could otherwise reassign an
   // obligation to a different org's anchor account id, a cross-tenant
@@ -131,11 +153,19 @@ const delete_compliance_from_db = async (req: Request) => {
  * Two-step flow identical to action.service.ts's upload_action_attachment: the
  * frontend uploads the file here first, then includes the returned URL in the
  * `attachments` array on a subsequent create/update call — so this endpoint
- * itself doesn't touch any ComplianceObligation row and only needs auth, not
- * org-scoped lookup. Response shape ({ url }) matches the action endpoint the
- * frontend upload helper already expects.
+ * itself doesn't touch any ComplianceObligation row. Response shape ({ url })
+ * matches the action endpoint the frontend upload helper already expects.
+ *
+ * It still needs the same write-role gate as create/update: a VIEWER /
+ * LIGHT_USER can't attach a file to any obligation, so letting them push files
+ * into Cloudinary here is pure resource abuse / orphaned uploads. Resolve the
+ * caller's org context and assertCanWriteOrgResource before touching storage.
+ * See aexa-server#207.
  */
 const upload_compliance_attachment_into_aws = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const file = req.file;
   if (!file) {
     throw new AppError('File is required', 400);
@@ -144,7 +174,11 @@ const upload_compliance_attachment_into_aws = async (req: Request) => {
   return { url: result.secure_url };
 };
 
-// Scorecard banding per CDC spec 7.7: red <70%, orange 70-85%, green >85%.
+// Scorecard banding per CDC spec 7.7. Boundaries are inclusive on the lower
+// edge (`>=`), so the exact wording that matches the code is:
+//   green:  ratio >= 0.85   (85% and above)
+//   orange: 0.70 <= ratio < 0.85
+//   red:    ratio < 0.70
 // A cell/group with no applicable obligations (total 0) has no meaningful
 // ratio — return 'none' so the frontend renders it as an empty/neutral cell
 // rather than a misleading red 0%.
@@ -191,6 +225,15 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
   // Overall
   const overallTotal = obligations.length;
   const overallCompliant = obligations.filter((o) => isCompliant(o.status)).length;
+
+  // Org-wide tally per status. The frontend summary cards (compliant /
+  // non-compliant counts) need whole-org totals that stay correct once the
+  // obligation LIST is server-side paginated — they can no longer be derived
+  // from a single page of rows. See aexa-frontend#161.
+  const statusCounts: Record<string, number> = {};
+  for (const o of obligations) {
+    statusCounts[o.status] = (statusCounts[o.status] ?? 0) + 1;
+  }
 
   // By domain
   const domainMap = new Map<string, { compliant: number; total: number }>();
@@ -246,6 +289,7 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
 
   return {
     overall: scoreCell(overallCompliant, overallTotal),
+    statusCounts,
     byDomain: Array.from(domainMap.entries())
       .map(([domain, v]) => ({ domain, ...scoreCell(v.compliant, v.total) }))
       .sort((a, b) => a.domain.localeCompare(b.domain)),

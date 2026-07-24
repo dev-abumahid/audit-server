@@ -12,6 +12,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    site: {
+      findFirst: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -28,9 +31,11 @@ vi.mock('../../app/utils/cloudinary.js', () => ({
 
 import { prisma } from '../../app/lib/prisma.js';
 import { compliance_service } from '../../app/modules/compliance/compliance.service.js';
+import { compliance_validations } from '../../app/modules/compliance/compliance.validation.js';
 import uploadCloud from '../../app/utils/cloudinary.js';
 
 const db = prisma.complianceObligation as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const uploadCloudMock = uploadCloud as unknown as ReturnType<typeof vi.fn>;
@@ -363,6 +368,249 @@ describe('compliance service — org scoping (issue #93)', () => {
       expect(result.byDomain).toEqual([]);
       expect(result.bySite).toEqual([]);
       expect(result.matrix).toEqual([]);
+    });
+
+    // Band boundary semantics (issue #208): thresholds are inclusive on the
+    // lower edge (`>=`), so 0.85 is green (not orange) and 0.70 is orange (not
+    // red). Rows are generated to land the overall ratio exactly on each edge.
+    const rowsWithRatio = (compliant: number, total: number) =>
+      Array.from({ length: total }, (_, i) => ({
+        status: i < compliant ? 'compliant' : 'non_compliant',
+        domain: 'Financial',
+        site_id: null,
+        site: null,
+      }));
+
+    it('bands a ratio of exactly 0.85 as green (>= is inclusive, not >)', async () => {
+      // 17/20 === 0.85 exactly.
+      db.findMany.mockResolvedValue(rowsWithRatio(17, 20));
+
+      const result = await compliance_service.get_compliance_scorecard_from_db(
+        makeReq({ query: {} }),
+      );
+
+      expect(result.overall.ratio).toBe(0.85);
+      expect(result.overall.band).toBe('green');
+    });
+
+    it('bands a ratio of exactly 0.70 as orange (lower orange boundary is inclusive)', async () => {
+      // 7/10 === 0.70 exactly.
+      db.findMany.mockResolvedValue(rowsWithRatio(7, 10));
+
+      const result = await compliance_service.get_compliance_scorecard_from_db(
+        makeReq({ query: {} }),
+      );
+
+      expect(result.overall.ratio).toBe(0.7);
+      expect(result.overall.band).toBe('orange');
+    });
+
+    it('bands a mid-range ratio (0.75) squarely in the orange band', async () => {
+      // 3/4 === 0.75.
+      db.findMany.mockResolvedValue(rowsWithRatio(3, 4));
+
+      const result = await compliance_service.get_compliance_scorecard_from_db(
+        makeReq({ query: {} }),
+      );
+
+      expect(result.overall.ratio).toBe(0.75);
+      expect(result.overall.band).toBe('orange');
+    });
+
+    it('bands a ratio just under 0.70 (0.6) as red', async () => {
+      // 3/5 === 0.60.
+      db.findMany.mockResolvedValue(rowsWithRatio(3, 5));
+
+      const result = await compliance_service.get_compliance_scorecard_from_db(
+        makeReq({ query: {} }),
+      );
+
+      expect(result.overall.band).toBe('red');
+    });
+
+    it('returns org-wide statusCounts so paginated summary cards stay accurate', async () => {
+      db.findMany.mockResolvedValue([
+        { status: 'compliant', domain: 'Financial', site_id: null, site: null },
+        { status: 'compliant', domain: 'Financial', site_id: null, site: null },
+        { status: 'non_compliant', domain: 'Financial', site_id: null, site: null },
+        { status: 'in_progress', domain: 'Financial', site_id: null, site: null },
+      ]);
+
+      const result = await compliance_service.get_compliance_scorecard_from_db(
+        makeReq({ query: {} }),
+      );
+
+      expect(result.statusCounts).toEqual({
+        compliant: 2,
+        non_compliant: 1,
+        in_progress: 1,
+      });
+    });
+  });
+
+  describe('site_id ownership validation (issue #205)', () => {
+    it('rejects a create whose site_id belongs to another org (404, no create)', async () => {
+      mockMembership('ADMIN');
+      // findFirst scoped to the caller org returns nothing -> foreign site.
+      siteDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.create_compliance_into_db(
+          makeReq({
+            body: {
+              title: 'X',
+              domain: 'Financial',
+              status: 'pending',
+              site_id: 'org-b-site-uuid',
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(siteDb.findFirst).toHaveBeenCalledWith({
+        where: { id: 'org-b-site-uuid', org_account_id: ORG_A },
+        select: { id: true },
+      });
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('allows a create whose site_id belongs to the caller org', async () => {
+      mockMembership('ADMIN');
+      siteDb.findFirst.mockResolvedValue({ id: 'own-site' });
+      db.create.mockResolvedValue({});
+
+      await compliance_service.create_compliance_into_db(
+        makeReq({
+          body: { title: 'X', domain: 'Financial', status: 'pending', site_id: 'own-site' },
+        }),
+      );
+
+      expect(db.create).toHaveBeenCalled();
+    });
+
+    it('rejects an update that re-scopes to another org site (404, no update)', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A });
+      siteDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { site_id: 'org-b-site-uuid' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('does not look up a site when site_id is null (clearing to org-wide is allowed)', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await compliance_service.update_compliance_into_db(
+        makeReq({ params: { id: 'c1' }, body: { site_id: null } }),
+      );
+
+      expect(siteDb.findFirst).not.toHaveBeenCalled();
+      // The null passes through to Prisma untouched — the row becomes org-wide.
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.site_id).toBeNull();
+    });
+  });
+
+  describe('upload_compliance_attachment_into_aws — write-role gate (issue #207)', () => {
+    it('rejects a VIEWER before touching Cloudinary', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        compliance_service.upload_compliance_attachment_into_aws(
+          makeReq({ file: { originalname: 'x.pdf' } } as never),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(uploadCloudMock).not.toHaveBeenCalled();
+    });
+
+    it('allows a LEAD_AUDITOR (writer) to upload', async () => {
+      mockMembership('LEAD_AUDITOR');
+      uploadCloudMock.mockResolvedValue({ secure_url: 'https://cdn.example/e.pdf' });
+
+      const result = await compliance_service.upload_compliance_attachment_into_aws(
+        makeReq({ file: { originalname: 'e.pdf' } } as never),
+      );
+
+      expect(result).toEqual({ url: 'https://cdn.example/e.pdf' });
+    });
+  });
+});
+
+describe('compliance validation schemas', () => {
+  describe('update_compliance — site_id clearing (issue #204)', () => {
+    it('passes an explicit null through as null (clear to org-wide)', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({ site_id: null });
+      expect(parsed).toHaveProperty('site_id', null);
+    });
+
+    it('normalizes "" to null (the "Org-wide" select value clears the scope)', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({ site_id: '' });
+      expect(parsed).toHaveProperty('site_id', null);
+    });
+
+    it('leaves site_id absent (undefined) when the field is not sent — "do not touch"', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({ title: 'x' });
+      expect('site_id' in parsed).toBe(false);
+    });
+
+    it('keeps a real site_id string intact', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        site_id: 'site-123',
+      });
+      expect(parsed).toHaveProperty('site_id', 'site-123');
+    });
+  });
+
+  describe('attachments URL/scheme allowlist (issue #206)', () => {
+    it('rejects a javascript: URL', async () => {
+      await expect(
+        compliance_validations.create_compliance.parseAsync({
+          title: 'x',
+          domain: 'Financial',
+          status: 'pending',
+          attachments: ['javascript:alert(1)'],
+        }),
+      ).rejects.toBeTruthy();
+    });
+
+    it('rejects a data: URL', async () => {
+      await expect(
+        compliance_validations.create_compliance.parseAsync({
+          title: 'x',
+          domain: 'Financial',
+          status: 'pending',
+          attachments: ['data:text/html,<script>alert(1)</script>'],
+        }),
+      ).rejects.toBeTruthy();
+    });
+
+    it('rejects a plain http: (non-https) URL', async () => {
+      await expect(
+        compliance_validations.create_compliance.parseAsync({
+          title: 'x',
+          domain: 'Financial',
+          status: 'pending',
+          attachments: ['http://cdn.example/e.pdf'],
+        }),
+      ).rejects.toBeTruthy();
+    });
+
+    it('accepts an https Cloudinary-style secure_url', async () => {
+      const parsed = await compliance_validations.create_compliance.parseAsync({
+        title: 'x',
+        domain: 'Financial',
+        status: 'pending',
+        attachments: ['https://res.cloudinary.com/demo/raw/upload/v1/e.pdf'],
+      });
+      expect(parsed.attachments).toEqual(['https://res.cloudinary.com/demo/raw/upload/v1/e.pdf']);
     });
   });
 });
