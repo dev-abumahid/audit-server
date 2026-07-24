@@ -23,6 +23,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     riskApproval: {
       findMany: vi.fn(),
       updateMany: vi.fn(),
+      count: vi.fn(),
     },
     orgMember: {
       findUnique: vi.fn(),
@@ -33,6 +34,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
     orgAuditLog: {
       create: vi.fn(),
     },
+    // aexa-server#203: update_risk_into_db now wraps the risk write + approval
+    // invalidation in a $transaction. The mock runs the interactive callback
+    // with the same mocked prisma as the tx client, so tx.risk.update /
+    // tx.riskApproval.* resolve to the mocks the tests already configure.
+    $transaction: vi.fn(),
   },
 }));
 
@@ -49,6 +55,7 @@ const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskApprovalDb = prisma.riskApproval as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const txFn = (prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }).$transaction;
 
 const ANCHOR = ORG_A;
 const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
@@ -82,6 +89,14 @@ describe('risk service — org scoping (ticket #6)', () => {
     // risk's approval on edit (aexa-frontend#95) is a no-op unless a test
     // overrides this.
     riskApprovalDb.findMany.mockResolvedValue([]);
+    // Default: no live approval cycle referencing the risk, so the delete
+    // in-use guard (aexa-server#202) is a no-op unless a test overrides it.
+    riskApprovalDb.count.mockResolvedValue(0);
+    // Default $transaction impl (aexa-server#203): run the interactive callback
+    // immediately with the same mocked prisma as the tx client, and propagate
+    // any error the callback throws (so a mid-transaction failure rejects,
+    // exactly as a real rollback would surface to the caller).
+    txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
   });
 
   describe('org-anchor scoping for invited (non-anchor) members', () => {
@@ -326,6 +341,47 @@ describe('risk service — org scoping (ticket #6)', () => {
 
       expect(riskApprovalDb.updateMany).not.toHaveBeenCalled();
     });
+
+    // aexa-server#203: the risk write and the approval invalidation must share
+    // ONE transaction boundary, so a crash between them can't leave an edited
+    // risk wearing a stale APPROVED badge. Confirms both writes run inside the
+    // single $transaction callback.
+    it('wraps the risk update and the approval invalidation in a single $transaction', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'r1' });
+      riskApprovalDb.findMany.mockResolvedValue([{ id: 'ra-1' }]);
+      riskApprovalDb.updateMany.mockResolvedValue({ count: 1 });
+
+      await risk_service.update_risk_into_db(makeReq({ params: { id: 'r1' } }));
+
+      // Exactly one transaction opened, and both writes happened within it.
+      expect(txFn).toHaveBeenCalledTimes(1);
+      expect(db.update).toHaveBeenCalled();
+      expect(riskApprovalDb.updateMany).toHaveBeenCalled();
+    });
+
+    // If the invalidation write fails mid-transaction, the whole update rejects
+    // — a real Prisma $transaction would roll the risk update back too, so
+    // neither is committed. (With the mocks, we assert the error propagates out
+    // of update_risk_into_db rather than being swallowed after a committed
+    // risk write.)
+    it('propagates a failure in the approval-invalidation step out of the transaction (nothing committed)', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'r1' });
+      riskApprovalDb.findMany.mockResolvedValue([{ id: 'ra-1' }]);
+      // The invalidation's guarded write throws inside the transaction callback.
+      riskApprovalDb.updateMany.mockRejectedValue(new Error('db exploded mid-invalidation'));
+
+      await expect(
+        risk_service.update_risk_into_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toThrow('db exploded mid-invalidation');
+
+      // The failing write happened inside the same $transaction as the risk
+      // update — so a real DB would roll the risk update back with it.
+      expect(txFn).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('delete_risk_from_db', () => {
@@ -393,11 +449,39 @@ describe('risk service — org scoping (ticket #6)', () => {
       expect(db.delete).not.toHaveBeenCalled();
     });
 
-    it('deletes a risk when it is not referenced by any inspection, recommendation or KRI', async () => {
+    // RiskApproval.risk is also onDelete: Cascade (risk.prisma:63), so deleting
+    // a risk with a live PENDING/APPROVED approval cycle would silently destroy
+    // the maker-checker sign-off record. The guard blocks it (aexa-server#202).
+    it('throws 409 and does NOT delete a risk with a live pending/approved approval cycle', async () => {
       db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
       inspectionDb.count.mockResolvedValue(0);
       recommendationDb.count.mockResolvedValue(0);
       kriDb.count.mockResolvedValue(0);
+      riskApprovalDb.count.mockResolvedValue(1);
+
+      await expect(
+        risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      // "live" is the same definition invalidateLiveApprovalsOnEdit uses:
+      // non-invalidated PENDING_APPROVAL or APPROVED. A REJECTED/invalidated
+      // cycle is terminal history and must NOT block the delete.
+      expect(riskApprovalDb.count).toHaveBeenCalledWith({
+        where: {
+          riskId: 'r1',
+          invalidatedAt: null,
+          status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+        },
+      });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a risk when it is not referenced by any inspection, recommendation, KRI or live approval cycle', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      inspectionDb.count.mockResolvedValue(0);
+      recommendationDb.count.mockResolvedValue(0);
+      kriDb.count.mockResolvedValue(0);
+      riskApprovalDb.count.mockResolvedValue(0);
       db.delete.mockResolvedValue({ id: 'r1' });
 
       await risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } }));

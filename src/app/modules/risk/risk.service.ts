@@ -116,17 +116,28 @@ const update_risk_into_db = async (req: Request) => {
   // Never trust org_account_id from the request body on an update — see the
   // identical fix in site.service.ts's update_site_into_db for why.
   const { org_account_id: _ignored, ...safeBody } = req.body;
-  const result = await prisma.risk.update({
-    where: { id },
-    data: { ...safeBody, org_account_id: ctx.organizationId },
-  });
 
-  // aexa-frontend#95: editing a risk's assessment invalidates any live
-  // approval cycle — the reviewed version is now stale, so the risk must be
-  // resubmitted for a fresh approval. No-op for risks that were never
-  // submitted (the common case), so this stays a single hook here rather than
-  // an approval-check duplicated across every risk-edit call site.
-  await risk_approval_service.invalidateLiveApprovalsOnEdit(id, ctx, user.accountId);
+  // aexa-frontend#95: editing a risk's assessment invalidates any live approval
+  // cycle — the reviewed version is now stale, so the risk must be resubmitted
+  // for a fresh approval. No-op for risks that were never submitted (the common
+  // case), so this stays a single hook rather than an approval-check duplicated
+  // across every risk-edit call site.
+  //
+  // aexa-server#203: the risk write and the approval invalidation must be
+  // atomic. Committing the edit and then invalidating in a separate statement
+  // left a window where a crash between the two would leave an edited risk still
+  // wearing a live APPROVED badge for an assessment no one re-reviewed. Wrapping
+  // both in one $transaction (and threading the tx client into the hook) makes
+  // them commit or roll back together. The hook's OrgAuditLog writes stay
+  // fire-and-forget on the singleton, per recordOrgAuditEvent's contract.
+  const result = await prisma.$transaction(async (tx) => {
+    const updated = await tx.risk.update({
+      where: { id },
+      data: { ...safeBody, org_account_id: ctx.organizationId },
+    });
+    await risk_approval_service.invalidateLiveApprovalsOnEdit(id, ctx, user.accountId, tx);
+    return updated;
+  });
 
   return result;
 };
@@ -143,19 +154,29 @@ const delete_risk_from_db = async (req: Request) => {
 
   // In-use guard (found by audit): Inspection.risk
   // (prisma/schema/inspection.prisma:34), Recommendation.risk
-  // (prisma/schema/recommendation.prisma:21) and Kri.risk
-  // (prisma/schema/kri.prisma:6) are all onDelete: Cascade, so deleting a
-  // risk that inspections, recommendations or KRIs still reference would
-  // silently destroy those records. Block the delete when the risk is still
-  // in use.
-  const [inspectionCount, recommendationCount, kriCount] = await Promise.all([
+  // (prisma/schema/recommendation.prisma:21), Kri.risk (prisma/schema/kri.prisma:6)
+  // and RiskApproval.risk (prisma/schema/risk.prisma:63) are all
+  // onDelete: Cascade, so deleting a risk that inspections, recommendations,
+  // KRIs or a live approval cycle still reference would silently destroy those
+  // records. Block the delete when the risk is still in use.
+  //
+  // aexa-server#202: "live" for an approval cycle means a non-invalidated
+  // PENDING_APPROVAL or APPROVED row — the same definition
+  // invalidateLiveApprovalsOnEdit uses. A REJECTED or already-invalidated cycle
+  // is terminal history and never blocks a fresh submission, so it doesn't block
+  // a delete either; losing it to the cascade is acceptable, losing a live
+  // maker-checker sign-off silently is not.
+  const [inspectionCount, recommendationCount, kriCount, approvalCount] = await Promise.all([
     prisma.inspection.count({ where: { riskId: id } }),
     prisma.recommendation.count({ where: { riskId: id } }),
     prisma.kri.count({ where: { risk_id: id } }),
+    prisma.riskApproval.count({
+      where: { riskId: id, invalidatedAt: null, status: { in: ['PENDING_APPROVAL', 'APPROVED'] } },
+    }),
   ]);
-  if (inspectionCount > 0 || recommendationCount > 0 || kriCount > 0) {
+  if (inspectionCount > 0 || recommendationCount > 0 || kriCount > 0 || approvalCount > 0) {
     throw new AppError(
-      `Cannot delete risk: ${inspectionCount} inspection(s), ${recommendationCount} recommendation(s) and ${kriCount} KRI(s) reference it.`,
+      `Cannot delete risk: ${inspectionCount} inspection(s), ${recommendationCount} recommendation(s), ${kriCount} KRI(s) and ${approvalCount} live approval cycle(s) reference it.`,
       409,
     );
   }

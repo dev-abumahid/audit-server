@@ -117,6 +117,16 @@ const submit_risk_for_approval = async (req: Request) => {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
       const winner = await prisma.riskApproval.findFirst({ where: liveWhere });
       if (winner) return winner;
+      // The row that tripped the unique index has already left the "live" set
+      // between the catch and this re-query — it was invalidated by a
+      // concurrent edit, or rejected, in that gap — so there is genuinely no
+      // live cycle to hand back. Rethrowing the raw P2002 would surface a 500
+      // for what is really a lost concurrency race; return a clean, retryable
+      // 409 so the submitter can simply resubmit. (aexa-server#201.)
+      throw new AppError(
+        'Could not submit this risk for approval due to a concurrent update. Please retry.',
+        409,
+      );
     }
     throw err;
   }
@@ -146,6 +156,20 @@ const approve_risk = async (req: Request) => {
   const organizationId = await requireCallerOrganizationId(ctx);
 
   const approval = await requireOrgScopedApproval(id, ctx);
+  // Maker-checker separation (aexa-frontend#95, aexa-server#200): the person
+  // who submitted a risk's assessment can never be the person who signs off on
+  // it, or the whole two-person control is theatre. Checked before the state
+  // checks so a self-submitter gets a clear 403 rather than leaking the cycle's
+  // status. Known, accepted consequence: an org with exactly one admin has no
+  // one who can approve a risk that admin submitted — that is the correct
+  // behavior of a real maker-checker gate (it requires two distinct people by
+  // design), not a bug, so there is deliberately no solo-admin workaround here.
+  if (approval.submittedById === user.accountId) {
+    throw new AppError(
+      'You cannot approve your own submission — ask another admin to review it.',
+      403,
+    );
+  }
   if (approval.status !== 'PENDING_APPROVAL') {
     throw new AppError('Only a pending approval can be approved.', 400);
   }
@@ -156,10 +180,22 @@ const approve_risk = async (req: Request) => {
     );
   }
 
-  const updated = await prisma.riskApproval.update({
-    where: { id },
+  // Concurrency guard (aexa-server#201), mirroring revokeLiveFindingAssignment
+  // in action.service.ts: the findFirst above established the cycle was
+  // PENDING_APPROVAL and non-invalidated at read time, but a second approve/
+  // reject (or an edit-triggered invalidation) could commit between that read
+  // and this write. Re-asserting the expected prior state in the updateMany
+  // where-clause means only the request that still finds a live pending row
+  // actually transitions it; a loser gets count === 0 and a clean 409 instead
+  // of a duplicate transition + duplicate audit entry (or a raw 500).
+  const { count } = await prisma.riskApproval.updateMany({
+    where: { id, status: 'PENDING_APPROVAL', invalidatedAt: null },
     data: { status: 'APPROVED', decidedById: user.accountId, decidedAt: new Date() },
   });
+  if (count === 0) {
+    throw new AppError('This approval was already decided or invalidated by another request.', 409);
+  }
+  const updated = await prisma.riskApproval.findUniqueOrThrow({ where: { id } });
 
   await recordOrgAuditEvent({
     organizationId,
@@ -185,6 +221,16 @@ const reject_risk = async (req: Request) => {
   const organizationId = await requireCallerOrganizationId(ctx);
 
   const approval = await requireOrgScopedApproval(id, ctx);
+  // Same maker-checker separation as approve_risk (aexa-server#200): a
+  // submitter cannot be the one who decides their own submission, even to
+  // reject it — the decision (either way) must come from a second admin. See
+  // approve_risk for the solo-admin-org consequence, which is intended.
+  if (approval.submittedById === user.accountId) {
+    throw new AppError(
+      'You cannot reject your own submission — ask another admin to review it.',
+      403,
+    );
+  }
   if (approval.status !== 'PENDING_APPROVAL') {
     throw new AppError('Only a pending approval can be rejected.', 400);
   }
@@ -195,8 +241,12 @@ const reject_risk = async (req: Request) => {
     );
   }
 
-  const updated = await prisma.riskApproval.update({
-    where: { id },
+  // Same concurrency guard as approve_risk (aexa-server#201) — re-assert the
+  // pending, non-invalidated prior state in the updateMany so a decision that
+  // was already made (or an invalidation that raced in) yields a clean 409
+  // rather than a second REJECTED transition + duplicate audit entry.
+  const { count } = await prisma.riskApproval.updateMany({
+    where: { id, status: 'PENDING_APPROVAL', invalidatedAt: null },
     data: {
       status: 'REJECTED',
       decidedById: user.accountId,
@@ -204,6 +254,10 @@ const reject_risk = async (req: Request) => {
       decisionNote,
     },
   });
+  if (count === 0) {
+    throw new AppError('This approval was already decided or invalidated by another request.', 409);
+  }
+  const updated = await prisma.riskApproval.findUniqueOrThrow({ where: { id } });
 
   await recordOrgAuditEvent({
     organizationId,
@@ -251,8 +305,17 @@ const invalidateLiveApprovalsOnEdit = async (
   riskId: string,
   ctx: CallerOrgContext,
   actorAccountId: string,
+  // The risk edit and this invalidation must commit or roll back together, or a
+  // crash between them leaves an edited risk still wearing a live APPROVED badge
+  // for an assessment no one re-reviewed (aexa-server#203). update_risk_into_db
+  // passes its $transaction client here so both writes share one transaction;
+  // the parameter defaults to the singleton so the hook stays callable
+  // standalone. Only the risk-state writes are transactional — the OrgAuditLog
+  // writes below stay fire-and-forget on the singleton, per recordOrgAuditEvent's
+  // "never fail the request it's logging" contract.
+  client: Prisma.TransactionClient = prisma,
 ): Promise<void> => {
-  const live = await prisma.riskApproval.findMany({
+  const live = await client.riskApproval.findMany({
     where: {
       riskId,
       invalidatedAt: null,
@@ -263,7 +326,7 @@ const invalidateLiveApprovalsOnEdit = async (
   if (live.length === 0) return;
 
   const now = new Date();
-  await prisma.riskApproval.updateMany({
+  await client.riskApproval.updateMany({
     where: {
       riskId,
       invalidatedAt: null,
