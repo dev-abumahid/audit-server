@@ -20,11 +20,18 @@ vi.mock('../../app/lib/prisma.js', () => ({
     kri: {
       count: vi.fn(),
     },
+    riskApproval: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
     organization: {
       findUnique: vi.fn(),
+    },
+    orgAuditLog: {
+      create: vi.fn(),
     },
   },
 }));
@@ -39,6 +46,7 @@ const recommendationDb = prisma.recommendation as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskApprovalDb = prisma.riskApproval as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -70,6 +78,10 @@ describe('risk service — org scoping (ticket #6)', () => {
     inspectionDb.count.mockResolvedValue(0);
     recommendationDb.count.mockResolvedValue(0);
     kriDb.count.mockResolvedValue(0);
+    // Default: no live approval cycle, so the update-hook that invalidates a
+    // risk's approval on edit (aexa-frontend#95) is a no-op unless a test
+    // overrides this.
+    riskApprovalDb.findMany.mockResolvedValue([]);
   });
 
   describe('org-anchor scoping for invited (non-anchor) members', () => {
@@ -181,6 +193,29 @@ describe('risk service — org scoping (ticket #6)', () => {
       expect(callArg.take).toBe(100);
     });
 
+    // aexa-frontend#95: the list attaches a derived approvalStatus (and the
+    // raw latest approval row) per risk so the register can render an approval
+    // badge without a per-row query.
+    it('attaches a derived approvalStatus per risk from its latest approval cycle', async () => {
+      db.findMany.mockResolvedValue([
+        { id: 'r1', approvals: [{ id: 'ra-1', status: 'PENDING_APPROVAL', invalidatedAt: null }] },
+        { id: 'r2', approvals: [] },
+        { id: 'r3', approvals: [{ id: 'ra-3', status: 'APPROVED', invalidatedAt: new Date() }] },
+      ]);
+      db.count.mockResolvedValue(3);
+
+      const result = await risk_service.get_all_risk_from_db(makeReq());
+
+      expect(result.data).toEqual([
+        expect.objectContaining({ id: 'r1', approvalStatus: 'PENDING_APPROVAL' }),
+        expect.objectContaining({ id: 'r2', approvalStatus: 'NOT_SUBMITTED', approval: null }),
+        // Latest cycle was invalidated by an edit -> reads as NOT_SUBMITTED.
+        expect.objectContaining({ id: 'r3', approvalStatus: 'NOT_SUBMITTED' }),
+      ]);
+      // The single-element approvals array is flattened out of the payload.
+      expect(result.data[0]).not.toHaveProperty('approvals');
+    });
+
     it('defaults to page 1 / limit 10 when no query params are supplied', async () => {
       db.findMany.mockResolvedValue([]);
       db.count.mockResolvedValue(0);
@@ -257,6 +292,39 @@ describe('risk service — org scoping (ticket #6)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    // aexa-frontend#95: editing a risk invalidates any live approval cycle so a
+    // changed assessment can't keep an already-granted approval. Verifies the
+    // hook is actually wired into the update path, not just defined.
+    it('invalidates a live approval cycle when the risk is edited', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'r1' });
+      riskApprovalDb.findMany.mockResolvedValue([{ id: 'ra-1' }]);
+      riskApprovalDb.updateMany.mockResolvedValue({ count: 1 });
+
+      await risk_service.update_risk_into_db(makeReq({ params: { id: 'r1' } }));
+
+      expect(riskApprovalDb.updateMany).toHaveBeenCalledWith({
+        where: {
+          riskId: 'r1',
+          invalidatedAt: null,
+          status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+        },
+        data: { invalidatedAt: expect.any(Date), invalidatedById: ORG_A },
+      });
+    });
+
+    it('does NOT touch approvals when the edited risk has no live approval cycle', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'r1' });
+      riskApprovalDb.findMany.mockResolvedValue([]);
+
+      await risk_service.update_risk_into_db(makeReq({ params: { id: 'r1' } }));
+
+      expect(riskApprovalDb.updateMany).not.toHaveBeenCalled();
     });
   });
 

@@ -4,6 +4,7 @@ import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
+import { deriveApprovalState, risk_approval_service } from './risk.approval.service.js';
 
 const get_all_risk_from_db = async (req: Request) => {
   const { searchTerm, siteId, category } = req.query as Record<string, string>;
@@ -53,6 +54,14 @@ const get_all_risk_from_db = async (req: Request) => {
             name: true,
           },
         },
+        // aexa-frontend#95: latest approval cycle only (take: 1, newest
+        // first), so the register table can render an approval badge and
+        // expose the approval id for admin approve/reject without an N+1
+        // per-row GET /risk/:id/approval fan-out.
+        approvals: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
       },
     }),
 
@@ -61,9 +70,18 @@ const get_all_risk_from_db = async (req: Request) => {
     }),
   ]);
 
+  // Flatten the single-element approvals array into a derived display state
+  // (via the same deriveApprovalState the dedicated endpoint uses, so the
+  // list badge and the detail endpoint can't disagree) plus the raw latest
+  // row for its id/decisionNote.
+  const risksWithApproval = data.map(({ approvals, ...risk }) => {
+    const latest = approvals[0] ?? null;
+    return { ...risk, approval: latest, approvalStatus: deriveApprovalState(latest) };
+  });
+
   return {
     meta: buildPaginationMeta(pagination, total),
-    data,
+    data: risksWithApproval,
   };
 };
 
@@ -102,6 +120,14 @@ const update_risk_into_db = async (req: Request) => {
     where: { id },
     data: { ...safeBody, org_account_id: ctx.organizationId },
   });
+
+  // aexa-frontend#95: editing a risk's assessment invalidates any live
+  // approval cycle — the reviewed version is now stale, so the risk must be
+  // resubmitted for a fresh approval. No-op for risks that were never
+  // submitted (the common case), so this stays a single hook here rather than
+  // an approval-check duplicated across every risk-edit call site.
+  await risk_approval_service.invalidateLiveApprovalsOnEdit(id, ctx, user.accountId);
+
   return result;
 };
 

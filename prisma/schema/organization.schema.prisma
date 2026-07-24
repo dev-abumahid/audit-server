@@ -234,6 +234,14 @@ enum OrgAuditAction {
     EXTERNAL_MEMBER_INVITED
     EXTERNAL_MEMBER_REMOVED
     EXTERNAL_MEMBER_LOGIN_SUCCEEDED
+    // aexa-frontend#95: risk maker-checker approval workflow. A risk's
+    // approval cycle isn't about an OrgMember/ExternalOrgMember subject, so
+    // these rows carry the riskId/approvalId in metadata rather than a
+    // subject* column (both of which stay null for these actions).
+    RISK_SUBMITTED_FOR_APPROVAL
+    RISK_APPROVAL_APPROVED
+    RISK_APPROVAL_REJECTED
+    RISK_APPROVAL_INVALIDATED
 }
 
 model OrgAuditLog {

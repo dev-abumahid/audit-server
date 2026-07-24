@@ -635,7 +635,11 @@ export const recordOrgAuditEvent = async (entry: {
     | 'ORG_SETTINGS_CHANGED'
     | 'EXTERNAL_MEMBER_INVITED'
     | 'EXTERNAL_MEMBER_REMOVED'
-    | 'EXTERNAL_MEMBER_LOGIN_SUCCEEDED';
+    | 'EXTERNAL_MEMBER_LOGIN_SUCCEEDED'
+    | 'RISK_SUBMITTED_FOR_APPROVAL'
+    | 'RISK_APPROVAL_APPROVED'
+    | 'RISK_APPROVAL_REJECTED'
+    | 'RISK_APPROVAL_INVALIDATED';
   actorAccountId?: string | null;
   subjectOrgMemberId?: string | null;
   subjectExternalOrgMemberId?: string | null;

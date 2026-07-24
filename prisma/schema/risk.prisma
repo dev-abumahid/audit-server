@@ -29,6 +29,61 @@ model Risk {
     templates       Template[]
     recommendations Recommendation[]
     kris            Kri[]
+    approvals       RiskApproval[]
 
     @@index([org_account_id])
+}
+
+// Maker-checker approval state for a risk's CURRENT assessment, closing
+// aexa-frontend#95. Structurally mirrors FindingAssignment (issue #55 slice 4,
+// organization.schema.prisma): a dedicated table (not columns bolted onto
+// Risk, not a generic polymorphic engine) whose status enum drives an
+// admin-only approval gate with a full OrgAuditLog trail.
+//
+// Deliberately SEPARATE from the operational `Risk.status` string
+// (open/in_progress/completed/closed): approval state answers "has the current
+// version of this risk's assessment been reviewed and signed off", which is an
+// orthogonal concept to where the risk sits in its operational lifecycle.
+//
+// State machine: a LEAD_AUDITOR (or ADMIN) submits -> PENDING_APPROVAL; an
+// ADMIN approves -> APPROVED or rejects -> REJECTED. Editing a risk that has a
+// live PENDING_APPROVAL/APPROVED cycle invalidates it (invalidatedAt set) —
+// the reviewed version is stale, so a fresh submission is required. A REJECTED
+// or invalidated row never blocks a new submission, enforced by a partial
+// unique index in the migration (one live, non-rejected cycle per risk).
+enum RiskApprovalStatus {
+    PENDING_APPROVAL
+    APPROVED
+    REJECTED
+}
+
+model RiskApproval {
+    id     String @id @default(uuid())
+    riskId String
+    risk   Risk   @relation(fields: [riskId], references: [id], onDelete: Cascade)
+
+    status RiskApprovalStatus @default(PENDING_APPROVAL)
+    // accountId of the LEAD_AUDITOR/ADMIN who submitted the assessment for
+    // approval. Plain string, mirroring FindingAssignment.assignedById (not an
+    // Account FK).
+    submittedById String
+    // accountId of the ADMIN who approved/rejected; null while pending.
+    decidedById String?
+    decidedAt   DateTime?
+    // Required on REJECTED so the reviewer's reason travels back to the
+    // submitter ("returns with questions", Archer precedent); null otherwise.
+    decisionNote String?
+
+    // Soft-supersede, same shape as FindingAssignment.revokedAt: an edit to the
+    // risk after this cycle started sets invalidatedAt, forcing a resubmission.
+    // Also the analog of FindingAssignment's "revoked-while-pending" edge case
+    // — approve/reject must reject an already-invalidated pending row.
+    invalidatedAt   DateTime?
+    invalidatedById String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([riskId])
+    @@index([status])
 }
