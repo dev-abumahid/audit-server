@@ -232,6 +232,24 @@ const delete_template_page_by_id_from_db = async (req: Request) => {
   if (!page || page.template.orgAccountId !== ctx.organizationId) {
     throw new AppError('Page not found', 404);
   }
+
+  // In-use guard (found by audit follow-up): deleting a Page cascade-deletes
+  // its Questions (Question.page is onDelete: Cascade, template.prisma), and
+  // each Question cascade-deletes its QuestionAnswers and Actions — the exact
+  // hazard the question-level guard in delete_page_question_by_id_from_db
+  // blocks, bypassable one level up via page deletion. Block the delete when
+  // any question on this page is still in use, matching that guard.
+  const [answerCount, actionCount] = await Promise.all([
+    prisma.questionAnswer.count({ where: { question: { pageId: id } } }),
+    prisma.action.count({ where: { question: { pageId: id } } }),
+  ]);
+  if (answerCount > 0 || actionCount > 0) {
+    throw new AppError(
+      `Cannot delete page: its questions have ${answerCount} answer(s) and ${actionCount} action(s) referencing them.`,
+      409,
+    );
+  }
+
   return await prisma.page.delete({ where: { id } });
 };
 

@@ -17,6 +17,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
     recommendation: {
       count: vi.fn(),
     },
+    kri: {
+      count: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -35,6 +38,7 @@ const recommendationDb = prisma.recommendation as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
+const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -65,6 +69,7 @@ describe('risk service — org scoping (ticket #6)', () => {
     // unless a specific test overrides these counts.
     inspectionDb.count.mockResolvedValue(0);
     recommendationDb.count.mockResolvedValue(0);
+    kriDb.count.mockResolvedValue(0);
   });
 
   describe('org-anchor scoping for invited (non-anchor) members', () => {
@@ -302,10 +307,29 @@ describe('risk service — org scoping (ticket #6)', () => {
       expect(db.delete).not.toHaveBeenCalled();
     });
 
-    it('deletes a risk when it is not referenced by any inspection or recommendation', async () => {
+    // Kri.risk is also onDelete: Cascade (kri.prisma:6) — KRIs are real org
+    // data with their own CRUD module, so risk deletion must not silently
+    // destroy them either (audit follow-up: the original guard only counted
+    // inspections and recommendations).
+    it('throws 409 and does NOT delete a risk still referenced by a KRI', async () => {
       db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
       inspectionDb.count.mockResolvedValue(0);
       recommendationDb.count.mockResolvedValue(0);
+      kriDb.count.mockResolvedValue(1);
+
+      await expect(
+        risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(kriDb.count).toHaveBeenCalledWith({ where: { risk_id: 'r1' } });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a risk when it is not referenced by any inspection, recommendation or KRI', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      inspectionDb.count.mockResolvedValue(0);
+      recommendationDb.count.mockResolvedValue(0);
+      kriDb.count.mockResolvedValue(0);
       db.delete.mockResolvedValue({ id: 'r1' });
 
       await risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } }));

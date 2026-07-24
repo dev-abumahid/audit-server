@@ -128,6 +128,26 @@ const delete_site_from_db = async (req: Request) => {
     where: { id, org_account_id: ctx.organizationId },
   });
   if (!existing) throw new AppError('Site not found', 404);
+  // In-use guard, same pattern as the template/question/risk delete guards:
+  // Risk.site (risk.prisma, required FK), Inspection.site (inspection.prisma,
+  // required FK), Action.site and Recommendation.site (both optional FKs) are
+  // all onDelete: Cascade, so deleting a site that any of them still
+  // reference would silently destroy those records (and their own cascades —
+  // KRIs under risks, answers/notes under inspections). Block the delete
+  // while the site is still in use. Relations that are SetNull (none onto
+  // Site today) would not need blocking.
+  const [riskCount, inspectionCount, actionCount, recommendationCount] = await Promise.all([
+    prisma.risk.count({ where: { site_id: id } }),
+    prisma.inspection.count({ where: { siteId: id } }),
+    prisma.action.count({ where: { siteId: id } }),
+    prisma.recommendation.count({ where: { siteId: id } }),
+  ]);
+  if (riskCount > 0 || inspectionCount > 0 || actionCount > 0 || recommendationCount > 0) {
+    throw new AppError(
+      `Cannot delete site: ${riskCount} risk(s), ${inspectionCount} inspection(s), ${actionCount} action(s) and ${recommendationCount} recommendation(s) reference it.`,
+      409,
+    );
+  }
   const result = await prisma.site.delete({ where: { id, org_account_id: ctx.organizationId } });
   return result;
 };

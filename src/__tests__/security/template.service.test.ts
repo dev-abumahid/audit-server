@@ -607,6 +607,52 @@ describe('template service — in-use delete guards (found by audit)', () => {
     });
   });
 
+  describe('delete_template_page_by_id_from_db', () => {
+    const ownedPage = { template: { orgAccountId: ORG_A } };
+
+    // Deleting a Page cascade-deletes its Questions, which cascade-delete
+    // QuestionAnswers and Actions — the same hazard the question-level guard
+    // blocks, bypassable one level up without this guard (audit follow-up).
+    it('throws 409 and does NOT delete a page whose questions have answers', async () => {
+      pageDb.findFirst.mockResolvedValue(ownedPage);
+      questionAnswerDb.count.mockResolvedValue(3);
+      actionDb.count.mockResolvedValue(0);
+
+      await expect(
+        template_service.delete_template_page_by_id_from_db(makeReq({ params: { id: 'p1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(questionAnswerDb.count).toHaveBeenCalledWith({
+        where: { question: { pageId: 'p1' } },
+      });
+      expect(pageDb.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws 409 and does NOT delete a page whose questions have actions', async () => {
+      pageDb.findFirst.mockResolvedValue(ownedPage);
+      questionAnswerDb.count.mockResolvedValue(0);
+      actionDb.count.mockResolvedValue(1);
+
+      await expect(
+        template_service.delete_template_page_by_id_from_db(makeReq({ params: { id: 'p1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(actionDb.count).toHaveBeenCalledWith({ where: { question: { pageId: 'p1' } } });
+      expect(pageDb.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a page when none of its questions have answers or actions', async () => {
+      pageDb.findFirst.mockResolvedValue(ownedPage);
+      questionAnswerDb.count.mockResolvedValue(0);
+      actionDb.count.mockResolvedValue(0);
+      pageDb.delete.mockResolvedValue({ id: 'p1' });
+
+      await template_service.delete_template_page_by_id_from_db(makeReq({ params: { id: 'p1' } }));
+
+      expect(pageDb.delete).toHaveBeenCalledWith({ where: { id: 'p1' } });
+    });
+  });
+
   describe('delete_page_question_by_id_from_db', () => {
     const ownedQuestion = {
       page: { template: { orgAccountId: ORG_A } },

@@ -12,6 +12,18 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    risk: {
+      count: vi.fn(),
+    },
+    inspection: {
+      count: vi.fn(),
+    },
+    action: {
+      count: vi.fn(),
+    },
+    recommendation: {
+      count: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -25,6 +37,13 @@ import { prisma } from '../../app/lib/prisma.js';
 import { site_service } from '../../app/modules/site/site.service.js';
 
 const db = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const actionDb = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const recommendationDb = prisma.recommendation as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -51,6 +70,12 @@ describe('site service — org scoping (ticket #6)', () => {
     // caller's own accountId), same as every pre-org-scoping-migration test
     // in this file expects.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default: nothing references the site, so delete-path tests pass the
+    // in-use guard unless a specific test overrides these counts.
+    riskDb.count.mockResolvedValue(0);
+    inspectionDb.count.mockResolvedValue(0);
+    actionDb.count.mockResolvedValue(0);
+    recommendationDb.count.mockResolvedValue(0);
   });
 
   describe('write-path role scoping (issue #55 slice 3)', () => {
@@ -234,6 +259,73 @@ describe('site service — org scoping (ticket #6)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('delete_site_from_db — in-use guard (found by audit)', () => {
+    // Risk.site, Inspection.site, Action.site and Recommendation.site are all
+    // onDelete: Cascade (see prisma/schema/), so an unguarded site delete
+    // would silently cascade-destroy every one of those records. Same guard
+    // pattern as the template/question/risk delete guards.
+    const ownedSite = { id: 's1', org_account_id: ORG_A };
+
+    it('throws 409 and does NOT delete a site that still has risks', async () => {
+      db.findFirst.mockResolvedValue(ownedSite);
+      riskDb.count.mockResolvedValue(2);
+
+      await expect(
+        site_service.delete_site_from_db(makeReq({ params: { id: 's1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(riskDb.count).toHaveBeenCalledWith({ where: { site_id: 's1' } });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws 409 and does NOT delete a site that still has inspections', async () => {
+      db.findFirst.mockResolvedValue(ownedSite);
+      inspectionDb.count.mockResolvedValue(1);
+
+      await expect(
+        site_service.delete_site_from_db(makeReq({ params: { id: 's1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(inspectionDb.count).toHaveBeenCalledWith({ where: { siteId: 's1' } });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws 409 and does NOT delete a site that still has actions', async () => {
+      db.findFirst.mockResolvedValue(ownedSite);
+      actionDb.count.mockResolvedValue(1);
+
+      await expect(
+        site_service.delete_site_from_db(makeReq({ params: { id: 's1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(actionDb.count).toHaveBeenCalledWith({ where: { siteId: 's1' } });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws 409 and does NOT delete a site that still has recommendations', async () => {
+      db.findFirst.mockResolvedValue(ownedSite);
+      recommendationDb.count.mockResolvedValue(1);
+
+      await expect(
+        site_service.delete_site_from_db(makeReq({ params: { id: 's1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(recommendationDb.count).toHaveBeenCalledWith({ where: { siteId: 's1' } });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a site (still org-scoped) when nothing references it', async () => {
+      db.findFirst.mockResolvedValue(ownedSite);
+      db.delete.mockResolvedValue({ id: 's1' });
+
+      await site_service.delete_site_from_db(makeReq({ params: { id: 's1' } }));
+
+      expect(db.delete).toHaveBeenCalledWith({
+        where: { id: 's1', org_account_id: ORG_A },
+      });
     });
   });
 });
