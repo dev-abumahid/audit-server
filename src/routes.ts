@@ -3,6 +3,7 @@ import accountRouter from './app/modules/account/account.route.js';
 import actionRoute from './app/modules/action/action.route.js';
 import aiRoute from './app/modules/ai/ai.route.js';
 import alertRoute from './app/modules/alert/alert.route.js';
+import auditRoute from './app/modules/audit/audit.route.js';
 import externalAuthRoute from './app/modules/external-auth/external-auth.route.js';
 import knowledgeBaseRoute from './app/modules/knowledge_base/knowledge_base.route.js';
 import kriRoute from './app/modules/kri/kri.route.js';
@@ -26,6 +27,7 @@ const moduleRoutes = [
   { path: '/risk', route: riskRoute },
   { path: '/kri', route: kriRoute },
   { path: '/alert', route: alertRoute },
+  { path: '/audit', route: auditRoute },
   { path: '/action', route: actionRoute },
   { path: '/site', route: siteRoute },
   { path: '/template', route: templateRoute },

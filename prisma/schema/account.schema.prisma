@@ -41,6 +41,7 @@ model Account {
     kris                Kri[]
     alerts              Alert[]
     notifications       Notification[]
+    auditEngagements    AuditEngagement[]
 
     // Org membership — nullable/optional since not every account has one
     // until the slice-1 backfill script runs (see src/scripts/backfill-org-membership.ts).

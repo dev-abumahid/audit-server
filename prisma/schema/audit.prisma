@@ -1,0 +1,22 @@
+model AuditEngagement {
+    id               String    @id @default(uuid())
+    org_account_id   String
+    account          Account   @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+    ref              String
+    title            String
+    scope            String?
+    status           String
+    lead_auditor     String?
+    priority_score   Int?
+    findings_count   Int       @default(0)
+    started_at       DateTime?
+    closed_at        DateTime?
+    ai_generated     Boolean   @default(false)
+    is_edited        Boolean   @default(false)
+    linked_risk_refs String[]
+    report_url       String?
+    createdAt        DateTime  @default(now())
+    updatedAt        DateTime  @updatedAt
+
+    @@index([org_account_id])
+}
