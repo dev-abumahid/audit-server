@@ -60,5 +60,10 @@ export const configs = {
   },
   ai_server_end_point: process.env.AI_SERVER_ENDPOINT as string,
   ai_internal_secret: process.env.AI_INTERNAL_SECRET as string,
+  // Path to a system Chromium for Puppeteer's PDF rendering. Unset in local
+  // dev (Puppeteer uses its own bundled Chromium); set in the production
+  // Docker image to /usr/bin/chromium since the bundled Chromium can't run on
+  // Alpine musl. See Dockerfile.
+  puppeteer_executable_path: process.env.PUPPETEER_EXECUTABLE_PATH,
   session_secret: process.env.SESSION_SECRET,
 };

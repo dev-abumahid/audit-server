@@ -1,0 +1,365 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ORG_A, makeReq } from '../helpers/makeReq.js';
+
+vi.mock('../../app/lib/logger.js', () => ({
+  logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+}));
+
+vi.mock('../../app/lib/prisma.js', () => ({
+  prisma: {
+    report: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      count: vi.fn(),
+    },
+    organizationProfile: { findUnique: vi.fn() },
+    risk: { findMany: vi.fn() },
+    kri: { findMany: vi.fn() },
+    site: { findMany: vi.fn() },
+    action: { findMany: vi.fn() },
+    orgMember: { findUnique: vi.fn() },
+    organization: { findUnique: vi.fn() },
+  },
+}));
+
+// Puppeteer render and the S3/Cloudinary upload are the two heavy external
+// steps in the generate pipeline — mock both so the orchestration can be
+// tested without launching Chromium or hitting object storage.
+vi.mock('../../app/utils/report_pdf.js', () => ({
+  renderReportPdf: vi.fn(),
+}));
+vi.mock('../../app/utils/cloudinary.js', () => ({
+  default: vi.fn(),
+}));
+
+import { prisma } from '../../app/lib/prisma.js';
+import uploadCloud from '../../app/utils/cloudinary.js';
+import { renderReportPdf } from '../../app/utils/report_pdf.js';
+import { report_service } from '../../app/modules/report/report.service.js';
+
+const reportDb = prisma.report as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const profileDb = prisma.organizationProfile as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const actionDb = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const mockRender = renderReportPdf as unknown as ReturnType<typeof vi.fn>;
+const mockUpload = uploadCloud as unknown as ReturnType<typeof vi.fn>;
+
+const ANCHOR = ORG_A;
+const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
+const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
+
+const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER') => {
+  orgMemberDb.findUnique.mockResolvedValue({
+    id: MEMBER_ID,
+    organizationId: ORG_ID,
+    accountId: ORG_A,
+    role,
+    status: 'ACTIVE',
+    expiresAt: null,
+  });
+  organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+};
+
+const AI_CONTENT = {
+  title: 'Board Risk Report',
+  subtitle: 'Q3 2026',
+  reference: 'BOARD-2026-Q3',
+  classification: 'Confidential',
+  executive_summary: 'Summary.',
+  organization_summary: {
+    name: 'Acme',
+    site_count: 1,
+    risk_count: 1,
+    kri_count: 0,
+    open_action_count: 0,
+    narrative: 'Narrative.',
+  },
+  top_risks: [],
+  kri_dashboard: [],
+  open_actions: [],
+  outlook: 'Outlook.',
+};
+
+const primeOrgDataMocks = () => {
+  profileDb.findUnique.mockResolvedValue({ organizationName: 'Acme' });
+  riskDb.findMany.mockResolvedValue([]);
+  kriDb.findMany.mockResolvedValue([]);
+  siteDb.findMany.mockResolvedValue([]);
+  actionDb.findMany.mockResolvedValue([]);
+};
+
+describe('report service — org scoping (issue #94)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+    // Default: no OrgMember row — ADMIN-of-self fallback, same convention as
+    // every sibling service test.
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  describe('get_all_report_from_db', () => {
+    it('filters findMany and count by caller org', async () => {
+      reportDb.findMany.mockResolvedValue([]);
+      reportDb.count.mockResolvedValue(0);
+
+      await report_service.get_all_report_from_db(makeReq({ query: {} }));
+
+      expect(reportDb.findMany.mock.calls[0][0].where).toMatchObject({ org_account_id: ORG_A });
+      expect(reportDb.count.mock.calls[0][0].where).toMatchObject({ org_account_id: ORG_A });
+    });
+
+    it('includes totalPage in meta via the shared pagination helper', async () => {
+      reportDb.findMany.mockResolvedValue([]);
+      reportDb.count.mockResolvedValue(23);
+
+      const result = await report_service.get_all_report_from_db(
+        makeReq({ query: { page: '2', limit: '10' } }),
+      );
+
+      expect(result.meta).toEqual({ page: 2, limit: 10, skip: 10, total: 23, totalPage: 3 });
+    });
+  });
+
+  describe('get_single_report_from_db', () => {
+    it('scopes the lookup by org', async () => {
+      reportDb.findUnique.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+
+      await report_service.get_single_report_from_db(makeReq({ params: { id: 'r1' } }));
+
+      expect(reportDb.findUnique).toHaveBeenCalledWith({
+        where: { id: 'r1', org_account_id: ORG_A },
+      });
+    });
+
+    it('throws 404 for a cross-org / missing report instead of returning null', async () => {
+      reportDb.findUnique.mockResolvedValue(null);
+
+      await expect(
+        report_service.get_single_report_from_db(makeReq({ params: { id: 'org-b-report' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+  });
+
+  describe('generate_report_into_db — write-path role scoping', () => {
+    it('VIEWER cannot generate a report', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        report_service.generate_report_into_db(makeReq({ body: {} })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(reportDb.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unsupported report type without creating a row', async () => {
+      await expect(
+        report_service.generate_report_into_db(makeReq({ body: { type: 'AUDIT_OPINION' } })),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(reportDb.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('generate_report_into_db — success path', () => {
+    it('creates GENERATING, runs the pipeline, and updates to READY with content + file_url', async () => {
+      primeOrgDataMocks();
+      reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'Board Risk Report' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(AI_CONTENT),
+      });
+      mockRender.mockResolvedValue(Buffer.from('%PDF-1.7'));
+      mockUpload.mockResolvedValue({ secure_url: 'https://cdn.example/report.pdf', key: 'k' });
+      reportDb.update.mockResolvedValue({ id: 'rep-1', status: 'READY' });
+
+      const result = await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      // Row created at GENERATING first.
+      expect(reportDb.create.mock.calls[0][0].data).toMatchObject({
+        org_account_id: ORG_A,
+        status: 'GENERATING',
+        generated_by: ORG_A,
+      });
+      // aexa-ai was called, PDF rendered, uploaded.
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/report_content'),
+        expect.anything(),
+      );
+      expect(mockRender).toHaveBeenCalledWith(AI_CONTENT);
+      expect(mockUpload).toHaveBeenCalled();
+      // Final update transitions to READY with the artifact + content.
+      const updateArg = reportDb.update.mock.calls[0][0];
+      expect(updateArg.data).toMatchObject({
+        status: 'READY',
+        file_url: 'https://cdn.example/report.pdf',
+        reference: 'BOARD-2026-Q3',
+      });
+      expect(result).toMatchObject({ status: 'READY' });
+    });
+
+    it('forwards the X-Internal-Secret header on the aexa-ai call', async () => {
+      primeOrgDataMocks();
+      reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'x' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(AI_CONTENT),
+      });
+      mockRender.mockResolvedValue(Buffer.from('%PDF'));
+      mockUpload.mockResolvedValue({ secure_url: 'https://cdn/x.pdf', key: 'k' });
+      reportDb.update.mockResolvedValue({});
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(init.headers).toHaveProperty('X-Internal-Secret');
+    });
+  });
+
+  describe('generate_report_into_db — failure marks status FAILED', () => {
+    it('marks the row FAILED (not stuck GENERATING) when aexa-ai errors', async () => {
+      primeOrgDataMocks();
+      reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'x' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 502 });
+      reportDb.update.mockResolvedValue({ id: 'rep-1', status: 'FAILED' });
+
+      const result = await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const updateArg = reportDb.update.mock.calls[0][0];
+      expect(updateArg.data.status).toBe('FAILED');
+      expect(updateArg.data.error_message).toBeTruthy();
+      // Generic message — no raw upstream detail leaked.
+      expect(updateArg.data.error_message).not.toContain('502');
+      expect(result).toMatchObject({ status: 'FAILED' });
+      expect(mockRender).not.toHaveBeenCalled();
+    });
+
+    it('marks the row FAILED when Puppeteer render throws', async () => {
+      primeOrgDataMocks();
+      reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'x' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(AI_CONTENT),
+      });
+      mockRender.mockRejectedValue(new Error('Chromium crashed at /internal/path'));
+      reportDb.update.mockResolvedValue({ id: 'rep-1', status: 'FAILED' });
+
+      const result = await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      expect(reportDb.update.mock.calls[0][0].data.status).toBe('FAILED');
+      // Raw internal error text must not reach the persisted (client-visible) message.
+      expect(reportDb.update.mock.calls[0][0].data.error_message).not.toContain('/internal/path');
+      expect(result).toMatchObject({ status: 'FAILED' });
+      expect(mockUpload).not.toHaveBeenCalled();
+    });
+
+    it('marks the row FAILED when the upload fails', async () => {
+      primeOrgDataMocks();
+      reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'x' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(AI_CONTENT),
+      });
+      mockRender.mockResolvedValue(Buffer.from('%PDF'));
+      mockUpload.mockRejectedValue(new Error('S3 upload failed'));
+      reportDb.update.mockResolvedValue({ id: 'rep-1', status: 'FAILED' });
+
+      const result = await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      expect(reportDb.update.mock.calls[0][0].data.status).toBe('FAILED');
+      expect(result).toMatchObject({ status: 'FAILED' });
+    });
+  });
+
+  describe('download_report_from_db', () => {
+    it('returns the file_url for a READY report', async () => {
+      reportDb.findUnique.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        status: 'READY',
+        file_url: 'https://cdn/x.pdf',
+      });
+
+      const result = await report_service.download_report_from_db(
+        makeReq({ params: { id: 'r1' } }),
+      );
+
+      expect(result).toEqual({ file_url: 'https://cdn/x.pdf' });
+    });
+
+    it('throws 404 for a cross-org / missing report', async () => {
+      reportDb.findUnique.mockResolvedValue(null);
+
+      await expect(
+        report_service.download_report_from_db(makeReq({ params: { id: 'org-b' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+
+    it('throws 409 when the report is still GENERATING', async () => {
+      reportDb.findUnique.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        status: 'GENERATING',
+        file_url: null,
+      });
+
+      await expect(
+        report_service.download_report_from_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+    });
+  });
+
+  describe('publish_report_into_db — admin gate + state machine', () => {
+    it('non-admin (LEAD_AUDITOR) cannot publish', async () => {
+      mockMembership('LEAD_AUDITOR');
+
+      await expect(
+        report_service.publish_report_into_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(reportDb.update).not.toHaveBeenCalled();
+    });
+
+    it('admin publishing a READY report transitions it to PUBLISHED and stamps reviewer', async () => {
+      mockMembership('ADMIN');
+      reportDb.findUnique.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR, status: 'READY' });
+      reportDb.update.mockResolvedValue({ id: 'r1', status: 'PUBLISHED' });
+
+      await report_service.publish_report_into_db(makeReq({ params: { id: 'r1' } }));
+
+      const updateArg = reportDb.update.mock.calls[0][0];
+      expect(updateArg.data.status).toBe('PUBLISHED');
+      expect(updateArg.data.reviewed_by).toBe(ORG_A);
+      expect(updateArg.data.reviewed_at).toBeInstanceOf(Date);
+    });
+
+    it('throws 409 when the report is not in READY state (e.g. already PUBLISHED)', async () => {
+      mockMembership('ADMIN');
+      reportDb.findUnique.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        status: 'PUBLISHED',
+      });
+
+      await expect(
+        report_service.publish_report_into_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(reportDb.update).not.toHaveBeenCalled();
+    });
+
+    it('throws 404 for a cross-org report id', async () => {
+      mockMembership('ADMIN');
+      reportDb.findUnique.mockResolvedValue(null);
+
+      await expect(
+        report_service.publish_report_into_db(makeReq({ params: { id: 'org-b' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+  });
+});

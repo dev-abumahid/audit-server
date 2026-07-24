@@ -14,6 +14,7 @@ import notificationRoute from './app/modules/notification/notification.route.js'
 import organizationRoute from './app/modules/organization/organization.route.js';
 import profileRoute from './app/modules/profile/profile.route.js';
 import recommendationRoute from './app/modules/recommendation/recommendation.route.js';
+import reportRoute from './app/modules/report/report.route.js';
 import riskRoute from './app/modules/risk/risk.route.js';
 import siteRoute from './app/modules/site/site.route.js';
 import templateRoute from './app/modules/template/template.route.js';
@@ -30,6 +31,7 @@ const moduleRoutes = [
   { path: '/alert', route: alertRoute },
   { path: '/audit', route: auditRoute },
   { path: '/compliance', route: complianceRoute },
+  { path: '/report', route: reportRoute },
   { path: '/action', route: actionRoute },
   { path: '/site', route: siteRoute },
   { path: '/template', route: templateRoute },

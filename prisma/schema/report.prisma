@@ -1,0 +1,67 @@
+// Board Report persistence for aexa-frontend#94. A Report is a generated,
+// human-reviewed board-facing risk report: aexa-server fetches the org's real
+// Risk/KRI/Site/Action data, calls aexa-ai's /report_content for structured
+// JSON, renders that JSON to a PDF (Puppeteer), uploads the PDF, and stores
+// the row here.
+//
+// org_account_id (snake_case) matches the Risk/KRI/Site/Action domains Report
+// actually reads from, and the two most recently shipped modules
+// (AuditEngagement, ComplianceObligation). onDelete: Cascade mirrors every
+// other tenant model — deleting the anchor account removes its reports.
+model Report {
+    id             String       @id @default(uuid())
+    org_account_id String
+    account        Account      @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+
+    type   ReportType   @default(BOARD)
+    title  String
+    // Human-facing citation id, e.g. "BOARD-2026-Q3". Nullable — populated
+    // from the AI content when available.
+    reference String?
+    status ReportStatus @default(GENERATING)
+
+    // Structured content returned by aexa-ai — the source of truth for what
+    // was reviewed/published, independent of the rendered PDF. Kept even
+    // though we render server-side, so a future re-render or template change
+    // doesn't require re-calling the AI.
+    content Json?
+
+    // Immutable rendered artifact — the uploaded PDF URL, set once generation
+    // succeeds.
+    file_url String?
+    pages    Int?
+
+    // Inputs used to generate (report type, counts, etc.) — useful for audit
+    // and for reproducing/versioning a report later.
+    parameters Json?
+    version    Int   @default(1)
+
+    // Account id of the human who clicked Generate.
+    generated_by String
+    // Account id of the human (org admin) who clicked Publish; null until then.
+    reviewed_by  String?
+    reviewed_at  DateTime?
+
+    ai_generated  Boolean @default(true)
+    // Populated when status = FAILED so the UI can surface why a generation
+    // failed rather than leaving a row stuck at GENERATING.
+    error_message String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([org_account_id])
+}
+
+enum ReportType {
+    BOARD
+    // COMPLIANCE, AUDIT_OPINION, MONTE_CARLO, EXEC_COMMITTEE — deferred until
+    // their backing data models (compliance/audit engine, Monte Carlo) mature.
+}
+
+enum ReportStatus {
+    GENERATING
+    READY // AI + PDF succeeded, awaiting human review
+    PUBLISHED // reviewed and published — file_url is now considered final/citable
+    FAILED
+}
