@@ -7,6 +7,16 @@ import { organization_validations } from './organization.validation.js';
 
 const router = Router();
 
+// Admin-only tenant creation (#96). Net-new: there was previously no way to
+// create an Organization anywhere in this codebase. Lives under the admin
+// surface, matching where org creation sits in the frontend today.
+router.post(
+  '/',
+  auth('ADMIN'),
+  RequestValidator(organization_validations.create_organization),
+  organization_controller.create_organization,
+);
+
 router.post(
   '/invite',
   auth('ORGANIZATION'),

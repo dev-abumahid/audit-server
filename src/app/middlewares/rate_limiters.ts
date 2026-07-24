@@ -69,6 +69,24 @@ export const orgInviteSendLimiter = rateLimit({
   message: { success: false, message: 'Too many invitations sent. Please try again later.' },
 });
 
+// Zero-input onboarding (#96): each identify/generate call fans out to
+// several Tavily + LLM calls on the aexa-ai side — the costliest endpoint
+// class in this service (decision #5 on the ticket: treat it like the most
+// expensive existing endpoint, nothing more elaborate). Admin-only, keyed by
+// the caller's accountId (not IP) so an admin on multiple IPs still shares one
+// budget and unrelated admins behind one NAT don't collide. Mounted after
+// auth() so req.user is populated.
+export const onboardingLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeRedisStore('rl:onboarding:'),
+  keyGenerator: (req) =>
+    (req.user as JwtPayloadType | undefined)?.accountId ?? ipKeyGenerator(req.ip ?? ''),
+  message: { success: false, message: 'Too many onboarding attempts. Please try again later.' },
+});
+
 // Slice 5 (#55): public, unauthenticated endpoint that triggers an outbound
 // email — same abuse shape as orgInviteSendLimiter (spam/queue-exhaustion)
 // but reachable by anyone, not just an authenticated admin, so it needs its

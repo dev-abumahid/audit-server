@@ -9,4 +9,9 @@ model OrganizationProfile {
     organizationDescription String?
     organizationWebsite     String?
     organizationPhone       String?
+    // #96: the sector/country the zero-input analysis used, stored so the AI
+    // proposal is auditable/re-runnable later. Nullable — manually-created
+    // orgs and pre-#96 rows won't have them.
+    sector                  String?
+    country                 String?
 }

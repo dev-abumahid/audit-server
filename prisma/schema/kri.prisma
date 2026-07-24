@@ -10,6 +10,9 @@ model Kri {
     alert_threshold Float
     target_value    Float
     frequency       String?
+    // #96: flags a KRI seeded from the onboarding template library so the UI
+    // can show the same "AI-generated, review recommended" treatment as Risk.
+    ai_generated    Boolean  @default(false)
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 

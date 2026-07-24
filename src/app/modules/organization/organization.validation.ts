@@ -97,6 +97,18 @@ const update_external_member = z
     message: 'At least one of isActive or expiresAt must be provided.',
   });
 
+// Admin-provisioned tenant creation (#96). The manual (non-AI) fallback and
+// the AI onboarding commit both create the same shape of org, so they share
+// the same core fields. Password minimum matches the new-account branch of
+// account creation elsewhere in this codebase.
+const create_organization = z.object({
+  organizationName: z.string('Organization name is required.').min(1).max(255),
+  email: z.string('Email is required.').email('Must be a valid email address.').max(255),
+  password: z.string('Password is required.').min(8, 'Password must be at least 8 characters.'),
+  sector: z.string().max(255).nullish(),
+  country: z.string().max(255).nullish(),
+});
+
 export const organization_validations = {
   invite_member,
   accept_invitation,
@@ -104,4 +116,5 @@ export const organization_validations = {
   update_settings,
   invite_external_member,
   update_external_member,
+  create_organization,
 };

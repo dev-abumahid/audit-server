@@ -11,6 +11,12 @@ model Site {
     site_type       String
     lat             Float?
     lng             Float?
+    // Trust-labeling for zero-input onboarding (#96), mirroring Risk's
+    // existing fields: ai_generated flags a site discovered by the AI
+    // pipeline rather than hand-entered, and source_info carries the
+    // Tavily-derived discovery citation so a reviewer can verify it.
+    ai_generated    Boolean  @default(false)
+    source_info     String?
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 

@@ -1,6 +1,28 @@
 import catchAsync from '../../utils/catch_async.js';
 import manageResponse from '../../utils/manage_response.js';
+import { createOrganizationStandalone } from './organization.create.service.js';
 import { organization_services } from './organization.service.js';
+
+// Admin-only manual org creation (#96) — the non-AI fallback for the admin
+// dashboard's "Create Organization" flow. The AI wizard's own commit lives in
+// the onboarding module.
+const create_organization = catchAsync(async (req, res) => {
+  const { organizationName, email, password, sector, country } = req.body;
+  const result = await createOrganizationStandalone({
+    organizationName,
+    email,
+    password,
+    sector,
+    country,
+  });
+  manageResponse(res, {
+    success: true,
+    statusCode: 201,
+    message: 'Organization created successfully.',
+    data: result,
+    meta: {},
+  });
+});
 
 const invite_member = catchAsync(async (req, res) => {
   const result = await organization_services.invite_member_into_db(req);
@@ -124,6 +146,7 @@ const update_external_member = catchAsync(async (req, res) => {
 });
 
 export const organization_controller = {
+  create_organization,
   invite_member,
   get_pending_invitations,
   get_org_members,

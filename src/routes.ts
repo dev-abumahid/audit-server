@@ -11,6 +11,7 @@ import kriRoute from './app/modules/kri/kri.route.js';
 import inspectionRoute from './app/modules/inspection/inspection.route.js';
 import noteRoute from './app/modules/note/note.route.js';
 import notificationRoute from './app/modules/notification/notification.route.js';
+import onboardingRoute from './app/modules/onboarding/onboarding.route.js';
 import organizationRoute from './app/modules/organization/organization.route.js';
 import profileRoute from './app/modules/profile/profile.route.js';
 import recommendationRoute from './app/modules/recommendation/recommendation.route.js';
@@ -37,6 +38,7 @@ const moduleRoutes = [
   { path: '/template', route: templateRoute },
   { path: '/profile', route: profileRoute },
   { path: '/organization', route: organizationRoute },
+  { path: '/onboarding', route: onboardingRoute },
   { path: '/auth', route: accountRouter },
   { path: '/external-auth', route: externalAuthRoute },
   { path: '/knowledge_base', route: knowledgeBaseRoute },
