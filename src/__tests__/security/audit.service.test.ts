@@ -12,6 +12,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    risk: {
+      count: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -31,6 +34,7 @@ import uploadCloud from '../../app/utils/cloudinary.js';
 
 const uploadCloudMock = uploadCloud as unknown as ReturnType<typeof vi.fn>;
 const db = prisma.auditEngagement as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -184,9 +188,11 @@ describe('audit service — org scoping (issue #92)', () => {
 
       await audit_service.get_single_audit_from_db(makeReq({ params: { id: 'a1' } }));
 
-      expect(db.findUnique).toHaveBeenCalledWith({
-        where: { id: 'a1', org_account_id: ORG_A },
-      });
+      const [callArg] = db.findUnique.mock.calls[0];
+      expect(callArg.where).toEqual({ id: 'a1', org_account_id: ORG_A });
+      // aexa-frontend#165: the linked-risk join is included so the response can
+      // carry a `linked_risks` array.
+      expect(callArg.include).toBeDefined();
     });
 
     it('throws 404 for another org engagement instead of returning null', async () => {
@@ -287,6 +293,167 @@ describe('audit service — org scoping (issue #92)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  // aexa-frontend#165: linked risks are a real many-to-many relation validated
+  // against the caller's org, not free-text tags.
+  describe('linked risks — org-scoped M2M relation (aexa-frontend#165)', () => {
+    const RISK_1 = 'risk-00000000-0000-0000-0000-000000000001';
+    const RISK_2 = 'risk-00000000-0000-0000-0000-000000000002';
+
+    it('create validates the supplied risk ids belong to the caller org, then writes nested link rows', async () => {
+      riskDb.count.mockResolvedValue(2); // both ids resolve within ORG_A
+      db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
+
+      await audit_service.create_audit_into_db(
+        makeReq({ body: { title: 'Q3 Audit', status: 'planned', riskIds: [RISK_1, RISK_2] } }),
+      );
+
+      // The org-scoped validation ran with the exact id set, filtered by org.
+      const [countArg] = riskDb.count.mock.calls[0];
+      expect(countArg.where).toEqual({ id: { in: [RISK_1, RISK_2] }, org_account_id: ORG_A });
+
+      // The links are written as nested creates, not a scalar column.
+      const createArg = db.create.mock.calls[0][0];
+      expect(createArg.data.risks).toEqual({
+        create: [{ riskId: RISK_1 }, { riskId: RISK_2 }],
+      });
+      // The dropped free-text column must never be written.
+      expect(createArg.data).not.toHaveProperty('linked_risk_refs');
+      expect(createArg.data).not.toHaveProperty('riskIds');
+    });
+
+    it('create REJECTS a cross-org risk id with 404 and writes nothing', async () => {
+      // Only 1 of the 2 ids resolves within ORG_A → the other belongs elsewhere.
+      riskDb.count.mockResolvedValue(1);
+
+      await expect(
+        audit_service.create_audit_into_db(
+          makeReq({ body: { title: 'x', status: 'planned', riskIds: [RISK_1, 'other-org-risk'] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('create with no riskIds writes no risks relation at all', async () => {
+      db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
+
+      await audit_service.create_audit_into_db(
+        makeReq({ body: { title: 'Q3 Audit', status: 'planned' } }),
+      );
+
+      expect(riskDb.count).not.toHaveBeenCalled();
+      const createArg = db.create.mock.calls[0][0];
+      expect(createArg.data).not.toHaveProperty('risks');
+    });
+
+    it('update replaces the whole link set when riskIds is an explicit array (deleteMany + create)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      riskDb.count.mockResolvedValue(1);
+      db.update.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
+
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { riskIds: [RISK_1] } }),
+      );
+
+      const updateArg = db.update.mock.calls[0][0];
+      expect(updateArg.data.risks).toEqual({
+        deleteMany: {},
+        create: [{ riskId: RISK_1 }],
+      });
+    });
+
+    it('update with an explicit empty array clears all links', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
+
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { riskIds: [] } }),
+      );
+
+      // No ids to validate, but the relation write still fires to clear links.
+      expect(riskDb.count).not.toHaveBeenCalled();
+      const updateArg = db.update.mock.calls[0][0];
+      expect(updateArg.data.risks).toEqual({ deleteMany: {}, create: [] });
+    });
+
+    it('update with riskIds OMITTED leaves existing links untouched (no risks write)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
+
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { title: 'Just a title change' } }),
+      );
+
+      const updateArg = db.update.mock.calls[0][0];
+      expect(updateArg.data).not.toHaveProperty('risks');
+    });
+
+    it('update REJECTS a cross-org risk id with 404 and does not write', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      riskDb.count.mockResolvedValue(0); // supplied id resolves in no risk of ORG_A
+
+      await expect(
+        audit_service.update_audit_into_db(
+          makeReq({ params: { id: 'a1' }, body: { riskIds: ['foreign-risk'] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('de-duplicates repeated ids and drops blanks before validating/writing', async () => {
+      riskDb.count.mockResolvedValue(1);
+      db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
+
+      await audit_service.create_audit_into_db(
+        makeReq({ body: { title: 'x', status: 'planned', riskIds: [RISK_1, RISK_1, ''] } }),
+      );
+
+      const [countArg] = riskDb.count.mock.calls[0];
+      expect(countArg.where.id.in).toEqual([RISK_1]);
+      const createArg = db.create.mock.calls[0][0];
+      expect(createArg.data.risks).toEqual({ create: [{ riskId: RISK_1 }] });
+    });
+
+    it('GET single flattens the join rows into a linked_risks array of {id,name,category}', async () => {
+      db.findUnique.mockResolvedValue({
+        id: 'a1',
+        org_account_id: ORG_A,
+        risks: [
+          { risk: { id: RISK_1, name: 'Data breach', category: 'Cyber' } },
+          { risk: { id: RISK_2, name: 'Flood', category: 'Physical' } },
+        ],
+      });
+
+      const result = await audit_service.get_single_audit_from_db(
+        makeReq({ params: { id: 'a1' } }),
+      );
+
+      expect(result).not.toHaveProperty('risks'); // internal join shape hidden
+      expect(result.linked_risks).toEqual([
+        { id: RISK_1, name: 'Data breach', category: 'Cyber' },
+        { id: RISK_2, name: 'Flood', category: 'Physical' },
+      ]);
+    });
+
+    it('GET list flattens linked_risks per row', async () => {
+      db.findMany.mockResolvedValue([
+        {
+          id: 'a1',
+          org_account_id: ORG_A,
+          risks: [{ risk: { id: RISK_1, name: 'Data breach', category: 'Cyber' } }],
+        },
+      ]);
+      db.count.mockResolvedValue(1);
+
+      const result = await audit_service.get_all_audit_from_db(makeReq({ query: {} }));
+
+      expect(result.data[0].linked_risks).toEqual([
+        { id: RISK_1, name: 'Data breach', category: 'Cyber' },
+      ]);
     });
   });
 

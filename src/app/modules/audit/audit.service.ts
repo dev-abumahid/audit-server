@@ -7,6 +7,55 @@ import uploadCloud from '../../utils/cloudinary.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
+// aexa-frontend#165: shape used everywhere an engagement is returned so the UI
+// can render a clickable list of the real risks it covers (id + a
+// human-readable label + category), sourced through the explicit
+// AuditEngagementRisk join. Ordered oldest-link-first for a stable display.
+const auditRiskInclude = {
+  risks: {
+    orderBy: { createdAt: 'asc' as const },
+    include: { risk: { select: { id: true, name: true, category: true } } },
+  },
+} as const;
+
+type EngagementWithRisks = { risks?: { risk: unknown }[] } & Record<string, unknown>;
+
+// Collapse the join rows into a flat `linked_risks` array on the engagement so
+// the API contract is `{ ...engagement, linked_risks: [{id,name,category}] }`
+// rather than exposing the join table's internal shape.
+const flattenLinkedRisks = <T extends EngagementWithRisks>(engagement: T) => {
+  const { risks, ...rest } = engagement;
+  return { ...rest, linked_risks: (risks ?? []).map((link) => link.risk) };
+};
+
+// De-duplicate and drop blank/non-string ids. The join's
+// @@unique([auditEngagementId, riskId]) would otherwise reject a payload that
+// repeats the same risk id, and a stray "" id can never match a real risk.
+const normalizeRiskIds = (riskIds: unknown): string[] => {
+  if (!Array.isArray(riskIds)) return [];
+  return [...new Set(riskIds.filter((r): r is string => typeof r === 'string' && r !== ''))];
+};
+
+/**
+ * Every supplied risk id must resolve to a Risk in the caller's own org.
+ * Without this a caller could link an engagement to another org's Risk UUID
+ * (the raw FK accepts it), and the GET response's `risk: { name, category }`
+ * join would then leak that foreign org's risk back — a cross-tenant read, and
+ * a bogus cross-org relation. Mirrors compliance.service.ts's
+ * `assertSiteBelongsToOrg` (a count/`in` variant here since it's a set). An
+ * undefined/empty set means "no links to validate". See aexa-frontend#165.
+ */
+const assertRisksBelongToOrg = async (riskIds: unknown, orgAccountId: string): Promise<void> => {
+  const ids = normalizeRiskIds(riskIds);
+  if (ids.length === 0) return;
+  const found = await prisma.risk.count({
+    where: { id: { in: ids }, org_account_id: orgAccountId },
+  });
+  if (found !== ids.length) {
+    throw new AppError('One or more linked risks were not found in your organization', 404);
+  }
+};
+
 const get_all_audit_from_db = async (req: Request) => {
   const { searchTerm, page, limit } = req.query;
   const user = req.user as JwtPayloadType;
@@ -49,6 +98,7 @@ const get_all_audit_from_db = async (req: Request) => {
       orderBy: {
         createdAt: 'desc',
       },
+      include: auditRiskInclude,
     }),
     prisma.auditEngagement.count({
       where: whereCondition,
@@ -56,7 +106,7 @@ const get_all_audit_from_db = async (req: Request) => {
   ]);
 
   return {
-    data,
+    data: data.map(flattenLinkedRisks),
     meta: buildPaginationMeta(pagination, total),
   };
 };
@@ -67,21 +117,33 @@ const get_single_audit_from_db = async (req: Request) => {
   const id = req.params?.id as string;
   const result = await prisma.auditEngagement.findUnique({
     where: { id, org_account_id: ctx.organizationId },
+    include: auditRiskInclude,
   });
   // Every sibling module's get_single_* throws 404 for a missing/cross-org
   // record rather than returning a bare 200 with data: null.
   if (!result) throw new AppError('Audit engagement not found', 404);
-  return result;
+  return flattenLinkedRisks(result);
 };
 
 const create_audit_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   assertCanWriteOrgResource(ctx);
-  const payload = req.body;
+  // Pull riskIds out of the payload — they're a relation, not a column, so they
+  // must become nested join-row writes rather than a scalar field. Validate the
+  // set belongs to the caller's org before any link row is written.
+  const { riskIds, ...payload } = req.body;
+  await assertRisksBelongToOrg(riskIds, ctx.organizationId);
   payload.org_account_id = ctx.organizationId;
-  const result = await prisma.auditEngagement.create({ data: payload });
-  return result;
+  const linkIds = normalizeRiskIds(riskIds);
+  const result = await prisma.auditEngagement.create({
+    data: {
+      ...payload,
+      ...(linkIds.length > 0 ? { risks: { create: linkIds.map((riskId) => ({ riskId })) } } : {}),
+    },
+    include: auditRiskInclude,
+  });
+  return flattenLinkedRisks(result);
 };
 
 const update_audit_into_db = async (req: Request) => {
@@ -100,7 +162,25 @@ const update_audit_into_db = async (req: Request) => {
   // above. Same guard site.service.ts applies. (RequestValidator already
   // strips org_account_id since it's not in the zod schema, but stripping it
   // here too keeps the service safe independent of the route wiring.)
-  const { org_account_id: _ignored, ...safeBody } = req.body;
+  //
+  // riskIds is also pulled out: it's a relation, not a scalar column, and its
+  // presence is significant — an OMITTED riskIds leaves the existing links
+  // untouched (partial update), while an explicit array (including []) is a
+  // full replacement of the link set. See aexa-frontend#165.
+  const { org_account_id: _ignored, riskIds, ...safeBody } = req.body;
+  await assertRisksBelongToOrg(riskIds, ctx.organizationId);
+  // deleteMany + create nested inside the one update runs in a single Prisma
+  // transaction, so the old links are never dropped without the new ones
+  // landing (or the whole update rolling back together).
+  const riskRelationWrite =
+    riskIds === undefined
+      ? {}
+      : {
+          risks: {
+            deleteMany: {},
+            create: normalizeRiskIds(riskIds).map((riskId) => ({ riskId })),
+          },
+        };
   // Keep org_account_id in the update's own where-clause (not just the
   // findFirst check above): the ownership check and the write are two separate
   // statements, so scoping the write by id alone leaves a TOCTOU window. Adding
@@ -108,9 +188,10 @@ const update_audit_into_db = async (req: Request) => {
   // matching delete_audit_from_db's where-clause below.
   const result = await prisma.auditEngagement.update({
     where: { id, org_account_id: ctx.organizationId },
-    data: { ...safeBody, org_account_id: ctx.organizationId },
+    data: { ...safeBody, org_account_id: ctx.organizationId, ...riskRelationWrite },
+    include: auditRiskInclude,
   });
-  return result;
+  return flattenLinkedRisks(result);
 };
 
 const delete_audit_from_db = async (req: Request) => {
@@ -121,9 +202,15 @@ const delete_audit_from_db = async (req: Request) => {
   // Existence check before delete, matching every sibling module — deleting a
   // missing/cross-org id would otherwise fall through to Prisma's raw P2025
   // "record to delete does not exist" (a 500) instead of the clean 404 the
-  // rest of the API returns. No in-use guard is needed here: nothing else in
-  // the schema has an FK onto AuditEngagement (linked_risk_refs is a freeform
-  // string array, not a relation), so there are no dependent rows to cascade.
+  // rest of the API returns.
+  //
+  // No in-use guard is needed here. The only rows that FK onto an
+  // AuditEngagement are its AuditEngagementRisk link rows (aexa-frontend#165),
+  // which are onDelete: Cascade and carry no data of their own — deleting an
+  // engagement legitimately tears down just its own links while every linked
+  // Risk survives untouched. (The reverse asymmetry — a Risk that still has
+  // links is BLOCKED from deletion — lives in risk.service.ts, since a link is
+  // meaningful audit-trail data that must not vanish out from under an audit.)
   const existing = await prisma.auditEngagement.findFirst({
     where: { id, org_account_id: ctx.organizationId },
   });

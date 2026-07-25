@@ -25,6 +25,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       updateMany: vi.fn(),
       count: vi.fn(),
     },
+    auditEngagementRisk: {
+      count: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -53,6 +56,10 @@ const recommendationDb = prisma.recommendation as unknown as Record<
 >;
 const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskApprovalDb = prisma.riskApproval as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const auditEngagementRiskDb = prisma.auditEngagementRisk as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const txFn = (prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }).$transaction;
@@ -92,6 +99,9 @@ describe('risk service — org scoping (ticket #6)', () => {
     // Default: no live approval cycle referencing the risk, so the delete
     // in-use guard (aexa-server#202) is a no-op unless a test overrides it.
     riskApprovalDb.count.mockResolvedValue(0);
+    // Default: risk is not linked to any audit engagement, so the
+    // aexa-frontend#165 audit-link delete guard is a no-op unless overridden.
+    auditEngagementRiskDb.count.mockResolvedValue(0);
     // Default $transaction impl (aexa-server#203): run the interactive callback
     // immediately with the same mocked prisma as the tx client, and propagate
     // any error the callback throws (so a mid-transaction failure rejects,
@@ -476,16 +486,40 @@ describe('risk service — org scoping (ticket #6)', () => {
       expect(db.delete).not.toHaveBeenCalled();
     });
 
-    it('deletes a risk when it is not referenced by any inspection, recommendation, KRI or live approval cycle', async () => {
+    // AuditEngagementRisk.risk is onDelete: Cascade (aexa-frontend#165), so
+    // deleting a risk still linked to an audit engagement would silently tear
+    // down that audit↔risk association — meaningful audit-trail data answering
+    // "which audits touch this risk". The guard blocks it with a 409, the same
+    // conservative philosophy as the other in-use counts. The caller must
+    // unlink the risk from its engagements first.
+    it('throws 409 and does NOT delete a risk still linked to an audit engagement', async () => {
       db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
       inspectionDb.count.mockResolvedValue(0);
       recommendationDb.count.mockResolvedValue(0);
       kriDb.count.mockResolvedValue(0);
       riskApprovalDb.count.mockResolvedValue(0);
+      auditEngagementRiskDb.count.mockResolvedValue(2);
+
+      await expect(
+        risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(auditEngagementRiskDb.count).toHaveBeenCalledWith({ where: { riskId: 'r1' } });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes a risk when it is not referenced by any inspection, recommendation, KRI, live approval cycle or audit engagement link', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      inspectionDb.count.mockResolvedValue(0);
+      recommendationDb.count.mockResolvedValue(0);
+      kriDb.count.mockResolvedValue(0);
+      riskApprovalDb.count.mockResolvedValue(0);
+      auditEngagementRiskDb.count.mockResolvedValue(0);
       db.delete.mockResolvedValue({ id: 'r1' });
 
       await risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } }));
 
+      expect(auditEngagementRiskDb.count).toHaveBeenCalledWith({ where: { riskId: 'r1' } });
       expect(db.delete).toHaveBeenCalledWith({ where: { id: 'r1' } });
     });
   });

@@ -30,6 +30,10 @@ model Risk {
     recommendations Recommendation[]
     kris            Kri[]
     approvals       RiskApproval[]
+    // aexa-frontend#165: engagements that cover this risk (explicit M2M join,
+    // AuditEngagementRisk in audit.prisma). A risk with live links here is
+    // blocked from deletion by the in-use guard in risk.service.ts.
+    auditEngagements AuditEngagementRisk[]
 
     @@index([org_account_id])
 }

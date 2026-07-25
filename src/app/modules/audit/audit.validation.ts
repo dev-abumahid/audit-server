@@ -37,7 +37,7 @@ const updatableDate = z.preprocess((v) => {
 // instead of a clean 400; `title` with no `.min(1)` allowed empty-titled rows.
 // Matches how risk.validation.ts guards its own required string fields (`name`,
 // `category`). Everything else is optional — `scope`, `lead_auditor`, dates,
-// counts and linked refs can all be blank on create. `status` is kept a free
+// counts and linked risk ids can all be blank on create. `status` is kept a free
 // string (not a zod enum) to match the loose-typing convention Risk.status uses
 // and the arbitrary values the frontend already sends.
 const create_audit = z.object({
@@ -52,7 +52,12 @@ const create_audit = z.object({
   closed_at: optionalDate,
   ai_generated: z.boolean().optional(),
   is_edited: z.boolean().optional(),
-  linked_risk_refs: z.array(z.string()).optional(),
+  // aexa-frontend#165: linked risks are now real Risk record ids (a
+  // many-to-many relation), not free-text tags. Each id is validated to belong
+  // to the caller's own org in the service layer before any link row is
+  // written. On update, omitting the field leaves existing links untouched; an
+  // explicit array (including []) replaces the whole link set.
+  riskIds: z.array(z.string()).optional(),
   report_url: z.string().optional(),
 });
 

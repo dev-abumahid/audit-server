@@ -13,10 +13,45 @@ model AuditEngagement {
     closed_at        DateTime?
     ai_generated     Boolean   @default(false)
     is_edited        Boolean   @default(false)
-    linked_risk_refs String[]
     report_url       String?
     createdAt        DateTime  @default(now())
     updatedAt        DateTime  @updatedAt
 
+    // aexa-frontend#165: engagements link to real Risk records through an
+    // explicit join table (below), replacing the former free-text
+    // `linked_risk_refs String[]` tag column. The old column carried no format
+    // convention and nothing clickable; it's dropped (not migrated) since the
+    // feature only shipped this session and there's no structured data to move.
+    risks AuditEngagementRisk[]
+
     @@index([org_account_id])
+}
+
+// aexa-frontend#165: explicit many-to-many between an AuditEngagement and the
+// Risk records it covers. Modeled as a first-class join row (not an implicit
+// Prisma relation) so it can hold its own columns/audit metadata later and so
+// the org-scoped validation + delete guards can query it directly.
+//
+// Both FKs are onDelete: Cascade, so deleting either side tears down the link
+// row (never the opposite entity). Note the interaction with the Risk in-use
+// delete guard (issue #200-203, risk.service.ts): a risk still linked to any
+// engagement is treated as *in use* and blocked from deletion with a 409,
+// consistent with the conservative philosophy applied to inspections /
+// recommendations / KRIs / live approval cycles — the audit↔risk association
+// is meaningful audit-trail data ("which audits touch this risk", the exact
+// queryability #165 is about), so it must not silently vanish on a risk
+// delete; the caller unlinks the risk from its engagements first. The reverse
+// direction has NO such block: deleting an engagement legitimately cascades
+// away its own link rows (the risks survive), so audit deletion is unaffected.
+model AuditEngagementRisk {
+    id                String          @id @default(uuid())
+    auditEngagementId String
+    auditEngagement   AuditEngagement @relation(fields: [auditEngagementId], references: [id], onDelete: Cascade)
+    riskId            String
+    risk              Risk            @relation(fields: [riskId], references: [id], onDelete: Cascade)
+    createdAt         DateTime        @default(now())
+
+    @@unique([auditEngagementId, riskId])
+    @@index([auditEngagementId])
+    @@index([riskId])
 }

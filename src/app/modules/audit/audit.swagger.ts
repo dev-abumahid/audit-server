@@ -18,7 +18,7 @@ export const auditSwaggerDocs = {
               findings_count: 3,
               started_at: '2026-03-01T09:00:00Z',
               closed_at: null,
-              linked_risk_refs: ['RISK-001'],
+              riskIds: ['b1e6f0a2-0000-0000-0000-000000000001'],
             }),
           },
         },

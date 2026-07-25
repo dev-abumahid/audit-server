@@ -166,17 +166,38 @@ const delete_risk_from_db = async (req: Request) => {
   // is terminal history and never blocks a fresh submission, so it doesn't block
   // a delete either; losing it to the cascade is acceptable, losing a live
   // maker-checker sign-off silently is not.
-  const [inspectionCount, recommendationCount, kriCount, approvalCount] = await Promise.all([
-    prisma.inspection.count({ where: { riskId: id } }),
-    prisma.recommendation.count({ where: { riskId: id } }),
-    prisma.kri.count({ where: { risk_id: id } }),
-    prisma.riskApproval.count({
-      where: { riskId: id, invalidatedAt: null, status: { in: ['PENDING_APPROVAL', 'APPROVED'] } },
-    }),
-  ]);
-  if (inspectionCount > 0 || recommendationCount > 0 || kriCount > 0 || approvalCount > 0) {
+  //
+  // aexa-frontend#165: AuditEngagementRisk links are onDelete: Cascade too, so
+  // a risk still covered by any audit engagement is treated as in use and
+  // blocked — same conservative philosophy as the counts above. The audit↔risk
+  // association is meaningful audit-trail data ("which audits touch this risk"),
+  // so it must not silently vanish when a risk is deleted; the caller unlinks
+  // the risk from its engagements first. (The reverse direction is NOT blocked:
+  // deleting an engagement just cascades away its own link rows — see
+  // audit.service.ts delete_audit_from_db.)
+  const [inspectionCount, recommendationCount, kriCount, approvalCount, auditLinkCount] =
+    await Promise.all([
+      prisma.inspection.count({ where: { riskId: id } }),
+      prisma.recommendation.count({ where: { riskId: id } }),
+      prisma.kri.count({ where: { risk_id: id } }),
+      prisma.riskApproval.count({
+        where: {
+          riskId: id,
+          invalidatedAt: null,
+          status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+        },
+      }),
+      prisma.auditEngagementRisk.count({ where: { riskId: id } }),
+    ]);
+  if (
+    inspectionCount > 0 ||
+    recommendationCount > 0 ||
+    kriCount > 0 ||
+    approvalCount > 0 ||
+    auditLinkCount > 0
+  ) {
     throw new AppError(
-      `Cannot delete risk: ${inspectionCount} inspection(s), ${recommendationCount} recommendation(s), ${kriCount} KRI(s) and ${approvalCount} live approval cycle(s) reference it.`,
+      `Cannot delete risk: ${inspectionCount} inspection(s), ${recommendationCount} recommendation(s), ${kriCount} KRI(s), ${approvalCount} live approval cycle(s) and ${auditLinkCount} audit engagement link(s) reference it.`,
       409,
     );
   }
