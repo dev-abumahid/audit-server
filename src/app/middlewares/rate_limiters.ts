@@ -87,6 +87,31 @@ export const onboardingLimiter = rateLimit({
   message: { success: false, message: 'Too many onboarding attempts. Please try again later.' },
 });
 
+// Report generation (#94, hardening #219): POST /report/generate runs the full
+// synchronous pipeline in one request — fetch org data -> aexa-ai -> a ~300MB
+// headless Chromium (Puppeteer) render -> S3 upload. It is by far the heaviest
+// endpoint class in this service: heavier per-call than onboarding (which only
+// fans out to Tavily+LLM calls, no local Chromium), so it gets a *tighter*
+// budget than onboardingLimiter's 20, not merely an equal one. Admin/org-write
+// only, keyed by the caller's accountId (not IP) so an admin on multiple IPs
+// still shares one budget and unrelated orgs behind one NAT don't collide.
+// This bounds burst volume; the per-org in-flight GENERATING guard in
+// report.service.ts is the separate concurrency/OOM defense. Mounted after
+// auth() so req.user is populated. Found by independent review.
+export const reportGenerateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeRedisStore('rl:report:generate:'),
+  keyGenerator: (req) =>
+    (req.user as JwtPayloadType | undefined)?.accountId ?? ipKeyGenerator(req.ip ?? ''),
+  message: {
+    success: false,
+    message: 'Too many report generation requests. Please try again later.',
+  },
+});
+
 // Slice 5 (#55): public, unauthenticated endpoint that triggers an outbound
 // email — same abuse shape as orgInviteSendLimiter (spam/queue-exhaustion)
 // but reachable by anyone, not just an authenticated admin, so it needs its

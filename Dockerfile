@@ -42,8 +42,13 @@ RUN apk add --no-cache \
     harfbuzz \
     ca-certificates \
     ttf-freefont
+# The Alpine `chromium` package (this base tracks Alpine v3.21) installs the
+# binary at /usr/bin/chromium — there is no /usr/bin/chromium-browser, so the
+# previous value here pointed at a nonexistent path and every render would fail
+# to launch Chromium in production (#223). Keep this in sync with the comment on
+# puppeteer_executable_path in src/app/configs/index.ts.
 ENV PUPPETEER_SKIP_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Only install production deps
 COPY package*.json ./

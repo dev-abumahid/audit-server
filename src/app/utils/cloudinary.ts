@@ -1,5 +1,6 @@
-import { S3 } from '@aws-sdk/client-s3';
+import { GetObjectCommand, S3 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import fs from 'fs';
 import mime from 'mime-types';
 import path from 'path';
@@ -51,6 +52,41 @@ const uploadCloud = async (file: IFile): Promise<{ secure_url: string; key: stri
     fs.unlinkSync(file?.path); // Still delete on error
     throw err;
   }
+};
+
+/**
+ * Extracts the S3 object key from a stored object URL. uploadCloud stores the
+ * raw `result.Location`, which is either virtual-hosted style
+ * (`https://<bucket>.s3.<region>.amazonaws.com/<key>`) or path style
+ * (`https://s3.<region>.amazonaws.com/<bucket>/<key>`). We take the URL path,
+ * decode it, and strip a leading `<bucket>/` segment if present so both styles
+ * resolve to the same key.
+ */
+const extractS3Key = (fileUrl: string): string => {
+  const { pathname } = new URL(fileUrl);
+  const decoded = decodeURIComponent(pathname.replace(/^\/+/, ''));
+  const bucket = configs.aws.bucket as string;
+  if (bucket && decoded.startsWith(`${bucket}/`)) {
+    return decoded.slice(bucket.length + 1);
+  }
+  return decoded;
+};
+
+/**
+ * Returns a short-lived presigned GET URL for a previously uploaded object,
+ * given the permanent URL stored in the DB. Used by the report download
+ * endpoint (#222) so the client never receives the permanent public URL — only
+ * a link that expires after `expiresInSeconds`.
+ */
+export const getSignedDownloadUrl = async (
+  fileUrl: string,
+  expiresInSeconds: number,
+): Promise<string> => {
+  const command = new GetObjectCommand({
+    Bucket: configs.aws.bucket as string,
+    Key: extractS3Key(fileUrl),
+  });
+  return getSignedUrl(s3, command, { expiresIn: expiresInSeconds });
 };
 
 export default uploadCloud;

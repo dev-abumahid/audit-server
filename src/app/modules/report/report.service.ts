@@ -15,7 +15,7 @@ import {
   type CallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
-import uploadCloud from '../../utils/cloudinary.js';
+import uploadCloud, { getSignedDownloadUrl } from '../../utils/cloudinary.js';
 import { renderReportPdf, type ReportContent } from '../../utils/report_pdf.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 
@@ -25,12 +25,31 @@ import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 // API can't be driven past what the UI allows.
 const SUPPORTED_TYPE = 'BOARD';
 
-// Synchronous generation budget. The full pipeline (fetch org data -> aexa-ai
-// call -> Puppeteer render -> upload) runs in one request/response cycle for
-// this first pass (no BullMQ queue yet — documented v1 tradeoff). We abort the
-// aexa-ai call at 90s so the whole request stays comfortably under the 120s
-// route timeout, leaving headroom for render + upload.
+// Explicit route-level budget for POST /report/generate (#220). The whole
+// synchronous pipeline (fetch org data -> aexa-ai call -> Puppeteer render ->
+// upload) runs in one request/response cycle for this first pass (no BullMQ
+// queue yet — documented v1 tradeoff). Enforced by the routeTimeout middleware
+// on the route so the client's failure is deterministic and owned by the app
+// instead of an upstream proxy's default. Exported so the route wires the exact
+// same number the pipeline is designed around.
+export const REPORT_ROUTE_TIMEOUT_MS = 120_000;
+
+// We abort the aexa-ai call at 90s so the whole request stays comfortably under
+// the 120s route timeout, leaving headroom for render + upload.
 const AI_CALL_TIMEOUT_MS = 90_000;
+
+// Staleness threshold for the opportunistic GENERATING sweep (#221). A crash
+// (restart / OOM / the catch-block's own update failing) can strand a row at
+// GENERATING forever with no reaper. Any GENERATING row not touched within the
+// route timeout plus a generous 5-minute grace is treated as dead and swept to
+// FAILED on the next list read — well past any request that could still be
+// legitimately in flight, so an in-progress generation is never reaped early.
+const STALE_GENERATING_MS = REPORT_ROUTE_TIMEOUT_MS + 5 * 60_000;
+
+// Presigned download URLs (#222) are short-lived — long enough for a click to
+// resolve into a download, short enough that a leaked URL (referrer, history,
+// screenshot) stops working quickly.
+const DOWNLOAD_URL_TTL_SECONDS = 300;
 
 type PipelineInput = {
   organization: {
@@ -113,7 +132,10 @@ const fetchOrgData = async (orgAccountId: string): Promise<PipelineInput> => {
   };
 };
 
-const callReportContentAi = async (input: PipelineInput): Promise<ReportContent> => {
+const callReportContentAi = async (
+  input: PipelineInput,
+  organizationId: string,
+): Promise<ReportContent> => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), AI_CALL_TIMEOUT_MS);
   try {
@@ -122,6 +144,13 @@ const callReportContentAi = async (input: PipelineInput): Promise<ReportContent>
       headers: {
         'Content-Type': 'application/json',
         ...AI_INTERNAL_SECRET_HEADER,
+        // aexa-ai's /report_content is @limiter.limit(expensive) and its
+        // get_org_key (app/limiter.py) keys that budget on the X-Organization
+        // header, falling back to remote IP. Without this header every org fell
+        // through to aexa-server's single shared IP, so one org's heavy use
+        // starved every other org's report generation. Send the caller's org id
+        // so the per-org bucket actually applies (#219).
+        'X-Organization': organizationId,
       },
       body: JSON.stringify({ report_type: SUPPORTED_TYPE, ...input }),
       signal: controller.signal,
@@ -156,10 +185,40 @@ const uploadReportPdf = async (pdf: Buffer): Promise<string> => {
   return result.secure_url;
 };
 
+// Opportunistic reaper (#221). Marks any of this org's GENERATING rows whose
+// updatedAt is older than STALE_GENERATING_MS as FAILED before the list is
+// returned, so a row stranded by a crash (restart / OOM / catch-block update
+// failing) resolves to a terminal state a user can recover from instead of
+// spinning forever. Scoped to the caller's org and driven off the existing list
+// read — no new queue/cron infra. Best-effort: a failure here must never break
+// the list read, so it's logged and swallowed.
+const sweepStaleGenerating = async (organizationId: string): Promise<void> => {
+  const cutoff = new Date(Date.now() - STALE_GENERATING_MS);
+  try {
+    await prisma.report.updateMany({
+      where: {
+        org_account_id: organizationId,
+        status: 'GENERATING' as never,
+        updatedAt: { lt: cutoff },
+      },
+      data: {
+        status: 'FAILED' as never,
+        error_message: 'Generation timed out. Please try again.',
+      },
+    });
+  } catch (error) {
+    logger.error({ err: error, organizationId }, 'Stale GENERATING sweep failed');
+  }
+};
+
 const get_all_report_from_db = async (req: Request) => {
   const { searchTerm, page, limit } = req.query;
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
+
+  // Sweep stale GENERATING rows to FAILED before reading, so the list the
+  // client gets back already reflects the reaped state in the same round-trip.
+  await sweepStaleGenerating(ctx.organizationId);
 
   const pagination = paginationHelper({ page: page as string, limit: limit as string });
   const { skip, limit: limitNumber } = pagination;
@@ -216,6 +275,19 @@ const generate_report_into_db = async (req: Request) => {
     throw new AppError(`Report type '${requestedType}' is not supported yet`, 400);
   }
 
+  // Per-org concurrency/dedupe guard (#219): each generate launches a ~300MB
+  // headless Chromium; letting an org run several in parallel is a real OOM
+  // risk on the container. Refuse a new generate while this org already has one
+  // in flight. The staleness sweep (#221) reaps a crashed GENERATING row, so a
+  // dead one never blocks the org permanently.
+  const inFlight = await prisma.report.findFirst({
+    where: { org_account_id: ctx.organizationId, status: 'GENERATING' as never },
+    select: { id: true },
+  });
+  if (inFlight) {
+    throw new AppError('A report is already being generated for this organization', 409);
+  }
+
   const report = await prisma.report.create({
     data: {
       org_account_id: ctx.organizationId,
@@ -229,7 +301,7 @@ const generate_report_into_db = async (req: Request) => {
 
   try {
     const input = await fetchOrgData(ctx.organizationId);
-    const content = await callReportContentAi(input);
+    const content = await callReportContentAi(input, ctx.organizationId);
     const pdf = await renderReportPdf(content);
     const fileUrl = await uploadReportPdf(pdf);
 
@@ -279,7 +351,14 @@ const download_report_from_db = async (req: Request) => {
   if (report.status === 'GENERATING' || !report.file_url) {
     throw new AppError('Report is not ready for download', 409);
   }
-  return { file_url: report.file_url };
+  // Mint a short-lived signed URL at request time rather than handing back the
+  // permanent public object URL (#222). The stored file_url stays an internal
+  // reference; the client only ever receives a URL that expires in
+  // DOWNLOAD_URL_TTL_SECONDS, so a leaked link (referrer/history/screenshot)
+  // stops working quickly and a "CONFIDENTIEL" report isn't world-readable
+  // forever.
+  const signedUrl = await getSignedDownloadUrl(report.file_url, DOWNLOAD_URL_TTL_SECONDS);
+  return { file_url: signedUrl, expires_in: DOWNLOAD_URL_TTL_SECONDS };
 };
 
 const publish_report_into_db = async (req: Request) => {

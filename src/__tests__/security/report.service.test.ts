@@ -10,8 +10,10 @@ vi.mock('../../app/lib/prisma.js', () => ({
     report: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       count: vi.fn(),
     },
     organizationProfile: { findUnique: vi.fn() },
@@ -32,10 +34,11 @@ vi.mock('../../app/utils/report_pdf.js', () => ({
 }));
 vi.mock('../../app/utils/cloudinary.js', () => ({
   default: vi.fn(),
+  getSignedDownloadUrl: vi.fn(),
 }));
 
 import { prisma } from '../../app/lib/prisma.js';
-import uploadCloud from '../../app/utils/cloudinary.js';
+import uploadCloud, { getSignedDownloadUrl } from '../../app/utils/cloudinary.js';
 import { renderReportPdf } from '../../app/utils/report_pdf.js';
 import { report_service } from '../../app/modules/report/report.service.js';
 
@@ -49,6 +52,7 @@ const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>
 const actionDb = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const mockRender = renderReportPdf as unknown as ReturnType<typeof vi.fn>;
 const mockUpload = uploadCloud as unknown as ReturnType<typeof vi.fn>;
+const mockSignedUrl = getSignedDownloadUrl as unknown as ReturnType<typeof vi.fn>;
 
 const ANCHOR = ORG_A;
 const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
@@ -101,6 +105,10 @@ describe('report service — org scoping (issue #94)', () => {
     // Default: no OrgMember row — ADMIN-of-self fallback, same convention as
     // every sibling service test.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default: no in-flight GENERATING report (concurrency guard #219) and a
+    // no-op stale sweep (#221), so tests not exercising those paths are unaffected.
+    reportDb.findFirst.mockResolvedValue(null);
+    reportDb.updateMany.mockResolvedValue({ count: 0 });
   });
 
   describe('get_all_report_from_db', () => {
@@ -123,6 +131,34 @@ describe('report service — org scoping (issue #94)', () => {
       );
 
       expect(result.meta).toEqual({ page: 2, limit: 10, skip: 10, total: 23, totalPage: 3 });
+    });
+
+    it('sweeps stale GENERATING rows to FAILED before returning the list (#221)', async () => {
+      reportDb.findMany.mockResolvedValue([]);
+      reportDb.count.mockResolvedValue(0);
+
+      await report_service.get_all_report_from_db(makeReq({ query: {} }));
+
+      expect(reportDb.updateMany).toHaveBeenCalledTimes(1);
+      const sweep = reportDb.updateMany.mock.calls[0][0];
+      // Only this org's stale GENERATING rows are targeted, and only ones older
+      // than the staleness cutoff — an in-flight generation is never reaped.
+      expect(sweep.where).toMatchObject({ org_account_id: ORG_A, status: 'GENERATING' });
+      expect(sweep.where.updatedAt.lt).toBeInstanceOf(Date);
+      expect(sweep.where.updatedAt.lt.getTime()).toBeLessThan(Date.now());
+      expect(sweep.data.status).toBe('FAILED');
+      expect(sweep.data.error_message).toBeTruthy();
+    });
+
+    it('still returns the list if the stale sweep throws (best-effort reaper)', async () => {
+      reportDb.updateMany.mockRejectedValue(new Error('db blip'));
+      reportDb.findMany.mockResolvedValue([]);
+      reportDb.count.mockResolvedValue(0);
+
+      await expect(
+        report_service.get_all_report_from_db(makeReq({ query: {} })),
+      ).resolves.toBeDefined();
+      expect(reportDb.findMany).toHaveBeenCalled();
     });
   });
 
@@ -163,6 +199,58 @@ describe('report service — org scoping (issue #94)', () => {
       ).rejects.toMatchObject({ statusCode: 400 });
 
       expect(reportDb.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('generate_report_into_db — per-org concurrency guard (#219)', () => {
+    it('returns 409 and creates no row when the org already has a GENERATING report', async () => {
+      reportDb.findFirst.mockResolvedValue({ id: 'in-flight' });
+
+      await expect(
+        report_service.generate_report_into_db(makeReq({ body: {} })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      // Guard is scoped to the caller's org and its GENERATING status.
+      expect(reportDb.findFirst.mock.calls[0][0].where).toMatchObject({
+        org_account_id: ORG_A,
+        status: 'GENERATING',
+      });
+      // No second Chromium pipeline is launched while one is already in flight.
+      expect(reportDb.create).not.toHaveBeenCalled();
+    });
+
+    it('proceeds to create a row when no GENERATING report exists', async () => {
+      primeOrgDataMocks();
+      reportDb.findFirst.mockResolvedValue(null);
+      reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'x' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(AI_CONTENT),
+      });
+      mockRender.mockResolvedValue(Buffer.from('%PDF'));
+      mockUpload.mockResolvedValue({ secure_url: 'https://cdn/x.pdf', key: 'k' });
+      reportDb.update.mockResolvedValue({ id: 'rep-1', status: 'READY' });
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      expect(reportDb.create).toHaveBeenCalled();
+    });
+
+    it('sends X-Organization on the aexa-ai call so per-org limiting applies (#219)', async () => {
+      primeOrgDataMocks();
+      reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'x' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(AI_CONTENT),
+      });
+      mockRender.mockResolvedValue(Buffer.from('%PDF'));
+      mockUpload.mockResolvedValue({ secure_url: 'https://cdn/x.pdf', key: 'k' });
+      reportDb.update.mockResolvedValue({});
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(init.headers['X-Organization']).toBe(ORG_A);
     });
   });
 
@@ -277,19 +365,27 @@ describe('report service — org scoping (issue #94)', () => {
   });
 
   describe('download_report_from_db', () => {
-    it('returns the file_url for a READY report', async () => {
+    it('returns a short-lived signed URL for a READY report, not the raw permanent one (#222)', async () => {
+      const PERMANENT = 'https://bucket.s3.eu-west-1.amazonaws.com/1700000000-report.pdf';
+      const SIGNED = `${PERMANENT}?X-Amz-Signature=abc&X-Amz-Expires=300`;
       reportDb.findUnique.mockResolvedValue({
         id: 'r1',
         org_account_id: ORG_A,
         status: 'READY',
-        file_url: 'https://cdn/x.pdf',
+        file_url: PERMANENT,
       });
+      mockSignedUrl.mockResolvedValue(SIGNED);
 
       const result = await report_service.download_report_from_db(
         makeReq({ params: { id: 'r1' } }),
       );
 
-      expect(result).toEqual({ file_url: 'https://cdn/x.pdf' });
+      // The permanent stored URL is signed at request time with a finite TTL.
+      expect(mockSignedUrl).toHaveBeenCalledWith(PERMANENT, expect.any(Number));
+      // The client receives the signed (time-limited) URL, never the raw one.
+      expect(result.file_url).toBe(SIGNED);
+      expect(result.file_url).not.toBe(PERMANENT);
+      expect(result.expires_in).toBeGreaterThan(0);
     });
 
     it('throws 404 for a cross-org / missing report', async () => {
