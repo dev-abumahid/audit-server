@@ -23,6 +23,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
     question: {
       findFirst: vi.fn(),
     },
+    complianceObligation: {
+      findFirst: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -61,6 +64,10 @@ const mockUploadCloud = vi.mocked(uploadCloud);
 const db = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbInspection = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbQuestion = prisma.question as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const dbCompliance = prisma.complianceObligation as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const assignmentDb = prisma.inspectionAssignment as unknown as Record<
@@ -395,6 +402,76 @@ describe('action service — org scoping (ticket #6)', () => {
         action_service.create_action_into_db(
           makeReq({
             body: { inspectionId: 'insp-1', title: 'IDOR attempt', questionId: 'org-b-question' },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('allows creating an action with no complianceObligationId at all (it is optional)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'No obligation' } }),
+      );
+
+      expect(dbCompliance.findFirst).not.toHaveBeenCalled();
+      expect(db.create).toHaveBeenCalled();
+    });
+
+    it('verifies complianceObligationId belongs to the caller org and persists the link (aexa-frontend#166)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      dbCompliance.findFirst.mockResolvedValue({ id: 'obl-1' });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({
+          body: {
+            inspectionId: 'insp-1',
+            title: 'Remediate: GDPR',
+            complianceObligationId: 'obl-1',
+          },
+        }),
+      );
+
+      // Ownership check is org-scoped by the anchor account id (org_account_id).
+      expect(dbCompliance.findFirst).toHaveBeenCalledWith({
+        where: { id: 'obl-1', org_account_id: ORG_A },
+      });
+      // The real relation is written onto the created row, not just a text ref.
+      expect(db.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ complianceObligationId: 'obl-1' }),
+        }),
+      );
+    });
+
+    it('throws 404 and does NOT create when complianceObligationId belongs to another org (aexa-frontend#166)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      dbCompliance.findFirst.mockResolvedValue(null); // org-B obligation not found for org-A
+
+      await expect(
+        action_service.create_action_into_db(
+          makeReq({
+            body: {
+              inspectionId: 'insp-1',
+              title: 'IDOR attempt',
+              complianceObligationId: 'org-b-obligation',
+            },
           }),
         ),
       ).rejects.toMatchObject({ statusCode: 404 });

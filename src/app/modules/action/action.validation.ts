@@ -30,6 +30,12 @@ const create_action = z.object({
   siteId: z.string().optional(),
   questionId: z.string().optional(),
 
+  // Optional back-link to the ComplianceObligation this action remediates
+  // (aexa-frontend#166). Same "sparse optional FK, id string only" shape as
+  // questionId above; ownership is verified org-side in create_action_into_db
+  // (a bare id here is not proof the caller owns that obligation).
+  complianceObligationId: z.string().optional(),
+
   actionTitle: z.string().min(1).max(255),
   // Deliberately optional -- aexa-frontend's CreateNewFindingModal.tsx labels
   // this "Description (Optional)" and sends `undefined` (not "") when left

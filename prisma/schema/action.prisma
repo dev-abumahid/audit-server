@@ -29,6 +29,25 @@ model Action {
     siteId       String?
     questionId   String?
 
+    // Optional back-link to the ComplianceObligation this action remediates
+    // (aexa-frontend#166 "Create Action" from a non-compliant obligation).
+    // A real FK, not a free-text tag — mirrors the parallel #165 decision to
+    // model cross-module references as relations. It's a sparse, informational
+    // link (most actions have no obligation), same shape as siteId/questionId
+    // above.
+    //
+    // onDelete: SetNull (NOT Cascade like siteId/questionId/inspectionId):
+    // an Action is a first-class remediation record that fully owns its
+    // inspection, org, title, assignees and history. Losing the obligation it
+    // once pointed at must not destroy that work — it should only drop the
+    // now-dangling link, exactly the reasoning ComplianceObligation.site_id
+    // already documents for its own SetNull. This also means deleting an
+    // obligation with linked actions succeeds cleanly (the FKs null out) with
+    // no service-level delete-guard needed — see delete_compliance_from_db;
+    // the guard question was considered and deliberately declined because
+    // SetNull orphans nothing meaningful here (aexa-frontend#166).
+    complianceObligationId String?
+
     // Main body
     actionTitle String
     // Nullable -- matches templateDisc's String?/optional() convention, the
@@ -47,6 +66,7 @@ model Action {
     question Question?       @relation(fields: [questionId], references: [id], onDelete: Cascade)
     inspection Inspection?     @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
     orgAccount Account?        @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
+    complianceObligation ComplianceObligation? @relation(fields: [complianceObligationId], references: [id], onDelete: SetNull)
 
     // Date time
     createdAt DateTime @default(now())

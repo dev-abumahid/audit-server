@@ -35,6 +35,14 @@ model ComplianceObligation {
     ai_generated Boolean @default(false)
     is_edited    Boolean @default(false)
 
+    // Remediation actions raised against this obligation (aexa-frontend#166).
+    // Back-side of Action.complianceObligation, which is onDelete: SetNull —
+    // deleting an obligation nulls these links rather than deleting the
+    // actions, so an obligation with open remediation work can still be
+    // removed without destroying that work. See the Action side for the full
+    // rationale (and why no extra delete-guard is warranted).
+    actions Action[]
+
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 

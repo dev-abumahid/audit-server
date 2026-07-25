@@ -199,6 +199,20 @@ const create_action_into_db = async (req: Request) => {
     if (!question) throw new AppError('Question not found', 404);
   }
 
+  // complianceObligationId is optional (the "Create Action from a non-compliant
+  // obligation" flow, aexa-frontend#166) but, when present, must belong to the
+  // caller's own org — same IDOR guard as questionId above. ComplianceObligation
+  // is org-scoped via org_account_id (the anchor Account id, i.e.
+  // ctx.organizationId — see compliance.service.ts), so a plain findFirst on
+  // { id, org_account_id } is the right ownership check. Without it a caller
+  // could stamp their action with another org's obligation id.
+  if (body.complianceObligationId) {
+    const obligation = await prisma.complianceObligation.findFirst({
+      where: { id: body.complianceObligationId, org_account_id: ctx.organizationId },
+    });
+    if (!obligation) throw new AppError('Compliance obligation not found', 404);
+  }
+
   // Every assignBy id must be a real OrgMember in the caller's own org —
   // without this, any org could tag an arbitrary orgMemberId from a
   // completely different org as "responsible" for their finding, the same
@@ -225,6 +239,11 @@ const create_action_into_db = async (req: Request) => {
       inspectionId: body.inspectionId,
       siteId: body.siteId,
       questionId: body.questionId,
+      // Set once at creation only — like siteId/questionId, the compliance
+      // link is not part of update_action_into_db's writable field set
+      // (which never re-checks foreign ownership), so it can't be re-pointed
+      // to an unowned obligation via a later PATCH.
+      complianceObligationId: body.complianceObligationId,
       actionTitle: body.actionTitle,
       actionDisc: body.actionDisc,
       priority: body.priority,
