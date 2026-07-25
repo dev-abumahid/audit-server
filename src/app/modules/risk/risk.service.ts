@@ -5,6 +5,7 @@ import { JwtPayloadType } from '../../utils/JWT.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { deriveApprovalState, risk_approval_service } from './risk.approval.service.js';
+import { createRiskWithGeneratedRef } from './risk_ref.js';
 
 const get_all_risk_from_db = async (req: Request) => {
   const { searchTerm, siteId, category } = req.query as Record<string, string>;
@@ -100,7 +101,11 @@ const create_risk_into_db = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const payload = req.body;
   payload.org_account_id = ctx.organizationId;
-  const result = await prisma.risk.create({ data: payload });
+  // aexa-frontend#142: `ref` is generated server-side (category-derived
+  // prefix + per-org-per-category sequence), never accepted from the
+  // client — see risk_ref.ts for the scheme and its retry-on-conflict
+  // safety net.
+  const result = await createRiskWithGeneratedRef(payload);
   return result;
 };
 

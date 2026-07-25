@@ -12,6 +12,7 @@ import {
   type PrismaTxClient,
 } from '../organization/organization.create.service.js';
 import { onboarding_validations, type OnboardingCommitInput } from './onboarding.validation.js';
+import { computeNextRiskRef } from '../risk/risk_ref.js';
 
 // Same posture as ai.service.ts's wrapAiServiceError: our own crafted
 // AppErrors (validation 400s, upstream-status 502s) are client-safe and
@@ -237,10 +238,19 @@ const commit_onboarding = async (req: Request) => {
           siteCount += 1;
 
           for (const risk of site.risks) {
+            // aexa-frontend#142: generated inside the same transaction as
+            // every other commit write, so `tx.risk.findMany` (inside
+            // computeNextRiskRef) sees risks already created earlier in this
+            // same loop/transaction — sequential calls within one commit
+            // therefore never collide, even across multiple risks sharing a
+            // category. Cross-transaction concurrency (two orgs onboarding
+            // at once) can't collide either since refs are scoped per org.
+            const ref = await computeNextRiskRef(tx, orgId, risk.category);
             const createdRisk = await tx.risk.create({
               data: {
                 org_account_id: orgId,
                 site_id: createdSite.id,
+                ref,
                 name: risk.name,
                 description: risk.description ?? null,
                 category: risk.category,

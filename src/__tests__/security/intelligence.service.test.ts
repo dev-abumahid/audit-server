@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, ORG_B, makeReq } from '../helpers/makeReq.js';
 
@@ -557,6 +558,60 @@ describe('intelligence service', () => {
       await expect(
         intelligence_service.create_risk_from_item_into_db(makeReq({ params: { id: 'item-1' } })),
       ).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    // aexa-frontend#142 review fix: unlike onboarding.service.ts's commit
+    // transaction (a brand-new org no other transaction can see until it
+    // commits), this Risk is created for an EXISTING, live org -- a second
+    // create-risk-from-item call (or a concurrent POST /risk) for the same
+    // org+category can genuinely race computeNextRiskRef's read-then-write.
+    // The whole $transaction retries via retryTransactionOnRefConflict
+    // rather than 500ing the loser.
+    it('retries the whole transaction on a ref unique-constraint conflict and succeeds on the second attempt', async () => {
+      itemDb.findFirst.mockResolvedValue({
+        id: 'item-1',
+        org_account_id: ORG_A,
+        analyzed_at: new Date(),
+        created_risk_id: null,
+        title: 'Ransomware hits supplier',
+        category: 'cyber',
+      });
+      siteDb.findFirst.mockResolvedValue({ id: 'site-1' });
+      riskDb.create
+        .mockRejectedValueOnce(
+          new Prisma.PrismaClientKnownRequestError('unique', {
+            code: 'P2002',
+            clientVersion: 'test',
+            meta: { target: ['org_account_id', 'ref'] },
+          }),
+        )
+        .mockResolvedValueOnce({ id: 'risk-2', name: 'Ransomware hits supplier' });
+      itemDb.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await intelligence_service.create_risk_from_item_into_db(
+        makeReq({ params: { id: 'item-1' } }),
+      );
+
+      expect(riskDb.create).toHaveBeenCalledTimes(2);
+      expect(result.id).toBe('risk-2');
+    });
+
+    it('propagates a non-conflict error from risk creation without retrying', async () => {
+      itemDb.findFirst.mockResolvedValue({
+        id: 'item-1',
+        org_account_id: ORG_A,
+        analyzed_at: new Date(),
+        created_risk_id: null,
+        title: 'Ransomware hits supplier',
+        category: 'cyber',
+      });
+      siteDb.findFirst.mockResolvedValue({ id: 'site-1' });
+      riskDb.create.mockRejectedValue(new Error('db connection lost'));
+
+      await expect(
+        intelligence_service.create_risk_from_item_into_db(makeReq({ params: { id: 'item-1' } })),
+      ).rejects.toThrow('db connection lost');
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
     });
 
     it('VIEWER cannot promote an item to a Risk', async () => {

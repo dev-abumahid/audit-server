@@ -14,6 +14,16 @@ model Risk {
     id                    String   @id @default(uuid())
     org_account_id        String
     account               Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+    // aexa-frontend#142: human-readable reference code (e.g. "CYB-001"),
+    // mirroring Fullbloom's Risk.ref. Generated at creation time
+    // (see risk_ref.ts's generateRiskRef) from a category-derived prefix +
+    // a zero-padded sequence scoped per (org_account_id, prefix) — see
+    // risk_ref.ts for the full category->prefix map and fallback rule.
+    // NOT NULL: every pre-existing row was backfilled by this migration's
+    // raw SQL (see the migration file) using the identical scheme, so
+    // there's no "can't backfill" gap the way action.prisma's
+    // line_of_defense has for Action.
+    ref                   String
     name                  String
     description           String?
     category              String
@@ -56,8 +66,59 @@ model Risk {
     // here — see intelligence.prisma's created_risk_id/onDelete: SetNull
     // reasoning).
     intelligenceItems IntelligenceItem[]
+    // aexa-frontend#142: risk-to-risk causal links pointing AT this risk by
+    // ref (source_ref/target_ref reference Risk.ref, not Risk.id — see
+    // RiskLink's own comment for why). No formal Prisma relation is declared
+    // here because RiskLink's FKs are plain strings, not a real relation to
+    // this model (matches Fullbloom's own design exactly).
 
     @@index([org_account_id])
+    // aexa-frontend#142: refs are human-readable identifiers scoped to one
+    // org, not globally unique — two orgs can both have a "CYB-001".
+    @@unique([org_account_id, ref])
+}
+
+// aexa-frontend#142 — explicit risk-to-risk relationship table, mirroring
+// Fullbloom's RiskLink model exactly (src/shared/types/domain.ts:
+// `{ id, organization_id, source_ref, target_ref, link_type, ... }`).
+// Confirmed against the real Fullbloom file: link_type is one of CAUSES,
+// AMPLIFIES, CORRELATES (not "REVELE" — that string appears in Fullbloom's
+// codebase, but on AuditFinding.link_type, a separate free-text field
+// describing how a finding *reveals* a risk, not on RiskLink at all).
+enum RiskLinkType {
+    CAUSES
+    AMPLIFIES
+    CORRELATES
+}
+
+model RiskLink {
+    id             String   @id @default(uuid())
+    org_account_id String
+    account        Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+
+    // Deliberately plain strings, NOT `@relation` foreign keys to Risk.id.
+    // This mirrors Fullbloom's own RiskLink design (it references risks by
+    // `ref`, not by their Supabase row id) and is the reason issue #142's
+    // brief asked for it to be modeled this way rather than reworking the
+    // frontend to correlate on UUIDs: a human-readable ref makes the link
+    // table itself legible (an auditor can read "CYB-001 CAUSES OPS-004"
+    // straight out of an export or a support ticket without a join), and it
+    // keeps a link portable across a Risk being recreated/re-imported with a
+    // new id but the same ref. The tradeoff — these two columns can't be
+    // enforced as real FKs — is deliberately paid for with application-level
+    // validation instead (see risk_link.service.ts: both refs must resolve
+    // to a real, org-scoped Risk row, checked on every create).
+    source_ref String
+    target_ref String
+
+    link_type RiskLinkType
+
+    createdAt DateTime @default(now())
+
+    @@unique([org_account_id, source_ref, target_ref, link_type])
+    @@index([org_account_id])
+    @@index([org_account_id, source_ref])
+    @@index([org_account_id, target_ref])
 }
 
 // Maker-checker approval state for a risk's CURRENT assessment, closing

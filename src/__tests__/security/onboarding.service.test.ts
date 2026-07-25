@@ -13,7 +13,10 @@ vi.mock('../../app/lib/prisma.js', () => ({
     organization: { create: vi.fn() },
     orgMember: { create: vi.fn() },
     site: { create: vi.fn() },
-    risk: { create: vi.fn() },
+    // aexa-frontend#142: commit_onboarding now calls computeNextRiskRef (via
+    // the tx client) before each risk create, which reads existing refs via
+    // risk.findMany.
+    risk: { create: vi.fn(), findMany: vi.fn() },
     kri: { create: vi.fn() },
     $transaction: vi.fn(),
   },
@@ -210,6 +213,9 @@ describe('onboarding service — commit (Stage 4, transactional)', () => {
     db.orgMember.create.mockResolvedValue({ id: 'mem-1' });
     db.site.create.mockResolvedValue({ id: 'site-1' });
     db.risk.create.mockResolvedValue({ id: 'risk-1' });
+    // aexa-frontend#142: computeNextRiskRef reads existing refs before each
+    // risk create; no pre-existing refs in these fixtures.
+    db.risk.findMany.mockResolvedValue([]);
     db.kri.create.mockResolvedValue({ id: 'kri-1' });
     mockTransaction.mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) =>
       cb(makeTx()),

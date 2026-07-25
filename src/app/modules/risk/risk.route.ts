@@ -4,9 +4,24 @@ import RequestValidator from '../../middlewares/request_validator.js';
 import { risk_approval_controller } from './risk.approval.controller.js';
 import { risk_approval_validations } from './risk.approval.validation.js';
 import { risk_controller } from './risk.controller.js';
+import { risk_correlation_controller } from './risk.correlation.controller.js';
 import { risk_validations } from './risk.validation.js';
 
 const router = Router();
+
+// aexa-frontend#142: correlation-matrix/root-cause-bucketing are fixed
+// sub-paths, not risk ids — must be registered before the `/:id` routes
+// below or Express would match "correlation-matrix" as an :id param.
+router.get(
+  '/correlation-matrix',
+  auth('ORGANIZATION'),
+  risk_correlation_controller.get_correlation_matrix,
+);
+router.post(
+  '/root-cause-bucketing',
+  auth('ORGANIZATION'),
+  risk_correlation_controller.root_cause_bucketing,
+);
 
 router.get('/', auth('ORGANIZATION'), risk_controller.get_all_risk);
 router.post(

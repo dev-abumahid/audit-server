@@ -278,10 +278,20 @@ describe('risk service — org scoping (ticket #6)', () => {
   });
 
   describe('create_risk_into_db', () => {
+    // aexa-frontend#142: create_risk_into_db now generates a `ref` via
+    // computeNextRiskRef, which reads existing refs for the category's
+    // prefix (db.findMany) before creating. Every body below needs a
+    // `category`, and db.findMany needs a mock, for the same reason.
+    beforeEach(() => {
+      db.findMany.mockResolvedValue([]);
+    });
+
     it('injects org_account_id into the created record', async () => {
       db.create.mockResolvedValue({});
 
-      await risk_service.create_risk_into_db(makeReq({ body: { name: 'Cyber risk' } }));
+      await risk_service.create_risk_into_db(
+        makeReq({ body: { name: 'Cyber risk', category: 'Cyber' } }),
+      );
 
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.org_account_id).toBe(ORG_A);
@@ -291,11 +301,34 @@ describe('risk service — org scoping (ticket #6)', () => {
       db.create.mockResolvedValue({});
 
       await risk_service.create_risk_into_db(
-        makeReq({ body: { name: 'Evil', org_account_id: ORG_B } }),
+        makeReq({ body: { name: 'Evil', category: 'Cyber', org_account_id: ORG_B } }),
       );
 
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.org_account_id).toBe(ORG_A);
+    });
+
+    it('generates a ref from the category prefix and includes it in the create call', async () => {
+      db.create.mockResolvedValue({});
+
+      await risk_service.create_risk_into_db(
+        makeReq({ body: { name: 'Cyber risk', category: 'Cyber' } }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.ref).toBe('CYB-001');
+    });
+
+    it('continues the per-org-per-category sequence from existing refs', async () => {
+      db.findMany.mockResolvedValue([{ ref: 'CYB-001' }, { ref: 'CYB-002' }]);
+      db.create.mockResolvedValue({});
+
+      await risk_service.create_risk_into_db(
+        makeReq({ body: { name: 'Cyber risk', category: 'Cyber' } }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.ref).toBe('CYB-003');
     });
   });
 

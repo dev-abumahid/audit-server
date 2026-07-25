@@ -19,6 +19,7 @@ import profileRoute from './app/modules/profile/profile.route.js';
 import recommendationRoute from './app/modules/recommendation/recommendation.route.js';
 import reportRoute from './app/modules/report/report.route.js';
 import riskRoute from './app/modules/risk/risk.route.js';
+import riskLinkRoute from './app/modules/risk_link/risk_link.route.js';
 import siteRoute from './app/modules/site/site.route.js';
 import templateRoute from './app/modules/template/template.route.js';
 
@@ -30,6 +31,7 @@ const moduleRoutes = [
   { path: '/inspection', route: inspectionRoute },
   { path: '/ai', route: aiRoute },
   { path: '/risk', route: riskRoute },
+  { path: '/risk-link', route: riskLinkRoute },
   { path: '/intelligence', route: intelligenceRoute },
   { path: '/kri', route: kriRoute },
   { path: '/alert', route: alertRoute },

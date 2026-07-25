@@ -47,6 +47,9 @@ model Account {
     // aexa-frontend#141 stage 2: threat intelligence persistence.
     intelligenceItems IntelligenceItem[]
     intelligenceRuns  IntelligenceRun[]
+    // aexa-frontend#142: risk-to-risk correlation links (RiskLink.ref-based
+    // design — see risk.prisma's RiskLink comment).
+    riskLinks         RiskLink[]
 
     // Org membership — nullable/optional since not every account has one
     // until the slice-1 backfill script runs (see src/scripts/backfill-org-membership.ts).

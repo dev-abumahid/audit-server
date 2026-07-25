@@ -8,6 +8,7 @@ import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { ALL_RSS_SOURCES } from './rss_sources.js';
 import { dedupeScrapedItems, ScrapedFeedItem, scrapeAllSources } from './rss_scraper.js';
+import { computeNextRiskRef, retryTransactionOnRefConflict } from '../risk/risk_ref.js';
 
 type OrgContext = { name: string; sector?: string | null; country?: string | null };
 type ExistingRisk = { id: string; name: string; category: string; description?: string | null };
@@ -446,40 +447,53 @@ const create_risk_from_item_into_db = async (req: Request) => {
     );
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const risk = await tx.risk.create({
-      data: {
-        org_account_id: ctx.organizationId,
-        name: item.title,
-        description: item.risk_summary ?? item.description ?? null,
-        category: item.category ?? item.source_category ?? 'Uncategorized',
-        inherent_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
-        residual_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
-        probability: item.relevance_score != null ? Math.round(item.relevance_score * 100) : null,
-        status: 'open',
-        ai_generated: true,
-        is_edited: false,
-        site_id: site.id,
-        source_info: item.source_evidence ?? item.link ?? null,
-      },
-    });
-    // Conditional claim (created_risk_id: null in the WHERE, not just the
-    // pre-check above) closes the TOCTOU window between that check and this
-    // write: two concurrent create-risk calls on the same item would
-    // otherwise both pass the earlier `if (item.created_risk_id)` guard and
-    // both create a Risk. Whichever request's updateMany actually matches a
-    // row (count 1) wins the claim; the loser's transaction throws below and
-    // Prisma rolls its `risk.create` back with it, so at most one Risk ever
-    // ends up linked to this item.
-    const claim = await tx.intelligenceItem.updateMany({
-      where: { id: item.id, created_risk_id: null },
-      data: { created_risk_id: risk.id },
-    });
-    if (claim.count === 0) {
-      throw new AppError('This item has already been promoted to a Risk', 409);
-    }
-    return risk;
-  });
+  // Unlike onboarding.service.ts's commit transaction (a brand-new org no
+  // other transaction can see until it commits), this Risk is created for an
+  // EXISTING, live org -- a second create-risk-from-item call (or a
+  // concurrent POST /risk) for the same org+category can genuinely race
+  // computeNextRiskRef's read-then-write. retryTransactionOnRefConflict
+  // retries the whole transaction (fresh ref computed against whatever
+  // committed in between) rather than leaving a real, if narrow, race that
+  // would 500 the loser instead of just recomputing a fresh ref.
+  const result = await retryTransactionOnRefConflict(() =>
+    prisma.$transaction(async (tx) => {
+      const category = item.category ?? item.source_category ?? 'Uncategorized';
+      const ref = await computeNextRiskRef(tx, ctx.organizationId, category);
+      const risk = await tx.risk.create({
+        data: {
+          org_account_id: ctx.organizationId,
+          ref,
+          name: item.title,
+          description: item.risk_summary ?? item.description ?? null,
+          category,
+          inherent_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
+          residual_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
+          probability: item.relevance_score != null ? Math.round(item.relevance_score * 100) : null,
+          status: 'open',
+          ai_generated: true,
+          is_edited: false,
+          site_id: site.id,
+          source_info: item.source_evidence ?? item.link ?? null,
+        },
+      });
+      // Conditional claim (created_risk_id: null in the WHERE, not just the
+      // pre-check above) closes the TOCTOU window between that check and this
+      // write: two concurrent create-risk calls on the same item would
+      // otherwise both pass the earlier `if (item.created_risk_id)` guard and
+      // both create a Risk. Whichever request's updateMany actually matches a
+      // row (count 1) wins the claim; the loser's transaction throws below and
+      // Prisma rolls its `risk.create` back with it, so at most one Risk ever
+      // ends up linked to this item.
+      const claim = await tx.intelligenceItem.updateMany({
+        where: { id: item.id, created_risk_id: null },
+        data: { created_risk_id: risk.id },
+      });
+      if (claim.count === 0) {
+        throw new AppError('This item has already been promoted to a Risk', 409);
+      }
+      return risk;
+    }),
+  );
 
   return result;
 };
