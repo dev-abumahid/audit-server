@@ -50,6 +50,12 @@ model Risk {
     // AuditEngagementRisk in audit.prisma). A risk with live links here is
     // blocked from deletion by the in-use guard in risk.service.ts.
     auditEngagements AuditEngagementRisk[]
+    // aexa-frontend#141 stage 2: IntelligenceItems promoted into this Risk via
+    // POST /intelligence/items/:id/create-risk. A Risk can have zero or more
+    // originating IntelligenceItems (the FK lives on IntelligenceItem, not
+    // here — see intelligence.prisma's created_risk_id/onDelete: SetNull
+    // reasoning).
+    intelligenceItems IntelligenceItem[]
 
     @@index([org_account_id])
 }

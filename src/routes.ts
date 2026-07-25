@@ -10,6 +10,7 @@ import governanceRoute from './app/modules/governance/governance.route.js';
 import knowledgeBaseRoute from './app/modules/knowledge_base/knowledge_base.route.js';
 import kriRoute from './app/modules/kri/kri.route.js';
 import inspectionRoute from './app/modules/inspection/inspection.route.js';
+import intelligenceRoute from './app/modules/intelligence/intelligence.route.js';
 import noteRoute from './app/modules/note/note.route.js';
 import notificationRoute from './app/modules/notification/notification.route.js';
 import onboardingRoute from './app/modules/onboarding/onboarding.route.js';
@@ -29,6 +30,7 @@ const moduleRoutes = [
   { path: '/inspection', route: inspectionRoute },
   { path: '/ai', route: aiRoute },
   { path: '/risk', route: riskRoute },
+  { path: '/intelligence', route: intelligenceRoute },
   { path: '/kri', route: kriRoute },
   { path: '/alert', route: alertRoute },
   { path: '/audit', route: auditRoute },

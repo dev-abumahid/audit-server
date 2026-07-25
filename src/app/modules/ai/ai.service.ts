@@ -37,7 +37,7 @@ export const AI_INTERNAL_SECRET_HEADER = {
 // Everything else is logged with full detail server-side and replaced with
 // a generic client-facing message — never forward raw `error.message` for
 // an error we didn't craft ourselves.
-const wrapAiServiceError = (error: unknown, fallbackMessage: string): never => {
+export const wrapAiServiceError = (error: unknown, fallbackMessage: string): never => {
   if (error instanceof AppError) {
     throw error;
   }

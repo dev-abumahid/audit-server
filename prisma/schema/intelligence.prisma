@@ -1,0 +1,87 @@
+// aexa-frontend#141 stage 2: Threat Intelligence persistence (RSS scraping +
+// orchestration for aexa-ai's 5 LLM-backed /intelligence/* actions). Mirrors
+// Fullbloom's ai-intelligence edge function's data shape (RSS_SOURCES item
+// fields + the 4 org-level action outputs), but as real persisted Postgres
+// rows instead of Fullbloom's stateless per-request-only design (product
+// decision: history must survive across sessions).
+
+// One of the 4 org-level actions that produce a point-in-time result and
+// aren't tied to a specific IntelligenceItem (unlike scrape/analyze, which
+// operate on/annotate IntelligenceItem rows directly).
+enum RunType {
+    PREDICT
+    MITIGATIONS
+    RCSA
+    RESILIENCE_SCAN
+}
+
+// A scraped RSS article, persisted on POST /intelligence/scrape and later
+// annotated in-place (not re-inserted) when POST /intelligence/analyze runs
+// against it. The analysis fields are all nullable because a freshly
+// scraped item hasn't been analyzed yet — analyzed_at being non-null is the
+// single source of truth for "has this item been analyzed" (used by both
+// GET /intelligence/items?analyzed= and the create-risk 404 guard).
+model IntelligenceItem {
+    id             String   @id @default(uuid())
+    org_account_id String
+    account        Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+
+    // Scraped fields (populated by POST /intelligence/scrape)
+    title              String
+    description        String?
+    link               String?
+    source_name        String
+    source_category    String?
+    source_credibility Float?
+    source_language    String?
+    published_at       DateTime?
+    scraped_at         DateTime  @default(now())
+
+    // Analysis annotation fields (nullable; populated in-place by POST
+    // /intelligence/analyze calling aexa-ai's /intelligence/analyze). All
+    // travel together — analyzed_at is set exactly when the rest are.
+    is_risk             Boolean?
+    severity            String?
+    category            String?
+    relevance_score     Float?
+    risk_summary        String?
+    root_cause          String?
+    potential_impact    String?
+    recommended_actions Json?
+    confidence          Float?
+    source_evidence     String?
+    analyzed_at         DateTime?
+
+    // "Improve on Fullbloom" (product decision #4): an explicit, user-triggered
+    // promotion of an analyzed item into a real Risk row. Informational
+    // cross-link only — mirrors Action.complianceObligationId's exact
+    // reasoning (action.prisma): an IntelligenceItem is a first-class scraped
+    // record that fully owns its scrape/analysis history; losing the Risk it
+    // was once promoted to must not destroy that history, so onDelete: SetNull
+    // (not Cascade) — deleting the linked Risk just nulls out created_risk_id,
+    // it never cascades back to delete the IntelligenceItem.
+    created_risk_id String?
+    created_risk     Risk?   @relation(fields: [created_risk_id], references: [id], onDelete: SetNull)
+
+    @@index([org_account_id])
+    @@index([created_risk_id])
+}
+
+// A single point-in-time result from one of the 4 org-level actions
+// (predict/mitigations/rcsa/resilience-scan). The raw aexa-ai response is
+// stored as-is in `result` — these are read-heavy history rows, not
+// something this service needs to query into structurally, so a typed
+// Postgres shape per run_type would be pure overhead versus faithfully
+// keeping what aexa-ai actually returned.
+model IntelligenceRun {
+    id             String   @id @default(uuid())
+    org_account_id String
+    account        Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+
+    run_type  RunType
+    result    Json
+    createdAt DateTime @default(now())
+
+    @@index([org_account_id])
+    @@index([run_type])
+}

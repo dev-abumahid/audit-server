@@ -44,6 +44,9 @@ model Account {
     auditEngagements    AuditEngagement[]
     complianceObligations ComplianceObligation[]
     reports             Report[]
+    // aexa-frontend#141 stage 2: threat intelligence persistence.
+    intelligenceItems IntelligenceItem[]
+    intelligenceRuns  IntelligenceRun[]
 
     // Org membership — nullable/optional since not every account has one
     // until the slice-1 backfill script runs (see src/scripts/backfill-org-membership.ts).
