@@ -10,6 +10,12 @@ const BRAND_TEAL_DARK = '#1c7568';
 // The structured content shape aexa-ai's /report_content returns (normalized
 // server-side there). Kept as a local interface so the template is typed
 // without coupling to Prisma's Json column type.
+// A risk's live approval state as it appears in a report (aexa-frontend#164).
+// REJECTED is deliberately absent: a risk with a live REJECTED approval is
+// excluded from the report entirely upstream (report.service.fetchOrgData), so
+// it can never reach the template. Every included risk carries one of these.
+export type ReportRiskApprovalStatus = 'APPROVED' | 'PENDING_APPROVAL' | 'NOT_SUBMITTED';
+
 export interface ReportTopRisk {
   ref: string;
   title: string;
@@ -19,6 +25,10 @@ export interface ReportTopRisk {
   residual_score: number;
   trend: string;
   commentary: string;
+  // Attached post-generation by report.service, joined to the AI's output by
+  // `ref`. Optional so a stray/hallucinated ref the AI emits that we can't map
+  // simply renders no badge rather than throwing.
+  approval_status?: ReportRiskApprovalStatus;
 }
 
 export interface ReportKriSnapshot {
@@ -79,13 +89,29 @@ const section = (title: string, body: string): string =>
 const emptyRow = (cols: number, text: string): string =>
   `<tr><td colspan="${cols}" class="empty">${esc(text)}</td></tr>`;
 
+// The per-risk approval badge (aexa-frontend#164). Every included risk gets a
+// tag so the board document is honest about review status without hiding any
+// content. APPROVED reads as a positive sign-off; PENDING_APPROVAL and
+// NOT_SUBMITTED read as "not yet a signed-off figure". A missing status (a ref
+// the service couldn't map) renders nothing rather than a misleading label.
+const APPROVAL_BADGE_LABEL: Record<ReportRiskApprovalStatus, string> = {
+  APPROVED: 'Approved',
+  PENDING_APPROVAL: 'Pending Review',
+  NOT_SUBMITTED: 'Not Reviewed',
+};
+
+const approvalBadge = (status: ReportTopRisk['approval_status']): string => {
+  if (!status || !(status in APPROVAL_BADGE_LABEL)) return '';
+  return `<span class="approval approval-${esc(status)}">${esc(APPROVAL_BADGE_LABEL[status])}</span>`;
+};
+
 const buildRiskRows = (risks: ReportTopRisk[]): string => {
   if (!risks.length) return emptyRow(6, 'No open risks recorded for this period.');
   return risks
     .map(
       (r) => `<tr>
         <td class="mono">${esc(r.ref)}</td>
-        <td><strong>${esc(r.title)}</strong><div class="muted">${esc(r.commentary)}</div></td>
+        <td><strong>${esc(r.title)}</strong>${approvalBadge(r.approval_status)}<div class="muted">${esc(r.commentary)}</div></td>
         <td>${esc(r.category)}</td>
         <td>${esc(r.site)}</td>
         <td class="num">${esc(r.inherent_score)}</td>
@@ -168,6 +194,12 @@ export const buildReportHtml = (content: ReportContent): string => {
   .badge-breached { background: #fde8e8; color: #c0392b; }
   .badge-at_risk { background: #fef3d7; color: #b7791f; }
   .badge-on_track { background: #e3f5ef; color: ${BRAND_TEAL_DARK}; }
+  .approval { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 10px;
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+    vertical-align: middle; }
+  .approval-APPROVED { background: #e3f5ef; color: ${BRAND_TEAL_DARK}; }
+  .approval-PENDING_APPROVAL { background: #fef3d7; color: #b7791f; }
+  .approval-NOT_SUBMITTED { background: #eef1f4; color: #64748b; }
   .outlook { background: #f7faf9; border-left: 3px solid ${BRAND_TEAL}; padding: 14px 18px; border-radius: 4px; }
   .footer-note { margin-top: 40px; font-size: 10px; color: #99a; text-align: center; }
 </style>

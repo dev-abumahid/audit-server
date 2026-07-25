@@ -16,8 +16,16 @@ import {
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import uploadCloud, { getSignedDownloadUrl } from '../../utils/cloudinary.js';
-import { renderReportPdf, type ReportContent } from '../../utils/report_pdf.js';
+import {
+  renderReportPdf,
+  type ReportContent,
+  type ReportRiskApprovalStatus,
+} from '../../utils/report_pdf.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
+import {
+  deriveApprovalState,
+  type RiskApprovalDisplayState,
+} from '../risk/risk.approval.service.js';
 
 // Only BOARD is backed by real data today (Risk/KRI/Site/Action). The other 4
 // Fullbloom-parity types stay disabled in the UI until their backing models
@@ -64,11 +72,61 @@ type PipelineInput = {
   actions: Array<Record<string, unknown>>;
 };
 
+// fetchOrgData returns the AI payload plus a side-channel map of each included
+// risk's approval label, keyed by the risk's `ref`. The label is deliberately
+// NOT folded into PipelineInput.risks: aexa-ai's ReportRiskInput is
+// `extra="forbid"`, so an unknown field on a risk would 422 the whole
+// generation. The label is org-derived and deterministic anyway, so it's
+// joined back onto the AI's output post-generation (annotateApprovalStatus)
+// rather than round-tripped through the LLM.
+type OrgReportData = {
+  input: PipelineInput;
+  approvalByRef: Map<string, ReportRiskApprovalStatus>;
+};
+
 // Statuses that mean "this action is not yet done" — used to count/select the
 // open actions a board report cares about.
 const OPEN_ACTION_STATUSES = ['TO_DO', 'IN_PROGRESS'];
 
-const fetchOrgData = async (orgAccountId: string): Promise<PipelineInput> => {
+// Approval states that mean "this figure is safe to include in a board
+// document". The maker-checker product decision (aexa-frontend#164) is NOT to
+// hard-gate on APPROVED — most risks never enter the optional approval
+// workflow, so gating would leave early reports near-empty. Instead we exclude
+// only risks an admin has explicitly REJECTED (stating the assessment is
+// wrong; carrying it as current fact would mislead), and annotate every
+// included risk with its live state so the report stays honest about review
+// status. deriveApprovalState already collapses an invalidated (edited-after-
+// decision) cycle to NOT_SUBMITTED, so an invalidated approval correctly
+// reverts to included-and-labeled rather than being treated as REJECTED.
+const REPORT_EXCLUDED_APPROVAL_STATE: RiskApprovalDisplayState = 'REJECTED';
+
+/**
+ * Resolves each risk's live approval state from its most recent approval cycle
+ * in a single query (no N+1). Returns a Map keyed by risk id. Risks with no
+ * approval cycle at all are simply absent from the map and default to
+ * NOT_SUBMITTED at the call site.
+ */
+const fetchLatestApprovalStateByRisk = async (
+  riskIds: string[],
+): Promise<Map<string, RiskApprovalDisplayState>> => {
+  const byRisk = new Map<string, RiskApprovalDisplayState>();
+  if (riskIds.length === 0) return byRisk;
+
+  // Newest-first, so the first row seen per riskId is that risk's latest cycle
+  // — exactly what get_risk_approval_state uses to derive the display state.
+  const approvals = await prisma.riskApproval.findMany({
+    where: { riskId: { in: riskIds } },
+    orderBy: { createdAt: 'desc' },
+    select: { riskId: true, status: true, invalidatedAt: true },
+  });
+  for (const a of approvals) {
+    if (byRisk.has(a.riskId)) continue;
+    byRisk.set(a.riskId, deriveApprovalState(a));
+  }
+  return byRisk;
+};
+
+const fetchOrgData = async (orgAccountId: string): Promise<OrgReportData> => {
   const [profile, risks, kris, sites, actions] = await Promise.all([
     prisma.organizationProfile.findUnique({ where: { accountId: orgAccountId } }),
     prisma.risk.findMany({
@@ -87,27 +145,44 @@ const fetchOrgData = async (orgAccountId: string): Promise<PipelineInput> => {
     }),
   ]);
 
-  return {
+  const approvalByRisk = await fetchLatestApprovalStateByRisk(risks.map((r) => r.id));
+
+  // Exclude live-REJECTED risks entirely, then build the AI payload from the
+  // survivors and, in lockstep, the ref -> label side-channel map. REJECTED is
+  // impossible past the filter, so every map value is a ReportRiskApprovalStatus.
+  const approvalByRef = new Map<string, ReportRiskApprovalStatus>();
+  const includedRisks = risks
+    .map((r) => ({ risk: r, approval: approvalByRisk.get(r.id) ?? 'NOT_SUBMITTED' }))
+    .filter(({ approval }) => approval !== REPORT_EXCLUDED_APPROVAL_STATE);
+
+  const input: PipelineInput = {
     organization: {
       name: profile?.organizationName || 'Organization',
       description: profile?.organizationDescription ?? null,
       location: profile?.organizationLocation ?? null,
       website: profile?.organizationWebsite ?? null,
     },
-    risks: risks.map((r) => ({
-      ref: r.id.slice(0, 8),
-      name: r.name,
-      category: r.category,
-      site_name: r.site?.name ?? null,
-      inherent_score: r.inherent_score,
-      residual_score: r.residual_score,
-      status: r.status,
-      trend: r.trend,
-      velocity: r.velocity,
-      probability: r.probability,
-      financial_impact_min: r.financial_impact_min,
-      financial_impact_max: r.financial_impact_max,
-    })),
+    risks: includedRisks.map(({ risk: r, approval }) => {
+      const ref = r.id.slice(0, 8);
+      approvalByRef.set(ref, approval as ReportRiskApprovalStatus);
+      // NOTE: no approval_status here — aexa-ai's ReportRiskInput forbids extra
+      // fields. The label lives only in approvalByRef and is applied to the
+      // AI's output afterwards.
+      return {
+        ref,
+        name: r.name,
+        category: r.category,
+        site_name: r.site?.name ?? null,
+        inherent_score: r.inherent_score,
+        residual_score: r.residual_score,
+        status: r.status,
+        trend: r.trend,
+        velocity: r.velocity,
+        probability: r.probability,
+        financial_impact_min: r.financial_impact_min,
+        financial_impact_max: r.financial_impact_max,
+      };
+    }),
     kris: kris.map((k) => ({
       name: k.name,
       unit: k.unit,
@@ -130,6 +205,8 @@ const fetchOrgData = async (orgAccountId: string): Promise<PipelineInput> => {
       site_name: a.site?.name ?? null,
     })),
   };
+
+  return { input, approvalByRef };
 };
 
 const callReportContentAi = async (
@@ -162,6 +239,28 @@ const callReportContentAi = async (
   } finally {
     clearTimeout(timeout);
   }
+};
+
+/**
+ * Joins each risk's approval label back onto the AI-generated content
+ * (aexa-frontend#164). The AI reshapes/selects the input risks into
+ * `top_risks` but preserves each risk's `ref`, so ref is the stable join key —
+ * the same key the PDF template already renders. Mutates and returns `content`.
+ *
+ * Post-generation, template-level annotation (not an AI-prompt change): the
+ * label is deterministic org data, so deriving it here keeps it authoritative
+ * and out of the LLM's hands. A top_risk whose ref doesn't map (e.g. an AI
+ * hallucination) is left unlabeled rather than guessed.
+ */
+const annotateApprovalStatus = (
+  content: ReportContent,
+  approvalByRef: Map<string, ReportRiskApprovalStatus>,
+): ReportContent => {
+  for (const risk of content.top_risks ?? []) {
+    const approval = approvalByRef.get(risk.ref);
+    if (approval) risk.approval_status = approval;
+  }
+  return content;
 };
 
 // Writes the rendered PDF buffer to a temp file so it can go through the same
@@ -300,8 +399,11 @@ const generate_report_into_db = async (req: Request) => {
   });
 
   try {
-    const input = await fetchOrgData(ctx.organizationId);
-    const content = await callReportContentAi(input, ctx.organizationId);
+    const { input, approvalByRef } = await fetchOrgData(ctx.organizationId);
+    const content = annotateApprovalStatus(
+      await callReportContentAi(input, ctx.organizationId),
+      approvalByRef,
+    );
     const pdf = await renderReportPdf(content);
     const fileUrl = await uploadReportPdf(pdf);
 

@@ -18,6 +18,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     organizationProfile: { findUnique: vi.fn() },
     risk: { findMany: vi.fn() },
+    riskApproval: { findMany: vi.fn() },
     kri: { findMany: vi.fn() },
     site: { findMany: vi.fn() },
     action: { findMany: vi.fn() },
@@ -47,6 +48,7 @@ const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typ
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const profileDb = prisma.organizationProfile as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskApprovalDb = prisma.riskApproval as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const actionDb = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -93,10 +95,46 @@ const AI_CONTENT = {
 const primeOrgDataMocks = () => {
   profileDb.findUnique.mockResolvedValue({ organizationName: 'Acme' });
   riskDb.findMany.mockResolvedValue([]);
+  riskApprovalDb.findMany.mockResolvedValue([]);
   kriDb.findMany.mockResolvedValue([]);
   siteDb.findMany.mockResolvedValue([]);
   actionDb.findMany.mockResolvedValue([]);
 };
+
+// A minimal Risk row shaped like prisma.risk.findMany(include: { site }) output
+// — only the fields fetchOrgData reads. `site` is the included relation object.
+const makeRisk = (id: string, name: string) => ({
+  id,
+  name,
+  category: 'OPERATIONAL',
+  site: { name: 'HQ' },
+  inherent_score: 12,
+  residual_score: 8,
+  status: 'OPEN',
+  trend: 'STABLE',
+  velocity: 'SLOW',
+  probability: 3,
+  financial_impact_min: 1000,
+  financial_impact_max: 5000,
+});
+
+// Resolves the fetch mock so the report pipeline (fetch -> render -> upload)
+// runs end to end, capturing the JSON body sent to aexa-ai and returning
+// `aiContent` as the AI's structured response.
+const primeSuccessfulPipeline = (aiContent: Record<string, unknown>) => {
+  reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'Board Risk Report' });
+  (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ok: true,
+    json: vi.fn().mockResolvedValue(aiContent),
+  });
+  mockRender.mockResolvedValue(Buffer.from('%PDF-1.7'));
+  mockUpload.mockResolvedValue({ secure_url: 'https://cdn.example/report.pdf', key: 'k' });
+  reportDb.update.mockResolvedValue({ id: 'rep-1', status: 'READY' });
+};
+
+// The JSON body posted to aexa-ai's /report_content, i.e. the PipelineInput.
+const aiRequestBody = () =>
+  JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
 
 describe('report service — org scoping (issue #94)', () => {
   beforeEach(() => {
@@ -456,6 +494,160 @@ describe('report service — org scoping (issue #94)', () => {
       await expect(
         report_service.publish_report_into_db(makeReq({ params: { id: 'org-b' } })),
       ).rejects.toMatchObject({ statusCode: 404 });
+    });
+  });
+
+  // aexa-frontend#164: risk approval must have a downstream effect on Reports.
+  // Decision (Omar): do NOT hard-gate on APPROVED. Exclude only risks with a
+  // live REJECTED approval, and annotate every included risk with its state.
+  describe('generate_report_into_db — risk approval filter + annotation (#164)', () => {
+    beforeEach(() => {
+      primeOrgDataMocks();
+    });
+
+    // An AI response whose top_risks echo the given refs (aexa-ai preserves
+    // each risk's ref when it reshapes the input into top_risks).
+    const aiEcho = (refs: string[]) => ({
+      ...AI_CONTENT,
+      top_risks: refs.map((ref) => ({
+        ref,
+        title: `Risk ${ref}`,
+        category: 'OPERATIONAL',
+        site: 'HQ',
+        inherent_score: 12,
+        residual_score: 8,
+        trend: 'STABLE',
+        commentary: '',
+      })),
+    });
+
+    it('excludes a live-REJECTED risk and labels every other risk by its live state', async () => {
+      riskDb.findMany.mockResolvedValue([
+        makeRisk('approved-1111', 'Approved Risk'),
+        makeRisk('pending0-1111', 'Pending Risk'),
+        makeRisk('none0000-1111', 'Unsubmitted Risk'),
+        makeRisk('rejected-1111', 'Rejected Risk'),
+        makeRisk('invalid0-1111', 'Invalidated Risk'),
+      ]);
+      // Returned newest-first, as prisma orderBy createdAt desc would. The
+      // approved risk carries an OLDER rejected cycle too — proving latest-wins
+      // (a risk rejected then resubmitted+approved is included, not excluded).
+      riskApprovalDb.findMany.mockResolvedValue([
+        { riskId: 'approved-1111', status: 'APPROVED', invalidatedAt: null },
+        { riskId: 'approved-1111', status: 'REJECTED', invalidatedAt: null },
+        { riskId: 'pending0-1111', status: 'PENDING_APPROVAL', invalidatedAt: null },
+        { riskId: 'rejected-1111', status: 'REJECTED', invalidatedAt: null },
+        // Latest cycle was APPROVED but the risk was edited afterwards
+        // (invalidatedAt set) — must revert to NOT_SUBMITTED, NOT be excluded.
+        { riskId: 'invalid0-1111', status: 'APPROVED', invalidatedAt: new Date() },
+        // none0000 has no approval cycle at all -> NOT_SUBMITTED.
+      ]);
+      // AI echoes the four surviving refs.
+      primeSuccessfulPipeline(aiEcho(['approved', 'pending0', 'none0000', 'invalid0']));
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      // The AI payload excludes the rejected risk and — critically — carries NO
+      // approval_status on any risk (aexa-ai's ReportRiskInput is extra=forbid,
+      // so an approval label in the payload would 422 the whole generation).
+      const body = aiRequestBody();
+      expect(body.risks).toHaveLength(4);
+      expect(body.risks.map((r: { name: string }) => r.name)).not.toContain('Rejected Risk');
+      for (const r of body.risks) expect(r).not.toHaveProperty('approval_status');
+
+      // The label is instead joined onto the AI's output before render — every
+      // surviving risk carries its correct live label; the rejected one is absent.
+      const rendered = mockRender.mock.calls[0][0];
+      const byRef: Record<string, { approval_status?: string }> = {};
+      for (const r of rendered.top_risks) byRef[r.ref] = r;
+      expect(byRef['approved'].approval_status).toBe('APPROVED');
+      expect(byRef['pending0'].approval_status).toBe('PENDING_APPROVAL');
+      expect(byRef['none0000'].approval_status).toBe('NOT_SUBMITTED');
+      expect(byRef['invalid0'].approval_status).toBe('NOT_SUBMITTED');
+      expect(byRef['rejected']).toBeUndefined();
+    });
+
+    it('queries approval cycles only for the org’s own risks', async () => {
+      riskDb.findMany.mockResolvedValue([makeRisk('approved-1111', 'Approved Risk')]);
+      riskApprovalDb.findMany.mockResolvedValue([
+        { riskId: 'approved-1111', status: 'APPROVED', invalidatedAt: null },
+      ]);
+      primeSuccessfulPipeline(AI_CONTENT);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      expect(riskApprovalDb.findMany.mock.calls[0][0].where).toEqual({
+        riskId: { in: ['approved-1111'] },
+      });
+    });
+
+    it('does not query approvals when the org has no risks', async () => {
+      riskDb.findMany.mockResolvedValue([]);
+      primeSuccessfulPipeline(AI_CONTENT);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      expect(riskApprovalDb.findMany).not.toHaveBeenCalled();
+    });
+
+    it('joins the approval label onto the AI’s top_risks output by ref before render', async () => {
+      riskDb.findMany.mockResolvedValue([
+        makeRisk('approved-1111', 'Approved Risk'),
+        makeRisk('pending0-1111', 'Pending Risk'),
+      ]);
+      riskApprovalDb.findMany.mockResolvedValue([
+        { riskId: 'approved-1111', status: 'APPROVED', invalidatedAt: null },
+        { riskId: 'pending0-1111', status: 'PENDING_APPROVAL', invalidatedAt: null },
+      ]);
+      // The AI echoes each risk's ref in its reshaped top_risks, plus one ref
+      // that maps to nothing (hallucination) — that one must stay unlabeled.
+      const aiContent = {
+        ...AI_CONTENT,
+        top_risks: [
+          {
+            ref: 'approved',
+            title: 'Approved Risk',
+            category: 'OPERATIONAL',
+            site: 'HQ',
+            inherent_score: 12,
+            residual_score: 8,
+            trend: 'STABLE',
+            commentary: '',
+          },
+          {
+            ref: 'pending0',
+            title: 'Pending Risk',
+            category: 'OPERATIONAL',
+            site: 'HQ',
+            inherent_score: 12,
+            residual_score: 8,
+            trend: 'STABLE',
+            commentary: '',
+          },
+          {
+            ref: 'ghost123',
+            title: 'Ghost',
+            category: 'X',
+            site: 'HQ',
+            inherent_score: 1,
+            residual_score: 1,
+            trend: 'STABLE',
+            commentary: '',
+          },
+        ],
+      };
+      primeSuccessfulPipeline(aiContent);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const rendered = mockRender.mock.calls[0][0];
+      const byRef: Record<string, { approval_status?: string }> = {};
+      for (const r of rendered.top_risks) byRef[r.ref] = r;
+
+      expect(byRef['approved'].approval_status).toBe('APPROVED');
+      expect(byRef['pending0'].approval_status).toBe('PENDING_APPROVAL');
+      // Unmapped ref is left unlabeled rather than guessed.
+      expect(byRef['ghost123'].approval_status).toBeUndefined();
     });
   });
 });
