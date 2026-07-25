@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+// #97: Three Lines of Defense classification. Not required on create — Kri
+// has a sensible schema-level default (SECOND, see kri.prisma). Reassignment
+// is further gated in kri.service.ts (only ADMIN/LEAD_AUDITOR via
+// assertCanWriteOrgResource, which already applies to the whole payload).
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+
 const create_kri = z
   .object({
     risk_id: z.string().min(1, 'risk_id is required'),
@@ -9,6 +15,7 @@ const create_kri = z
     alert_threshold: z.number(),
     target_value: z.number(),
     frequency: z.string().optional(),
+    line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
   })
   // target_value and alert_threshold must differ so status computation can
   // infer which direction is "better" (see kri.service.ts's compute_kri_status).
@@ -24,6 +31,7 @@ const update_kri = z
     alert_threshold: z.number().optional(),
     target_value: z.number().optional(),
     frequency: z.string().optional(),
+    line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
   })
   .refine(
     (data) =>

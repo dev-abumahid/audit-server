@@ -270,6 +270,71 @@ describe('kri service — org scoping and role gating', () => {
     });
   });
 
+  // Issue #97: Three Lines of Defense classification. update_kri_into_db
+  // already gates its entire payload with assertCanWriteOrgResource (ADMIN /
+  // LEAD_AUDITOR only) — these tests confirm line_of_defense specifically
+  // rides that same existing gate and is actually persisted when allowed.
+  describe('update_kri_into_db — line_of_defense (#97)', () => {
+    const existingKri = {
+      id: 'k1',
+      org_account_id: ORG_A,
+      alert_threshold: 30,
+      target_value: 20,
+    };
+
+    it('LIGHT_USER cannot reassign line_of_defense', async () => {
+      mockMembership('LIGHT_USER');
+      db.findFirst.mockResolvedValue(existingKri);
+
+      await expect(
+        kri_service.update_kri_into_db(
+          makeReq({ params: { id: 'k1' }, body: { line_of_defense: 'FIRST' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('VIEWER cannot reassign line_of_defense', async () => {
+      mockMembership('VIEWER');
+      db.findFirst.mockResolvedValue(existingKri);
+
+      await expect(
+        kri_service.update_kri_into_db(
+          makeReq({ params: { id: 'k1' }, body: { line_of_defense: 'THIRD' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can reassign line_of_defense', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue(existingKri);
+      db.update.mockResolvedValue({ ...existingKri, line_of_defense: 'THIRD' });
+
+      await kri_service.update_kri_into_db(
+        makeReq({ params: { id: 'k1' }, body: { line_of_defense: 'THIRD' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.line_of_defense).toBe('THIRD');
+    });
+
+    it('LEAD_AUDITOR can reassign line_of_defense', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue(existingKri);
+      db.update.mockResolvedValue({ ...existingKri, line_of_defense: 'FIRST' });
+
+      await kri_service.update_kri_into_db(
+        makeReq({ params: { id: 'k1' }, body: { line_of_defense: 'FIRST' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.line_of_defense).toBe('FIRST');
+    });
+  });
+
   describe('submit_kri_value_into_db — alert auto-generation', () => {
     it('creates an Alert when a reading crosses INTO ALERT status', async () => {
       const readAt = new Date('2026-07-20T10:00:00.000Z');

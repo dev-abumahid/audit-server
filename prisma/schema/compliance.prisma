@@ -35,6 +35,12 @@ model ComplianceObligation {
     ai_generated Boolean @default(false)
     is_edited    Boolean @default(false)
 
+    // #97: Three Lines of Defense classification. Compliance obligations
+    // default to 2nd line (risk/compliance oversight function), matching
+    // Fullbloom's per-entity fallback — see risk.prisma's LineOfDefense enum
+    // for the full context.
+    line_of_defense LineOfDefense @default(SECOND)
+
     // Remediation actions raised against this obligation (aexa-frontend#166).
     // Back-side of Action.complianceObligation, which is onDelete: SetNull —
     // deleting an obligation nulls these links rather than deleting the

@@ -270,6 +270,64 @@ describe('audit service — org scoping (issue #92)', () => {
     });
   });
 
+  // Issue #97: Three Lines of Defense classification. update_audit_into_db
+  // already gates its entire payload with assertCanWriteOrgResource (ADMIN /
+  // LEAD_AUDITOR only) — these tests confirm line_of_defense specifically
+  // rides that same existing gate and is actually persisted when allowed.
+  describe('update_audit_into_db — line_of_defense (#97)', () => {
+    it('LIGHT_USER cannot reassign line_of_defense', async () => {
+      mockMembership('LIGHT_USER');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ANCHOR });
+
+      await expect(
+        audit_service.update_audit_into_db(
+          makeReq({ params: { id: 'a1' }, body: { line_of_defense: 'FIRST' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('VIEWER cannot reassign line_of_defense', async () => {
+      mockMembership('VIEWER');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ANCHOR });
+
+      await expect(
+        audit_service.update_audit_into_db(
+          makeReq({ params: { id: 'a1' }, body: { line_of_defense: 'SECOND' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can reassign line_of_defense', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ANCHOR });
+      db.update.mockResolvedValue({ id: 'a1', line_of_defense: 'FIRST' });
+
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { line_of_defense: 'FIRST' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.line_of_defense).toBe('FIRST');
+    });
+
+    it('LEAD_AUDITOR can reassign line_of_defense', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ANCHOR });
+      db.update.mockResolvedValue({ id: 'a1', line_of_defense: 'SECOND' });
+
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { line_of_defense: 'SECOND' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.line_of_defense).toBe('SECOND');
+    });
+  });
+
   describe('delete_audit_from_db', () => {
     it('verifies ownership before deleting', async () => {
       db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });

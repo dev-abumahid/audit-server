@@ -16,6 +16,16 @@ const PRIORITY_ENUM = z.enum(['Low', 'Medium', 'High']);
 
 const STATUS_ENUM = z.enum(['TO_DO', 'IN_PROGRESS', 'COMPLETE', 'CANT_DO']);
 
+// #97 (Three Lines of Defense): unlike Risk/Kri/ComplianceObligation/
+// AuditEngagement, Action has NO schema-level default (see action.prisma's
+// line_of_defense comment) — it covers both remediation work (1st-line-like)
+// and audit findings (3rd-line-like), so guessing a default would misclassify
+// roughly half of them. Required (not optional) on create so every NEW Action
+// going forward is explicitly classified; existing rows stay NULL
+// ("Unclassified" in the UI) and are never forced through this requirement
+// via update_action, which keeps it optional (see below).
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+
 // Message Schema
 const actionMessageSchema = z.object({
   actionId: z.string().optional(),
@@ -48,6 +58,11 @@ const create_action = z.object({
   dueDate: z.coerce.date(),
 
   status: STATUS_ENUM.optional().default('TO_DO'),
+
+  // Required on create — see LINE_OF_DEFENSE_ENUM's comment above for why
+  // this is the one field, among the 5 models #97 touches, that's mandatory
+  // at the application-validation layer despite being DB-nullable.
+  line_of_defense: LINE_OF_DEFENSE_ENUM,
 
   // File URLs returned by POST /action/attachment (uploaded separately,
   // then attached to the action by URL — same two-step pattern as

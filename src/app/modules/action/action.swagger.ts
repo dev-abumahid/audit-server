@@ -18,6 +18,7 @@ export const actionSwaggerDocs = {
               priority: 'High',
               dueDate: new Date('2026-07-15'),
               status: 'TO_DO',
+              line_of_defense: 'FIRST',
               messages: [
                 {
                   message: 'Issue identified during inspection.',

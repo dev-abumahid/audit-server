@@ -6,6 +6,7 @@ import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
 import {
   applyActionScope,
+  assertCanWriteOrgResource,
   assertCanWriteToAction,
   assertCanWriteToActionForExternalMember,
   assertCanWriteToInspection,
@@ -249,6 +250,13 @@ const create_action_into_db = async (req: Request) => {
       priority: body.priority,
       dueDate: body.dueDate,
       status: body.status,
+      // #97: required by action.validation.ts's create_action schema for
+      // every new Action — no default, unlike the other 4 models this
+      // classification touches (see action.prisma's schema comment). No
+      // extra role gate needed here beyond assertCanWriteToInspection above:
+      // that already restricts action creation to ADMIN/LEAD_AUDITOR, the
+      // same set allowed to reassign line_of_defense on update.
+      line_of_defense: body.line_of_defense,
       attachments: body.attachments ?? [],
       messages: {
         create:
@@ -280,6 +288,18 @@ const update_action_into_db = async (req: Request) => {
   // IN_PROGRESS/COMPLETE — without gaining any broader inspection access.
   await assertCanWriteToAction(ctx, { id: existing.id, inspectionId: existing.inspectionId });
 
+  // #97: reassigning line_of_defense is restricted to ADMIN/LEAD_AUDITOR
+  // (the org_scope.ts gate every other module's update endpoint uses via
+  // assertCanWriteOrgResource), which is STRICTER than assertCanWriteToAction
+  // above — that check also lets a sub-assigned LIGHT_USER update a finding's
+  // other fields (status, attachments, etc.), and a Light User must not be
+  // able to reclassify a finding's governance line. Only run this extra gate
+  // when line_of_defense is actually part of the payload, same "only check
+  // what's touched" pattern assignBy already uses just below.
+  if (req.body.line_of_defense !== undefined) {
+    assertCanWriteOrgResource(ctx);
+  }
+
   // Same org-scope check as create — only run when assignBy is actually
   // part of this update, same as every other optional field here. See the
   // matching comment in create_action_into_db for why this resolves the
@@ -302,6 +322,9 @@ const update_action_into_db = async (req: Request) => {
       ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
       ...(req.body.status !== undefined && { status: req.body.status }),
       ...(req.body.attachments !== undefined && { attachments: req.body.attachments }),
+      ...(req.body.line_of_defense !== undefined && {
+        line_of_defense: req.body.line_of_defense,
+      }),
       // Full replace, not a merge — matches how the frontend's multi-select
       // submits the complete desired set every time, not a delta.
       ...(req.body.assignBy !== undefined && {

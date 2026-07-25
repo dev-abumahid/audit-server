@@ -60,6 +60,28 @@ model Action {
     status      STATUS   @default(TO_DO)
     attachments String[] @default([])
 
+    // #97 (Three Lines of Defense): deliberately nullable with NO default,
+    // unlike the other 4 models this classification was added to (Risk,
+    // Kri, ComplianceObligation, AuditEngagement all get a sensible
+    // per-entity-type default — see risk.prisma's LineOfDefense enum). An
+    // Action covers two very different roles — remediation work (1st-line-
+    // like) and audit findings (3rd-line-like) — so any single default would
+    // misclassify roughly half of them; the user must pick explicitly.
+    //
+    // This is a live production table, so the column itself CANNOT be
+    // NOT NULL: a hard constraint would fail the migration against every
+    // existing row (they have no line_of_defense opinion recorded, and there
+    // is no correct value to backfill them with). The migration leaves
+    // existing rows NULL, surfaced in the UI as an "Unclassified" bucket.
+    //
+    // The requirement lives one layer up instead: action.validation.ts's
+    // create_action schema makes `line_of_defense` required (not optional)
+    // for any NEW Action going forward, while update_action keeps it
+    // optional so existing untouched Actions are never forced through a
+    // migration just to satisfy a PATCH. This DB-nullable /
+    // app-required-on-create split is intentional, not an oversight.
+    line_of_defense LineOfDefense?
+
     // Relation
     messages ActionMessage[]
     site     Site?           @relation(fields: [siteId], references: [id], onDelete: Cascade)

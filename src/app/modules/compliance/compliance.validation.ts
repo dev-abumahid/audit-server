@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+// #97: Three Lines of Defense classification. Not required on create —
+// ComplianceObligation has a sensible schema-level default (SECOND, see
+// compliance.prisma). Reassignment is further gated in compliance.service.ts
+// (only ADMIN/LEAD_AUDITOR via assertCanWriteOrgResource, which already
+// applies to the whole payload).
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+
 // The frontend date inputs submit "" (empty string) when left blank, not
 // null/undefined. z.coerce.date() would turn "" into an Invalid Date and
 // reject the whole payload, so normalize an empty string to undefined before
@@ -52,6 +59,7 @@ const create_compliance = z.object({
   attachments: z.array(httpsUrl).optional(),
   ai_generated: z.boolean().optional(),
   is_edited: z.boolean().optional(),
+  line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
 });
 
 // On UPDATE, `site_id` needs three-way handling that create's "'' -> undefined"

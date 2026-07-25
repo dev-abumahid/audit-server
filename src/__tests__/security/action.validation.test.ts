@@ -7,6 +7,11 @@ const BASE = {
   actionDisc: 'Something broke',
   priority: 'High' as const,
   dueDate: new Date().toISOString(),
+  // #97: required on create (see action.validation.ts's LINE_OF_DEFENSE_ENUM
+  // comment) — included in the shared BASE fixture so every other
+  // create_action test in this file (attachments, assignBy, actionDisc) isn't
+  // incidentally exercising the new required-field rule too.
+  line_of_defense: 'FIRST' as const,
 };
 
 describe('action_validations.create_action — attachments', () => {
@@ -183,6 +188,55 @@ describe('action_validations.update_action_messages (issue #51)', () => {
 
   it('rejects a missing message', () => {
     const result = action_validations.update_action_messages.safeParse({});
+    expect(result.success).toBe(false);
+  });
+});
+
+// Issue #97: Three Lines of Defense classification. Unlike Risk/Kri/
+// ComplianceObligation/AuditEngagement (all optional on create, with a
+// schema-level DB default), Action has no default — see action.prisma's
+// line_of_defense comment — so create_action requires it explicitly while
+// update_action keeps it optional (existing Actions must not be forced
+// through this requirement on an unrelated PATCH).
+describe('action_validations.create_action — line_of_defense (#97, required on create)', () => {
+  it('rejects a create payload with line_of_defense omitted', () => {
+    const { line_of_defense: _lod, ...withoutLod } = BASE;
+    const result = action_validations.create_action.safeParse(withoutLod);
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts FIRST/SECOND/THIRD', () => {
+    for (const value of ['FIRST', 'SECOND', 'THIRD']) {
+      const result = action_validations.create_action.safeParse({
+        ...BASE,
+        line_of_defense: value,
+      });
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it('rejects an invalid line_of_defense value', () => {
+    const result = action_validations.create_action.safeParse({
+      ...BASE,
+      line_of_defense: 'FOURTH',
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('action_validations.update_action — line_of_defense (#97, optional on update)', () => {
+  it('accepts a partial update with line_of_defense omitted — existing Actions are never forced to classify via an unrelated PATCH', () => {
+    const result = action_validations.update_action.safeParse({ actionTitle: 'Renamed' });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a valid line_of_defense on its own', () => {
+    const result = action_validations.update_action.safeParse({ line_of_defense: 'SECOND' });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an invalid line_of_defense value on update too', () => {
+    const result = action_validations.update_action.safeParse({ line_of_defense: 'FOURTH' });
     expect(result.success).toBe(false);
   });
 });

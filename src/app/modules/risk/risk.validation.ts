@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+// #97: Three Lines of Defense classification. Not required on create — Risk
+// has a sensible schema-level default (FIRST, see risk.prisma), unlike
+// Action which requires this explicitly. Reassignment is further gated in
+// risk.service.ts (only ADMIN/LEAD_AUDITOR via assertCanWriteOrgResource,
+// which update_risk_into_db already applies to the whole payload).
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+
 const create_risk = z.object({
   name: z.string().min(1, 'Name is required'),
   description: z.string().optional(),
@@ -20,6 +27,7 @@ const create_risk = z.object({
 
   control_design_eff: z.number().int().optional(),
   control_operating_eff: z.number().int().optional(),
+  line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
 });
 const update_risk = create_risk.partial();
 

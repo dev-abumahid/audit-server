@@ -1,3 +1,15 @@
+// Issue #97 ("Three Lines of Defense" governance classification), mirroring
+// the Fullbloom reference (ThreeLinesOfDefensePage.tsx)'s per-entity-type
+// default: a Risk is operational/management-owned by default, i.e. 1st line.
+// See action.prisma's LineOfDefense-related comment on Action for why that
+// model is the one deliberate exception (nullable, no default) among the 5
+// entities this classification was added to.
+enum LineOfDefense {
+    FIRST
+    SECOND
+    THIRD
+}
+
 model Risk {
     id                    String   @id @default(uuid())
     org_account_id        String
@@ -21,6 +33,10 @@ model Risk {
     source_info           String?
     control_design_eff    Int?
     control_operating_eff Int?
+    // #97: which IIA "line of defense" owns this item. Risk defaults to 1st
+    // line (operational/management-owned), matching Fullbloom's per-entity
+    // fallback.
+    line_of_defense       LineOfDefense @default(FIRST)
     createdAt             DateTime @default(now())
     updatedAt             DateTime @updatedAt
 

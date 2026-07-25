@@ -327,6 +327,30 @@ describe('action service — org scoping (ticket #6)', () => {
       );
     });
 
+    // Issue #97: no extra role gate needed on create — assertCanWriteToInspection
+    // already restricts action creation to ADMIN/LEAD_AUDITOR, the same set
+    // allowed to reassign line_of_defense on update. This just confirms the
+    // field is actually written through, matching action.validation.ts's
+    // create_action schema requiring it (though the service itself doesn't
+    // re-validate — that happens at the route/RequestValidator layer).
+    it('persists line_of_defense supplied on create', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({ id: 'new', orgAccountId: ORG_A, line_of_defense: 'SECOND' });
+
+      await action_service.create_action_into_db(
+        makeReq({
+          body: { inspectionId: 'insp-1', actionTitle: 'Mitigate risk', line_of_defense: 'SECOND' },
+        }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.line_of_defense).toBe('SECOND');
+    });
+
     it('verifies inspection belongs to caller org before creating action', async () => {
       dbInspection.findFirst.mockResolvedValue(null); // org-B inspection not found for org-A
 
@@ -1307,6 +1331,106 @@ describe('action service — org scoping (ticket #6)', () => {
         await action_service.delete_action_from_db(makeReq({ params: { id: 'a1' } }));
         expect(db.delete).toHaveBeenCalled();
         expect(assignmentDb.findMany).not.toHaveBeenCalled();
+      });
+    });
+
+    // Issue #97: Three Lines of Defense classification. update_action_into_db
+    // is gated by assertCanWriteToAction, which is DELIBERATELY BROADER than
+    // assertCanWriteOrgResource — it also lets a sub-assigned LIGHT_USER
+    // update a finding's other fields (status, attachments, ...). Reassigning
+    // line_of_defense must stay restricted to ADMIN/LEAD_AUDITOR, so these
+    // tests confirm the extra assertCanWriteOrgResource check inside
+    // update_action_into_db actually fires for that one field, without
+    // blocking the LIGHT_USER's normal (non-reassignment) update.
+    describe('write-path scoping — line_of_defense (#97)', () => {
+      it('LIGHT_USER sub-assigned to the finding CAN update it, but CANNOT include line_of_defense', async () => {
+        mockMembership('LIGHT_USER');
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          inspectionId: 'insp-1',
+          orgAccountId: ANCHOR,
+        });
+
+        await expect(
+          action_service.update_action_into_db(
+            makeReq({
+              params: { id: 'action-1' },
+              body: { status: 'COMPLETE', line_of_defense: 'SECOND' },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(db.update).not.toHaveBeenCalled();
+      });
+
+      it('LIGHT_USER sub-assigned to the finding can still update other fields when line_of_defense is omitted', async () => {
+        mockMembership('LIGHT_USER');
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          inspectionId: 'insp-1',
+          orgAccountId: ANCHOR,
+        });
+        db.update.mockResolvedValue({});
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'action-1' }, body: { status: 'COMPLETE' } }),
+        );
+
+        expect(db.update).toHaveBeenCalled();
+      });
+
+      it('VIEWER cannot reassign line_of_defense', async () => {
+        mockMembership('VIEWER');
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          inspectionId: 'insp-1',
+          orgAccountId: ANCHOR,
+        });
+
+        await expect(
+          action_service.update_action_into_db(
+            makeReq({ params: { id: 'action-1' }, body: { line_of_defense: 'FIRST' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(db.update).not.toHaveBeenCalled();
+      });
+
+      it('LEAD_AUDITOR assigned to the parent inspection can reassign line_of_defense', async () => {
+        mockMembership('LEAD_AUDITOR');
+        assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-assigned-1' }]);
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          inspectionId: 'insp-assigned-1',
+          orgAccountId: ANCHOR,
+        });
+        db.update.mockResolvedValue({ id: 'action-1', line_of_defense: 'THIRD' });
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'action-1' }, body: { line_of_defense: 'THIRD' } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data.line_of_defense).toBe('THIRD');
+      });
+
+      it('ADMIN can reassign line_of_defense', async () => {
+        mockMembership('ADMIN');
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          inspectionId: 'insp-1',
+          orgAccountId: ANCHOR,
+        });
+        db.update.mockResolvedValue({ id: 'action-1', line_of_defense: 'FIRST' });
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'action-1' }, body: { line_of_defense: 'FIRST' } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data.line_of_defense).toBe('FIRST');
       });
     });
   });

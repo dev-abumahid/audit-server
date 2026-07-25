@@ -13,6 +13,10 @@ model Kri {
     // #96: flags a KRI seeded from the onboarding template library so the UI
     // can show the same "AI-generated, review recommended" treatment as Risk.
     ai_generated    Boolean  @default(false)
+    // #97: Three Lines of Defense classification. KRIs default to 2nd line
+    // (risk/compliance oversight function), matching Fullbloom's per-entity
+    // fallback — see risk.prisma's LineOfDefense enum for the full context.
+    line_of_defense LineOfDefense @default(SECOND)
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 

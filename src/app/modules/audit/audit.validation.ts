@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+// #97: Three Lines of Defense classification. Not required on create —
+// AuditEngagement has a sensible schema-level default (THIRD, see
+// audit.prisma). Reassignment is further gated in audit.service.ts (only
+// ADMIN/LEAD_AUDITOR via assertCanWriteOrgResource, which already applies to
+// the whole payload).
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+
 // The frontend date inputs submit "" (empty string) when left blank, not
 // null/undefined. z.coerce.date() would turn "" into an Invalid Date and
 // reject the whole payload, so normalize an empty string to undefined before
@@ -59,6 +66,7 @@ const create_audit = z.object({
   // explicit array (including []) replaces the whole link set.
   riskIds: z.array(z.string()).optional(),
   report_url: z.string().optional(),
+  line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
 });
 
 // Every field is optional on update (PATCH). The date fields specifically use
