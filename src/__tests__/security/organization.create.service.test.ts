@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     account: { create: vi.fn(), findFirst: vi.fn() },
-    organizationProfile: { create: vi.fn() },
+    organizationProfile: { create: vi.fn(), findFirst: vi.fn() },
     organization: { create: vi.fn() },
     orgMember: { create: vi.fn() },
     $transaction: vi.fn(),
@@ -14,6 +14,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
 import { prisma } from '../../app/lib/prisma.js';
 import {
   assertEmailAvailable,
+  assertOrganizationNameAvailable,
   createOrganizationStandalone,
 } from '../../app/modules/organization/organization.create.service.js';
 
@@ -46,6 +47,7 @@ describe('organization.create.service — createOrganizationStandalone', () => {
       cb(makeTx()),
     );
     accountDb.findFirst.mockResolvedValue(null);
+    profileDb.findFirst.mockResolvedValue(null);
     accountDb.create.mockResolvedValue({ id: 'acc-1', email: VALID.email, role: 'ORGANIZATION' });
     profileDb.create.mockResolvedValue({ id: 'prof-1' });
     organizationDb.create.mockResolvedValue({ id: 'org-1', name: VALID.organizationName });
@@ -104,5 +106,41 @@ describe('organization.create.service — createOrganizationStandalone', () => {
     await expect(assertEmailAvailable('taken@acme.test')).rejects.toMatchObject({
       statusCode: 400,
     });
+  });
+
+  it('rejects a duplicate organization name with a 400 BEFORE opening the transaction (#212, no rows created)', async () => {
+    // Email free, org name taken.
+    accountDb.findFirst.mockResolvedValue(null);
+    profileDb.findFirst.mockResolvedValue({ id: 'existing-profile' });
+
+    await expect(createOrganizationStandalone(VALID)).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringMatching(/organization with this name already exists/i),
+    });
+
+    expect(mockTransaction).not.toHaveBeenCalled();
+    expect(accountDb.create).not.toHaveBeenCalled();
+  });
+
+  it('assertOrganizationNameAvailable throws 400 and queries case-insensitively on the trimmed name (#212)', async () => {
+    profileDb.findFirst.mockResolvedValue({ id: 'existing-profile' });
+
+    await expect(assertOrganizationNameAvailable('  Acme Corp  ')).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringMatching(/organization with this name already exists/i),
+    });
+
+    expect(profileDb.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationName: { equals: 'Acme Corp', mode: 'insensitive' },
+        }),
+      }),
+    );
+  });
+
+  it('assertOrganizationNameAvailable resolves when no profile uses the name', async () => {
+    profileDb.findFirst.mockResolvedValue(null);
+    await expect(assertOrganizationNameAvailable('Totally New Org')).resolves.toBeUndefined();
   });
 });

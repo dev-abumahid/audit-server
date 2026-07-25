@@ -8,20 +8,29 @@ import { AppError } from '../../utils/app_error.js';
 import { jwtHelpers, JwtPayloadType } from '../../utils/JWT.js';
 import { otpGenerator } from '../../utils/otpGenerator.js';
 import { constantTimeStringEqual } from '../../utils/secureCompare.js';
+import {
+  assertEmailAvailable,
+  assertOrganizationNameAvailable,
+} from '../organization/organization.create.service.js';
 import { SAFE_ACCOUNT_SELECT } from './account.constants.js';
 
 const create_account_into_db = async (req: Request) => {
   const payload = req?.body;
 
-  // check account exist or not
-  const isOrganizationExist = await prisma.account.findFirst({
-    where: {
-      email: payload.email,
-    },
-  });
-  if (isOrganizationExist) {
-    throw new AppError('Organization already exists', 400);
-  }
+  // Two independent pre-checks before we create anything (#212). These were
+  // previously a SINGLE check that queried Account.email but threw the
+  // misleadingly-worded "Organization already exists" — it never actually
+  // checked the org name at all. Split into the two accurate checks, reusing
+  // the shared helpers so signup, POST /organization and onboarding-commit all
+  // enforce the same rules with the same messages.
+  //   1. email uniqueness (a real uniqueness/security boundary — Account.email
+  //      is @unique)
+  await assertEmailAvailable(payload.email);
+  //   2. organization-name uniqueness (application-level, case-insensitive; see
+  //      the helper for the accepted TOCTOU tradeoff and why there's no DB
+  //      constraint)
+  await assertOrganizationNameAvailable(payload.organizationName);
+
   // hash password
   const hashPassword = bcrypt.hashSync(payload.password, 10);
 

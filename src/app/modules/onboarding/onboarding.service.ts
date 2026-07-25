@@ -7,6 +7,7 @@ import { AppError } from '../../utils/app_error.js';
 import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
 import {
   assertEmailAvailable,
+  assertOrganizationNameAvailable,
   createOrgAccount,
   type PrismaTxClient,
 } from '../organization/organization.create.service.js';
@@ -198,6 +199,10 @@ const commit_onboarding = async (req: Request) => {
     // Fail fast on a duplicate email BEFORE opening the transaction, so it's a
     // clean 400 rather than a P2002 aborting a half-built commit.
     await assertEmailAvailable(payload.email);
+    // Same fail-fast posture for a duplicate org name (#212). Application-level,
+    // case-insensitive; see assertOrganizationNameAvailable for the accepted
+    // TOCTOU tradeoff (no DB unique constraint backs this).
+    await assertOrganizationNameAvailable(payload.organizationName);
 
     const result = await prisma.$transaction(
       async (tx) => {

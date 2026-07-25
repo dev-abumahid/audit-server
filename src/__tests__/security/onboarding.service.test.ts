@@ -9,7 +9,7 @@ vi.mock('../../app/lib/logger.js', () => ({
 vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
     account: { create: vi.fn(), findFirst: vi.fn() },
-    organizationProfile: { create: vi.fn() },
+    organizationProfile: { create: vi.fn(), findFirst: vi.fn() },
     organization: { create: vi.fn() },
     orgMember: { create: vi.fn() },
     site: { create: vi.fn() },
@@ -203,6 +203,7 @@ describe('onboarding service — commit (Stage 4, transactional)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     db.account.findFirst.mockResolvedValue(null);
+    db.organizationProfile.findFirst.mockResolvedValue(null);
     db.account.create.mockResolvedValue({ id: 'acc-1', email: 'admin@acme.test' });
     db.organizationProfile.create.mockResolvedValue({ id: 'prof-1' });
     db.organization.create.mockResolvedValue({ id: 'org-1', name: 'Acme Corp' });
@@ -290,6 +291,23 @@ describe('onboarding service — commit (Stage 4, transactional)', () => {
     await expect(
       onboarding_service.commit_onboarding(makeReq({ user: ADMIN, body: commitBody() })),
     ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(mockTransaction).not.toHaveBeenCalled();
+    expect(db.account.create).not.toHaveBeenCalled();
+    expect(db.site.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a duplicate organization name with 400 BEFORE opening the transaction (#212 — nothing persists)', async () => {
+    // Email is free, but an OrganizationProfile already uses this name.
+    db.account.findFirst.mockResolvedValue(null);
+    db.organizationProfile.findFirst.mockResolvedValue({ id: 'existing-profile' });
+
+    await expect(
+      onboarding_service.commit_onboarding(makeReq({ user: ADMIN, body: commitBody() })),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringMatching(/organization with this name already exists/i),
+    });
 
     expect(mockTransaction).not.toHaveBeenCalled();
     expect(db.account.create).not.toHaveBeenCalled();

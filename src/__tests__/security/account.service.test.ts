@@ -12,6 +12,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     organizationProfile: {
       create: vi.fn(),
+      findFirst: vi.fn(),
     },
     $transaction: vi.fn(),
   },
@@ -33,22 +34,83 @@ import { configs } from '../../app/configs/index.js';
 import { jwtHelpers } from '../../app/utils/JWT.js';
 
 const db = prisma.account as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const profileDb = prisma.organizationProfile as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const mockTransaction = prisma.$transaction as unknown as ReturnType<typeof vi.fn>;
 const mockOtpQueueAdd = vi.mocked(otpEmailQueue.add);
 const mockResetQueueAdd = vi.mocked(resetEmailQueue.add);
 
 describe('account service', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    // clearAllMocks resets call history but NOT mockResolvedValue
+    // implementations, so a truthy org-name lookup set by one signup test would
+    // otherwise leak into the next. Re-establish "org name available" as the
+    // per-test default; individual tests override it when they need a collision.
+    vi.clearAllMocks();
+    profileDb.findFirst.mockResolvedValue(null);
+  });
 
   describe('create_account_into_db (register)', () => {
-    it('throws 400 if an account with that email already exists', async () => {
+    it('throws 400 with an email-specific message if an account with that email already exists (#212 — no longer the misworded "Organization already exists")', async () => {
       db.findFirst.mockResolvedValue({ id: 'existing' });
+      profileDb.findFirst.mockResolvedValue(null);
 
       await expect(
         account_services.create_account_into_db(
           makeReq({ body: { email: 'a@test.com', password: 'pw', organizationName: 'Acme' } }),
         ),
-      ).rejects.toMatchObject({ statusCode: 400 });
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringMatching(/email already exists/i),
+      });
+
+      // The email check is independent of and fires BEFORE the org-name check:
+      // a duplicate email short-circuits without ever consulting org names, and
+      // no rows are created.
+      expect(profileDb.findFirst).not.toHaveBeenCalled();
+      expect(mockTransaction).not.toHaveBeenCalled();
+    });
+
+    it('throws 400 with an org-name-specific message when the email is free but the organization name is already taken (#212)', async () => {
+      // Email available...
+      db.findFirst.mockResolvedValue(null);
+      // ...but an OrganizationProfile with this name already exists.
+      profileDb.findFirst.mockResolvedValue({ id: 'existing-profile' });
+
+      await expect(
+        account_services.create_account_into_db(
+          makeReq({ body: { email: 'new@test.com', password: 'pw', organizationName: 'Acme' } }),
+        ),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringMatching(/organization with this name already exists/i),
+      });
+
+      // Rejected before any account/org rows are created.
+      expect(mockTransaction).not.toHaveBeenCalled();
+    });
+
+    it('matches an existing org name case-insensitively and trims surrounding whitespace (#212)', async () => {
+      db.findFirst.mockResolvedValue(null);
+      profileDb.findFirst.mockResolvedValue({ id: 'existing-profile' });
+
+      await account_services
+        .create_account_into_db(
+          makeReq({
+            body: { email: 'new@test.com', password: 'pw', organizationName: '  AcMe  ' },
+          }),
+        )
+        .catch(() => {
+          /* expected 400 — asserted via the query shape below */
+        });
+
+      // The lookup normalises: trimmed value + case-insensitive mode.
+      expect(profileDb.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            organizationName: { equals: 'AcMe', mode: 'insensitive' },
+          }),
+        }),
+      );
     });
 
     it('creates the account with isAccountVerified: false and sends an OTP email', async () => {
