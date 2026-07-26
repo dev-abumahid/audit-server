@@ -194,6 +194,7 @@ export const buildReportHtml = (content: ReportContent): string => {
   .badge-ALERT { background: #fde8e8; color: #c0392b; }
   .badge-WARNING { background: #fef3d7; color: #b7791f; }
   .badge-OK { background: #e3f5ef; color: ${BRAND_TEAL_DARK}; }
+  .badge-UNKNOWN { background: #eceef0; color: #667085; }
   .approval { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 10px;
     font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
     vertical-align: middle; }

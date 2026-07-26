@@ -713,5 +713,63 @@ describe('report service — org scoping (issue #94)', () => {
       expect(byName['Compliance Coverage %'].status).toBe('OK');
       expect(byName['Supplier Lead Time'].status).toBe('ALERT');
     });
+
+    // Round-1 review gap: content is only ever typed `as ReportContent` on
+    // the raw AI response (callReportContentAi) -- nothing guarantees the
+    // AI actually echoed back real numbers. Before this fix, a missing or
+    // non-numeric current_value made every compute_kri_status comparison
+    // involve NaN (always false), silently falling through to a real
+    // status value ('WARNING') indistinguishable from a genuinely-computed
+    // one. Must resolve to the explicit 'UNKNOWN' sentinel instead, so a
+    // malformed AI response is visibly flagged rather than misreported as
+    // a real status.
+    it('marks a KRI UNKNOWN instead of a fake WARNING when the AI omits/mangles a required number', async () => {
+      const aiContent = {
+        ...AI_CONTENT,
+        kri_dashboard: [
+          // Missing current_value entirely.
+          {
+            name: 'Missing Current Value',
+            unit: '%',
+            target_value: 80,
+            alert_threshold: 50,
+            status: 'on_track',
+            commentary: 'AI omitted current_value.',
+          },
+          // Non-numeric current_value.
+          {
+            name: 'Non-Numeric Current Value',
+            unit: 'days',
+            current_value: 'high',
+            target_value: 10,
+            alert_threshold: 40,
+            status: 'breached',
+            commentary: 'AI sent a string instead of a number.',
+          },
+          // A genuinely well-formed KRI in the same response, to prove the
+          // guard is scoped to the malformed entries only.
+          {
+            name: 'Well-Formed KRI',
+            unit: '%',
+            current_value: 90,
+            target_value: 80,
+            alert_threshold: 50,
+            status: 'breached',
+            commentary: 'Should still compute normally.',
+          },
+        ],
+      };
+      primeSuccessfulPipeline(aiContent);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const rendered = mockRender.mock.calls[0][0];
+      const byName: Record<string, { status: string }> = {};
+      for (const k of rendered.kri_dashboard) byName[k.name] = k;
+
+      expect(byName['Missing Current Value'].status).toBe('UNKNOWN');
+      expect(byName['Non-Numeric Current Value'].status).toBe('UNKNOWN');
+      expect(byName['Well-Formed KRI'].status).toBe('OK');
+    });
   });
 });

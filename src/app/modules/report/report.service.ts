@@ -279,10 +279,28 @@ const annotateApprovalStatus = (
  * already echoed back in kri_dashboard, using the one real formula, so the
  * board PDF can never show a different status than the dashboard for
  * identical data.
+ *
+ * content is only-ever-typed as ReportContent via an unchecked
+ * `as ReportContent` on the raw AI response (callReportContentAi) -- nothing
+ * actually guarantees the AI echoed back real numbers for the three fields
+ * compute_kri_status needs. If any of them isn't a finite number,
+ * compute_kri_status's comparisons all involve NaN and evaluate false,
+ * silently falling through to 'WARNING' -- a real status value,
+ * indistinguishable in the rendered PDF from a genuinely-computed WARNING.
+ * Falls through to the explicit 'UNKNOWN' sentinel instead (its own badge
+ * style in report_pdf.ts, distinct from OK/WARNING/ALERT) so a malformed AI
+ * response is visibly flagged rather than silently misreported as a real
+ * status.
  */
 const annotateKriStatus = (content: ReportContent): ReportContent => {
   for (const kri of content.kri_dashboard ?? []) {
-    kri.status = compute_kri_status(kri.current_value, kri.alert_threshold, kri.target_value);
+    const hasValidNumbers =
+      Number.isFinite(kri.current_value) &&
+      Number.isFinite(kri.alert_threshold) &&
+      Number.isFinite(kri.target_value);
+    kri.status = hasValidNumbers
+      ? compute_kri_status(kri.current_value, kri.alert_threshold, kri.target_value)
+      : 'UNKNOWN';
   }
   return content;
 };
