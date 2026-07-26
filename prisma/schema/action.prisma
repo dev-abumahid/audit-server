@@ -82,6 +82,19 @@ model Action {
     // app-required-on-create split is intentional, not an oversight.
     line_of_defense LineOfDefense?
 
+    // aexa-frontend#191: "Send to Finding" promotes an AI root-cause bucket's
+    // groupedAction into a real Action, same provenance-flag convention
+    // Risk/Kri/ComplianceObligation/AuditEngagement already use (see
+    // risk.prisma's ai_generated/is_edited pair) -- Action had neither field
+    // until now because no AI flow wrote an Action directly before this one.
+    // is_edited flips to true the first time a human edits an AI-created
+    // Action, same as risk.service.ts's convention for Risk (not enforced by
+    // this migration -- update_action_into_db doesn't set it yet, mirroring
+    // that Risk's own update path was the one that added that behavior, out
+    // of scope for this endpoint-only PR).
+    ai_generated Boolean @default(false)
+    is_edited    Boolean @default(false)
+
     // Relation
     messages ActionMessage[]
     site     Site?           @relation(fields: [siteId], references: [id], onDelete: Cascade)

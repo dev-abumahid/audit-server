@@ -351,6 +351,32 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(callArg.data.line_of_defense).toBe('SECOND');
     });
 
+    // #191 review: the migration adding ai_generated/is_edited to Action was
+    // verified correct by reading its SQL (NOT NULL DEFAULT false), but
+    // nothing asserted that a REGULAR action creation (the normal POST
+    // /action path, as opposed to #191's create-action-from-bucket) actually
+    // relies on that DB default rather than the service accidentally setting
+    // one of these fields itself. Confirms create_action_into_db's data
+    // object never includes either key for an ordinary creation -- the
+    // schema default is what applies, this service path makes no claim
+    // about AI provenance at all.
+    it('does not set ai_generated/is_edited on a regular action creation, leaving the DB default to apply', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({ id: 'new', orgAccountId: ORG_A });
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', actionTitle: 'Mitigate risk' } }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('ai_generated');
+      expect(callArg.data).not.toHaveProperty('is_edited');
+    });
+
     it('verifies inspection belongs to caller org before creating action', async () => {
       dbInspection.findFirst.mockResolvedValue(null); // org-B inspection not found for org-A
 

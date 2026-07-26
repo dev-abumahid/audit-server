@@ -5,6 +5,7 @@ import { risk_approval_controller } from './risk.approval.controller.js';
 import { risk_approval_validations } from './risk.approval.validation.js';
 import { risk_controller } from './risk.controller.js';
 import { risk_correlation_controller } from './risk.correlation.controller.js';
+import { risk_correlation_validations } from './risk.correlation.validation.js';
 import { risk_validations } from './risk.validation.js';
 
 const router = Router();
@@ -21,6 +22,16 @@ router.post(
   '/root-cause-bucketing',
   auth('ORGANIZATION'),
   risk_correlation_controller.root_cause_bucketing,
+);
+// aexa-frontend#191: nested under root-cause-bucketing, not a sibling
+// top-level path — this only ever acts on one bucket's groupedAction, same
+// "fixed sub-path, must come before /:id" reasoning as the two routes
+// above.
+router.post(
+  '/root-cause-bucketing/create-action',
+  auth('ORGANIZATION'),
+  RequestValidator(risk_correlation_validations.create_action_from_bucket),
+  risk_correlation_controller.create_action_from_bucket,
 );
 
 router.get('/', auth('ORGANIZATION'), risk_controller.get_all_risk);

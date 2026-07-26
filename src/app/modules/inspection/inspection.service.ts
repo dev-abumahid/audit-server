@@ -16,6 +16,16 @@ import {
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { buildAiHeaders } from '../ai/ai.service.js';
 
+// aexa-frontend#191 review note: risk.correlation.service.ts's
+// create_action_from_bucket lazily creates a synthetic per-org "AI-Generated
+// Findings" Inspection (see that file's SYNTHETIC_TEMPLATE_NAME) to house
+// AI-recommended actions that don't come from a real inspection run. This
+// list endpoint has no filter excluding it, so it shows up mixed in with
+// real inspections with no visual distinction. Deliberately not filtered
+// here yet -- the actual UI treatment (hide it, badge it, or something
+// else) is a frontend-stage decision (#191 stage 2), not a backend list-API
+// change made unilaterally in the stage-1 PR. Flagging inline so this isn't
+// silently forgotten.
 const get_all_inspection_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);

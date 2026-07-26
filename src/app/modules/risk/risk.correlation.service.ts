@@ -3,7 +3,11 @@ import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
-import { applyActionScope, resolveCallerOrgContext } from '../../utils/org_scope.js';
+import {
+  applyActionScope,
+  assertCanWriteOrgResource,
+  resolveCallerOrgContext,
+} from '../../utils/org_scope.js';
 import { buildAiHeaders, wrapAiServiceError } from '../ai/ai.service.js';
 
 /**
@@ -229,7 +233,236 @@ const run_root_cause_bucketing = async (req: Request) => {
   }
 };
 
+// --------------------------------------------------------------------------
+// POST /risk/root-cause-bucketing/create-action  (aexa-frontend#191, stage 1)
+// --------------------------------------------------------------------------
+//
+// Restores the old mock frontend's per-bucket "Send to Finding" action for
+// real: turns one AI root-cause bucket's `groupedAction` into a real Action
+// row. Action.inspectionId is a required, non-nullable FK (see
+// action.prisma) and a bucket spans multiple risks/sites with no single
+// real inspection to attach to — making inspectionId nullable was
+// considered and rejected as disproportionate schema churn (5+ dependent
+// files all assume it's always present). Instead, a synthetic
+// Inspection — housed in a synthetic Template — is lazily created once per
+// org and reused for every subsequent bucket->Action conversion, mirroring
+// intelligence.service.ts's create_risk_from_item_into_db site-fallback
+// pattern below.
+
+// A reserved-looking name (not just "AI-Generated Findings" — round-1 review
+// flagged that a real user template coincidentally sharing that exact name
+// would get misattributed as this endpoint's synthetic anchor, silently
+// reusing real user data). The "⚙" prefix and trailing UUID-shaped suffix
+// make an accidental real-template collision effectively impossible without
+// eliminating it via a schema flag, which was already considered and
+// rejected below as disproportionate for this endpoint-only PR.
+const SYNTHETIC_TEMPLATE_NAME = '⚙ AI-Generated Findings (system, do not edit)';
+
+// Marking the synthetic Template/Inspection: unlike Risk/Kri/
+// ComplianceObligation/AuditEngagement/Action (this PR), Template and
+// Inspection have no existing `ai_generated`-style flag column to reuse,
+// and no aggregate anywhere in this codebase currently computes a real
+// inspection-completion-rate metric that would need to exclude a synthetic
+// row (grepped for "completion rate"/inspection stats — the only
+// inspection-count aggregates found are template.service.ts's per-template
+// count, site.service.ts's per-site count, and risk.service.ts's per-risk
+// count, none of which compute an org-wide completion percentage). Adding
+// a new boolean column to two more models purely on spec, with nothing
+// today that would read it, is more schema churn than this endpoint-only
+// PR calls for. An exact-match on the reserved-looking templateName above is
+// a defensible, sufficiently distinguishing check instead — documented here
+// so a future completion-rate feature knows to filter on it. Revisit with a
+// real `ai_generated` column if/when such a metric is actually built.
+
+// Find-or-create for a user-facing model like Template can't be made
+// race-proof with a unique constraint without imposing a real constraint on
+// legitimate, non-synthetic templates too (nothing stops two different real
+// templates from coincidentally sharing a name today, and this endpoint has
+// no business changing that). Instead, the whole find-or-create sequence
+// runs inside a single DB transaction holding a Postgres advisory lock keyed
+// on this org's id (auto-released at commit/rollback, never leaked) — two
+// concurrent calls for the SAME org serialize against each other (the
+// second waits for the first to commit, then finds what the first just
+// created), while calls for DIFFERENT orgs never block each other at all
+// (the lock key is per-org). Closes the race without a schema change.
+const findOrCreateSyntheticInspection = async (organizationId: string) => {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${organizationId})::bigint)`;
+
+    let template = await tx.template.findFirst({
+      where: { orgAccountId: organizationId, templateName: SYNTHETIC_TEMPLATE_NAME },
+    });
+    if (!template) {
+      template = await tx.template.create({
+        data: { orgAccountId: organizationId, templateName: SYNTHETIC_TEMPLATE_NAME },
+      });
+    }
+
+    const existingInspection = await tx.inspection.findFirst({
+      where: { orgAccountId: organizationId, templateId: template.id },
+    });
+    if (existingInspection) return existingInspection;
+
+    // Inspection.siteId is a required FK with nothing on a root-cause bucket
+    // to derive it from (a bucket spans multiple risks/sites). Same
+    // "fall back to the org's earliest-created Site, 409 if none" convention
+    // intelligence.service.ts's create_risk_from_item_into_db already
+    // established for the identical problem (Risk.site_id).
+    const site = await tx.site.findFirst({
+      where: { org_account_id: organizationId },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!site) {
+      throw new AppError(
+        'This organization has no sites to attach the AI-generated findings inspection to',
+        409,
+      );
+    }
+
+    return tx.inspection.create({
+      data: { orgAccountId: organizationId, templateId: template.id, siteId: site.id },
+    });
+  });
+};
+
+// aexa-ai's groupedAction.priority (immediate|short_term|medium_term|
+// long_term, from Fullbloom's rootcause-system.ts prompt) has no direct
+// analog on Action's real PRIORITY enum (Low|Medium|High — action.prisma).
+// Mapped by urgency: immediate and short_term both read as "needs action
+// soon" (High); medium_term as the existing Medium default; long_term as
+// Low. A 4-into-3 mapping necessarily collapses one pair — immediate vs.
+// short_term was chosen as the pair to collapse (both High) since the gap
+// between "start now" and "start soon" matters far less to a reviewer
+// triaging a findings list than the gap between "soon" and "eventually"
+// (medium_term vs. long_term), which stays distinct.
+const GROUPED_ACTION_PRIORITY_TO_ACTION_PRIORITY: Record<string, 'Low' | 'Medium' | 'High'> = {
+  immediate: 'High',
+  short_term: 'High',
+  medium_term: 'Medium',
+  long_term: 'Low',
+};
+
+// Same reasoning per bucket, applied to a concrete due date: Action.dueDate
+// is a required DateTime with nothing to parse it from — timeline is a
+// free-text AI string (e.g. "3-6 months"), not a structured duration, so
+// there's no reliable way to parse an exact date out of it. Derives a
+// due date from the same priority mapping above instead, as a reasonable
+// stand-in until a human reviews and adjusts it (same "AI suggestion,
+// human refines" spirit as ai_generated/is_edited on the row itself).
+const PRIORITY_TO_DUE_DATE_OFFSET_DAYS: Record<'Low' | 'Medium' | 'High', number> = {
+  High: 30,
+  Medium: 90,
+  Low: 180,
+};
+
+const ACTION_TITLE_MAX_LENGTH = 255;
+
+// actionTitle is capped at 255 chars (action.validation.ts's create_action
+// schema) but groupedAction.description is free-text AI prose with no
+// length guarantee. When it fits, the title IS the description (matches
+// how a human filling out "Create Action" would title it); when it
+// doesn't, truncate for the title only — the untruncated text always
+// survives in actionDisc below.
+const synthesizeActionTitle = (description: string): string =>
+  description.length <= ACTION_TITLE_MAX_LENGTH
+    ? description
+    : `${description.slice(0, ACTION_TITLE_MAX_LENGTH - 3)}...`;
+
+interface CreateActionFromBucketInput {
+  description: string;
+  normReference: string;
+  owner: string;
+  priority: 'immediate' | 'short_term' | 'medium_term' | 'long_term';
+  estimatedRiskReduction: number;
+  estimatedCost: string;
+  timeline: string;
+  riskRefs: string[];
+}
+
+// Same "verify org-scoped existence before accepting a reference" discipline
+// risk_link.service.ts's assertRiskRefExists already applies to source_ref/
+// target_ref -- riskRefs here was the one place in this PR that skipped it,
+// letting a client fold arbitrary (possibly another org's, possibly
+// fabricated) ref strings straight into a real Action's description with no
+// check. One batched query rather than N sequential lookups, since riskRefs
+// is a whole array here rather than the 2 fixed fields risk_link.service.ts
+// validates.
+const assertRiskRefsExist = async (organizationId: string, riskRefs: string[]): Promise<void> => {
+  const found = await prisma.risk.findMany({
+    where: { org_account_id: organizationId, ref: { in: riskRefs } },
+    select: { ref: true },
+  });
+  const foundRefs = new Set(found.map((r) => r.ref));
+  const missing = riskRefs.filter((ref) => !foundRefs.has(ref));
+  if (missing.length > 0) {
+    throw new AppError(`Risk ref(s) not found in this organization: ${missing.join(', ')}`, 404);
+  }
+};
+
+const buildActionDisc = (input: CreateActionFromBucketInput): string =>
+  [
+    input.description,
+    '',
+    `Norm reference: ${input.normReference}`,
+    `Owner: ${input.owner}`,
+    `Timeline: ${input.timeline}`,
+    `Estimated cost: ${input.estimatedCost}`,
+    `Estimated risk reduction: ${input.estimatedRiskReduction}%`,
+    `Addresses risks: ${input.riskRefs.join(', ')}`,
+  ].join('\n');
+
+const create_action_from_bucket = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  // Same "AI suggestion becomes a real record" write gate
+  // create_risk_from_item_into_db uses (ADMIN/LEAD_AUDITOR via
+  // assertCanWriteOrgResource) — deliberately NOT
+  // assertCanWriteToInspection, even though this creates an Action against
+  // a real Inspection: that gate assumes the caller-supplied inspectionId is
+  // one the caller has inspection-level authority over (a LEAD_AUDITOR must
+  // be assigned to it specifically), which doesn't apply to the
+  // org-wide synthetic inspection this endpoint owns and manages itself.
+  // Applying it here would incorrectly 403 a LEAD_AUDITOR who already
+  // cleared this endpoint's own, sufficient gate.
+  assertCanWriteOrgResource(ctx);
+
+  const body = req.body as CreateActionFromBucketInput;
+
+  await assertRiskRefsExist(ctx.organizationId, body.riskRefs);
+
+  const inspection = await findOrCreateSyntheticInspection(ctx.organizationId);
+
+  const priority = GROUPED_ACTION_PRIORITY_TO_ACTION_PRIORITY[body.priority];
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + PRIORITY_TO_DUE_DATE_OFFSET_DAYS[priority]);
+
+  const action = await prisma.action.create({
+    data: {
+      orgAccountId: ctx.organizationId,
+      inspectionId: inspection.id,
+      siteId: inspection.siteId,
+      actionTitle: synthesizeActionTitle(body.description),
+      actionDisc: buildActionDisc(body),
+      priority,
+      dueDate,
+      status: 'TO_DO',
+      // #97: required by action.validation.ts's create_action schema for
+      // every new Action. This is remediation work generated from a risk
+      // root-cause analysis — squarely 1st-line-like (see action.prisma's
+      // line_of_defense comment on why Action alone, of the 5 models #97
+      // touches, has no single sensible default) — so FIRST is the
+      // deliberate choice here, not a placeholder.
+      line_of_defense: 'FIRST',
+      ai_generated: true,
+      is_edited: false,
+    },
+  });
+
+  return action;
+};
+
 export const risk_correlation_service = {
   get_correlation_matrix_data,
   run_root_cause_bucketing,
+  create_action_from_bucket,
 };
