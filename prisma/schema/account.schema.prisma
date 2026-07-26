@@ -39,6 +39,7 @@ model Account {
     pineconeDocuments   PineconeDocument[]
     notes               Note[]
     kris                Kri[]
+    kriReadings         KriReading[]
     alerts              Alert[]
     notifications       Notification[]
     auditEngagements    AuditEngagement[]

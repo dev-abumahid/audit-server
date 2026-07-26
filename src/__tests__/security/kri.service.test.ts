@@ -13,6 +13,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    kriReading: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      count: vi.fn(),
+    },
     risk: {
       findFirst: vi.fn(),
     },
@@ -25,17 +30,28 @@ vi.mock('../../app/lib/prisma.js', () => ({
     organization: {
       findUnique: vi.fn(),
     },
+    // aexa-server#242: submit_kri_value_into_db now wraps the KRI update,
+    // the KriReading insert, and any Alert creation in a $transaction (same
+    // pattern as risk.service.ts's #203). The mock runs the interactive
+    // callback with the same mocked prisma as the tx client.
+    $transaction: vi.fn(),
   },
 }));
 
 import { prisma } from '../../app/lib/prisma.js';
-import { compute_kri_status, kri_service } from '../../app/modules/kri/kri.service.js';
+import {
+  compute_kri_overdue,
+  compute_kri_status,
+  kri_service,
+} from '../../app/modules/kri/kri.service.js';
 
 const db = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const kriReadingDb = prisma.kriReading as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const alertDb = prisma.alert as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const txFn = (prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }).$transaction;
 
 const ORG_ID = 'org-00000000-0000-0000-0000-000000000009';
 const MEMBER_ID = 'org-member-00000000-0000-0000-0000-000000000009';
@@ -80,10 +96,52 @@ describe('compute_kri_status', () => {
   });
 });
 
+describe('compute_kri_overdue', () => {
+  const NOW = new Date('2026-07-26T12:00:00.000Z');
+  const daysAgo = (n: number) => new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000);
+
+  it('is false when no frequency is declared', () => {
+    expect(compute_kri_overdue(null, daysAgo(365), NOW)).toBe(false);
+  });
+
+  it('is false when last_measured_at is unknown', () => {
+    expect(compute_kri_overdue('weekly', null, NOW)).toBe(false);
+  });
+
+  it('is false for an unrecognized frequency string', () => {
+    expect(compute_kri_overdue('biannually', daysAgo(365), NOW)).toBe(false);
+  });
+
+  it('matches case-insensitively', () => {
+    expect(compute_kri_overdue('WEEKLY', daysAgo(10), NOW)).toBe(true);
+  });
+
+  it('daily: overdue past 1 day, not overdue within it', () => {
+    expect(compute_kri_overdue('daily', daysAgo(2), NOW)).toBe(true);
+    expect(compute_kri_overdue('daily', daysAgo(0.5), NOW)).toBe(false);
+  });
+
+  it('weekly: overdue past 7 days, not overdue within it', () => {
+    expect(compute_kri_overdue('weekly', daysAgo(8), NOW)).toBe(true);
+    expect(compute_kri_overdue('weekly', daysAgo(3), NOW)).toBe(false);
+  });
+
+  it('monthly: overdue past 30 days, not overdue within it', () => {
+    expect(compute_kri_overdue('monthly', daysAgo(31), NOW)).toBe(true);
+    expect(compute_kri_overdue('monthly', daysAgo(15), NOW)).toBe(false);
+  });
+
+  it('quarterly: overdue past 90 days, not overdue within it', () => {
+    expect(compute_kri_overdue('quarterly', daysAgo(91), NOW)).toBe(true);
+    expect(compute_kri_overdue('quarterly', daysAgo(45), NOW)).toBe(false);
+  });
+});
+
 describe('kri service — org scoping and role gating', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     orgMemberDb.findUnique.mockResolvedValue(null);
+    txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
   });
 
   describe('get_all_kri_from_db', () => {
@@ -148,6 +206,38 @@ describe('kri service — org scoping and role gating', () => {
         totalPage: 0,
       });
     });
+
+    // aexa-server#242: overdue is computed at read time (like status) from
+    // frequency + last_measured_at, so a list of KRIs can flag a "weekly"
+    // one that hasn't been re-measured in 3 months without a background job.
+    it('attaches computed overdue per KRI', async () => {
+      const longAgo = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+      const recently = new Date();
+      db.findMany.mockResolvedValue([
+        {
+          id: 'k1',
+          current_value: 1,
+          alert_threshold: 2,
+          target_value: 3,
+          frequency: 'weekly',
+          last_measured_at: longAgo,
+        },
+        {
+          id: 'k2',
+          current_value: 1,
+          alert_threshold: 2,
+          target_value: 3,
+          frequency: 'weekly',
+          last_measured_at: recently,
+        },
+      ]);
+      db.count.mockResolvedValue(2);
+
+      const result = await kri_service.get_all_kri_from_db(makeReq());
+
+      expect(result.data[0].overdue).toBe(true);
+      expect(result.data[1].overdue).toBe(false);
+    });
   });
 
   describe('create_kri_into_db', () => {
@@ -196,6 +286,29 @@ describe('kri service — org scoping and role gating', () => {
       expect(callArg.data.org_account_id).toBe(ORG_A);
       expect(riskDb.findFirst).toHaveBeenCalledWith({
         where: { id: 'r1', org_account_id: ORG_A },
+      });
+    });
+
+    // aexa-server#242: the value a KRI is created with counts as its first
+    // reading, seeded via a nested create so it commits atomically with the
+    // Kri row.
+    it('seeds the first KriReading and stamps last_measured_at on create', async () => {
+      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.create.mockResolvedValue({
+        id: 'k1',
+        current_value: 5,
+        alert_threshold: 2,
+        target_value: 3,
+      });
+
+      await kri_service.create_kri_into_db(
+        makeReq({ body: { risk_id: 'r1', current_value: 5, alert_threshold: 2, target_value: 3 } }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.last_measured_at).toBeInstanceOf(Date);
+      expect(callArg.data.readings).toMatchObject({
+        create: { org_account_id: ORG_A, value: 5 },
       });
     });
   });
@@ -360,10 +473,20 @@ describe('kri service — org scoping and role gating', () => {
         makeReq({ params: { id: 'k1' }, body: { current_value: 42 } }),
       );
 
-      expect(db.updateMany).toHaveBeenCalledWith({
-        where: { id: 'k1', updatedAt: readAt },
-        data: { current_value: 42 },
+      const updateCallArg = db.updateMany.mock.calls[0][0];
+      expect(updateCallArg.where).toEqual({ id: 'k1', updatedAt: readAt });
+      expect(updateCallArg.data.current_value).toBe(42);
+      // aexa-server#242: last_measured_at is stamped on every submission.
+      expect(updateCallArg.data.last_measured_at).toBeInstanceOf(Date);
+
+      // aexa-server#242: every submission is also a permanent history entry.
+      expect(kriReadingDb.create).toHaveBeenCalledTimes(1);
+      expect(kriReadingDb.create.mock.calls[0][0].data).toMatchObject({
+        org_account_id: ORG_A,
+        kri_id: 'k1',
+        value: 42,
       });
+
       expect(alertDb.create).toHaveBeenCalledTimes(1);
       const callArg = alertDb.create.mock.calls[0][0];
       expect(callArg.data.org_account_id).toBe(ORG_A);
@@ -396,7 +519,10 @@ describe('kri service — org scoping and role gating', () => {
       expect(alertDb.create).not.toHaveBeenCalled();
     });
 
-    it('does NOT create an Alert when the reading only reaches WARNING', async () => {
+    // aexa-server#242: WARNING is a genuine investigate-now signal per real
+    // KRI methodology, not a silent middle state — it now fires its own
+    // lower-severity alert on transition, same as ALERT/OK below.
+    it('creates a medium-severity Alert when the reading transitions INTO WARNING', async () => {
       db.findFirst.mockResolvedValue({
         id: 'k1',
         org_account_id: ORG_A,
@@ -416,6 +542,122 @@ describe('kri service — org scoping and role gating', () => {
 
       await kri_service.submit_kri_value_into_db(
         makeReq({ params: { id: 'k1' }, body: { current_value: 25 } }),
+      );
+
+      expect(alertDb.create).toHaveBeenCalledTimes(1);
+      const callArg = alertDb.create.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({
+        kri_id: 'k1',
+        type: 'kri_warning_threshold',
+        severity: 'medium',
+      });
+    });
+
+    it('does NOT create a duplicate WARNING Alert when the reading stays in WARNING status', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'k1',
+        org_account_id: ORG_A,
+        name: 'Supplier Lead Time',
+        unit: 'days',
+        current_value: 24,
+        alert_threshold: 30,
+        target_value: 20,
+      });
+      db.updateMany.mockResolvedValue({ count: 1 });
+      db.findFirstOrThrow.mockResolvedValue({
+        id: 'k1',
+        current_value: 25,
+        alert_threshold: 30,
+        target_value: 20,
+      });
+
+      await kri_service.submit_kri_value_into_db(
+        makeReq({ params: { id: 'k1' }, body: { current_value: 25 } }),
+      );
+
+      expect(alertDb.create).not.toHaveBeenCalled();
+    });
+
+    // aexa-server#242: recovering to OK from ALERT/WARNING is worth a
+    // record too, not just silently dropping off the "needs attention" list.
+    it('creates a low-severity recovery Alert when the reading transitions back INTO OK', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'k1',
+        org_account_id: ORG_A,
+        name: 'Supplier Lead Time',
+        unit: 'days',
+        current_value: 25,
+        alert_threshold: 30,
+        target_value: 20,
+      });
+      db.updateMany.mockResolvedValue({ count: 1 });
+      db.findFirstOrThrow.mockResolvedValue({
+        id: 'k1',
+        current_value: 18,
+        alert_threshold: 30,
+        target_value: 20,
+      });
+
+      await kri_service.submit_kri_value_into_db(
+        makeReq({ params: { id: 'k1' }, body: { current_value: 18 } }),
+      );
+
+      expect(alertDb.create).toHaveBeenCalledTimes(1);
+      const callArg = alertDb.create.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({
+        kri_id: 'k1',
+        type: 'kri_recovered',
+        severity: 'low',
+      });
+    });
+
+    it('creates a recovery Alert on a direct ALERT-to-OK transition that skips WARNING entirely', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'k1',
+        org_account_id: ORG_A,
+        name: 'Supplier Lead Time',
+        unit: 'days',
+        current_value: 40, // ALERT (threshold 30, lower-is-better)
+        alert_threshold: 30,
+        target_value: 20,
+      });
+      db.updateMany.mockResolvedValue({ count: 1 });
+      db.findFirstOrThrow.mockResolvedValue({
+        id: 'k1',
+        current_value: 15, // OK — jumps straight past the WARNING band
+        alert_threshold: 30,
+        target_value: 20,
+      });
+
+      await kri_service.submit_kri_value_into_db(
+        makeReq({ params: { id: 'k1' }, body: { current_value: 15 } }),
+      );
+
+      expect(alertDb.create).toHaveBeenCalledTimes(1);
+      const callArg = alertDb.create.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({ type: 'kri_recovered', severity: 'low' });
+    });
+
+    it('does NOT create a recovery Alert when the reading stays in OK status', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'k1',
+        org_account_id: ORG_A,
+        name: 'Supplier Lead Time',
+        unit: 'days',
+        current_value: 15,
+        alert_threshold: 30,
+        target_value: 20,
+      });
+      db.updateMany.mockResolvedValue({ count: 1 });
+      db.findFirstOrThrow.mockResolvedValue({
+        id: 'k1',
+        current_value: 10,
+        alert_threshold: 30,
+        target_value: 20,
+      });
+
+      await kri_service.submit_kri_value_into_db(
+        makeReq({ params: { id: 'k1' }, body: { current_value: 10 } }),
       );
 
       expect(alertDb.create).not.toHaveBeenCalled();
@@ -522,6 +764,36 @@ describe('kri service — org scoping and role gating', () => {
 
       // Still only the one alert from the winning request.
       expect(alertDb.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('get_kri_readings_from_db', () => {
+    it('throws 404 for a KRI in another org', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        kri_service.get_kri_readings_from_db(makeReq({ params: { id: 'org-b-kri' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(kriReadingDb.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns the reading history for the KRI, newest first, org-scoped via the KRI ownership check', async () => {
+      db.findFirst.mockResolvedValue({ id: 'k1', org_account_id: ORG_A });
+      kriReadingDb.findMany.mockResolvedValue([
+        { id: 'read-2', kri_id: 'k1', value: 25, recorded_at: new Date('2026-02-01') },
+        { id: 'read-1', kri_id: 'k1', value: 20, recorded_at: new Date('2026-01-01') },
+      ]);
+      kriReadingDb.count.mockResolvedValue(2);
+
+      const result = await kri_service.get_kri_readings_from_db(makeReq({ params: { id: 'k1' } }));
+
+      expect(db.findFirst).toHaveBeenCalledWith({ where: { id: 'k1', org_account_id: ORG_A } });
+      const [callArg] = kriReadingDb.findMany.mock.calls[0];
+      expect(callArg.where).toEqual({ kri_id: 'k1' });
+      expect(callArg.orderBy).toEqual({ recorded_at: 'desc' });
+      expect(result.data).toHaveLength(2);
+      expect(result.meta.total).toBe(2);
     });
   });
 

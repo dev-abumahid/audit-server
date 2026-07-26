@@ -26,6 +26,7 @@ router.post(
   RequestValidator(kri_validations.submit_value),
   kri_controller.submit_kri_value,
 );
+router.get('/:id/readings', auth('ORGANIZATION'), kri_controller.get_kri_readings);
 router.delete('/:id', auth('ORGANIZATION'), kri_controller.delete_kri);
 
 export default router;

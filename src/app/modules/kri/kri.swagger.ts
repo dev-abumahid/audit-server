@@ -93,7 +93,7 @@ export const kriSwaggerDocs = {
       tags: ['kri'],
       summary: 'Submit a new KRI reading',
       description:
-        'Updates current_value. If the reading crosses into ALERT status, an Alert is auto-created.',
+        'Updates current_value and records it as a permanent KriReading history entry. On a status transition, creates an Alert: high severity into ALERT, medium into WARNING, low (informational) on recovery into OK.',
       parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
       requestBody: {
         required: true,
@@ -106,6 +106,25 @@ export const kriSwaggerDocs = {
       responses: {
         200: { description: 'KRI value recorded successfully' },
         500: { description: 'Validation error or internal server error' },
+      },
+    },
+  },
+
+  '/api/kri/{id}/readings': {
+    get: {
+      tags: ['kri'],
+      summary: "Get a KRI's reading history",
+      description:
+        'Returns every recorded value for this KRI (including the initial value it was created with), newest first.',
+      parameters: [
+        { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+        { name: 'page', in: 'query', required: false, schema: { type: 'number' } },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'number' } },
+      ],
+      responses: {
+        200: { description: 'KRI reading history fetched successfully' },
+        401: { description: 'unauthorized' },
+        404: { description: 'KRI not found' },
       },
     },
   },

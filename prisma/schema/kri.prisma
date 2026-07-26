@@ -10,6 +10,14 @@ model Kri {
     alert_threshold Float
     target_value    Float
     frequency       String?
+    // aexa-server#242: when the current value was last recorded — set on
+    // creation (the initial current_value counts as the first reading) and
+    // on every submit_kri_value_into_db call. Denormalized onto Kri (rather
+    // than derived per-row from KriReading) so get_all_kri_from_db can
+    // compute `overdue` for a page of KRIs without a correlated subquery per
+    // row. See kri.service.ts's FREQUENCY_INTERVAL_DAYS for how this
+    // combines with `frequency` to flag an overdue KRI.
+    last_measured_at DateTime?
     // #96: flags a KRI seeded from the onboarding template library so the UI
     // can show the same "AI-generated, review recommended" treatment as Risk.
     ai_generated    Boolean  @default(false)
@@ -20,8 +28,35 @@ model Kri {
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 
-    alerts Alert[]
+    alerts   Alert[]
+    readings KriReading[]
 
     @@index([org_account_id])
     @@index([risk_id])
+}
+
+// aexa-server#242: real KRI methodology expects a monitoring cadence with a
+// visible trend over time, not just a point-in-time current_value snapshot
+// that gets overwritten on every submission. This is an append-only history
+// of every value a KRI has ever been recorded at — never updated or deleted
+// once written (a submitted reading is a historical fact), retained
+// indefinitely, same as this codebase's other audit-trail-shaped tables
+// (RiskApproval, OrgAuditLog) — no pruning job exists or is added here.
+//
+// Historical trend VISUALIZATION (a chart on the KRI dashboard/report) is a
+// frontend fast-follow, not part of this change — this table and its read
+// endpoint (GET /api/kri/:id/readings) just make the data exist and be
+// queryable; nothing yet renders it.
+model KriReading {
+    id             String   @id @default(uuid())
+    org_account_id String
+    account        Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+    kri_id         String
+    kri            Kri      @relation(fields: [kri_id], references: [id], onDelete: Cascade)
+    value          Float
+    recorded_at    DateTime @default(now())
+
+    @@index([org_account_id])
+    @@index([kri_id])
+    @@index([kri_id, recorded_at])
 }

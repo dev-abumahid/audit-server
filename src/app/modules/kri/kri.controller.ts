@@ -57,6 +57,17 @@ const submit_kri_value = catchAsync(async (req, res) => {
   });
 });
 
+const get_kri_readings = catchAsync(async (req, res) => {
+  const result = await kri_service.get_kri_readings_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'KRI reading history fetched successfully.',
+    data: result.data,
+    meta: result.meta,
+  });
+});
+
 const delete_kri = catchAsync(async (req, res) => {
   const result = await kri_service.delete_kri_from_db(req);
   manageResponse(res, {
@@ -74,5 +85,6 @@ export const kri_controller = {
   create_kri,
   update_kri,
   submit_kri_value,
+  get_kri_readings,
   delete_kri,
 };
