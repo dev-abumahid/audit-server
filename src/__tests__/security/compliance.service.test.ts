@@ -504,6 +504,111 @@ describe('compliance service — org scoping (issue #93)', () => {
         in_progress: 1,
       });
     });
+
+    // Methodology audit finding: 'not_applicable' obligations must be
+    // excluded from every ratio's denominator, the same convention real
+    // compliance-management tooling uses (e.g. ServiceNow GRC) -- an
+    // obligation genuinely not applicable to an org isn't a compliance gap,
+    // so counting it against the score understates real compliance.
+    describe('not_applicable exclusion (methodology audit)', () => {
+      it('excludes not_applicable obligations from the overall ratio, not just the numerator', async () => {
+        // 7 compliant, 3 not_applicable -- naive counting (10 total) would
+        // score 70% (orange); excluding N/A from the denominator too gives
+        // the real figure: 7/7 = 100% (green).
+        db.findMany.mockResolvedValue([
+          ...Array.from({ length: 7 }, () => ({
+            status: 'compliant',
+            domain: 'Financial',
+            site_id: null,
+            site: null,
+          })),
+          ...Array.from({ length: 3 }, () => ({
+            status: 'not_applicable',
+            domain: 'Financial',
+            site_id: null,
+            site: null,
+          })),
+        ]);
+
+        const result = await compliance_service.get_compliance_scorecard_from_db(
+          makeReq({ query: {} }),
+        );
+
+        expect(result.overall).toEqual({ compliant: 7, total: 7, ratio: 1, band: 'green' });
+      });
+
+      it('excludes not_applicable obligations from byDomain/bySite/matrix denominators too', async () => {
+        db.findMany.mockResolvedValue([
+          {
+            status: 'compliant',
+            domain: 'Data Protection',
+            site_id: 's1',
+            site: { name: 'Paris' },
+          },
+          {
+            status: 'not_applicable',
+            domain: 'Data Protection',
+            site_id: 's1',
+            site: { name: 'Paris' },
+          },
+        ]);
+
+        const result = await compliance_service.get_compliance_scorecard_from_db(
+          makeReq({ query: {} }),
+        );
+
+        const dp = result.byDomain.find((d) => d.domain === 'Data Protection');
+        const paris = result.bySite.find((s) => s.site_id === 's1');
+        const matrixCell = result.matrix.find(
+          (m) => m.domain === 'Data Protection' && m.site_id === 's1',
+        );
+        expect(dp).toMatchObject({ compliant: 1, total: 1, band: 'green' });
+        expect(paris).toMatchObject({ compliant: 1, total: 1, band: 'green' });
+        expect(matrixCell).toMatchObject({ compliant: 1, total: 1, band: 'green' });
+      });
+
+      it('still counts not_applicable obligations in statusCounts, for UI transparency', async () => {
+        db.findMany.mockResolvedValue([
+          { status: 'compliant', domain: 'Financial', site_id: null, site: null },
+          { status: 'not_applicable', domain: 'Financial', site_id: null, site: null },
+          { status: 'not_applicable', domain: 'Financial', site_id: null, site: null },
+        ]);
+
+        const result = await compliance_service.get_compliance_scorecard_from_db(
+          makeReq({ query: {} }),
+        );
+
+        expect(result.statusCounts).toEqual({ compliant: 1, not_applicable: 2 });
+      });
+
+      it('reports excludedNotApplicable as the count of not_applicable rows', async () => {
+        db.findMany.mockResolvedValue([
+          { status: 'compliant', domain: 'Financial', site_id: null, site: null },
+          { status: 'not_applicable', domain: 'Financial', site_id: null, site: null },
+          { status: 'not_applicable', domain: 'Financial', site_id: null, site: null },
+        ]);
+
+        const result = await compliance_service.get_compliance_scorecard_from_db(
+          makeReq({ query: {} }),
+        );
+
+        expect(result.excludedNotApplicable).toBe(2);
+      });
+
+      it('bands an org made up entirely of not_applicable obligations as "none" (0/0), not 0/N red', async () => {
+        db.findMany.mockResolvedValue([
+          { status: 'not_applicable', domain: 'Financial', site_id: null, site: null },
+          { status: 'not_applicable', domain: 'Financial', site_id: null, site: null },
+        ]);
+
+        const result = await compliance_service.get_compliance_scorecard_from_db(
+          makeReq({ query: {} }),
+        );
+
+        expect(result.overall).toEqual({ compliant: 0, total: 0, ratio: 0, band: 'none' });
+        expect(result.excludedNotApplicable).toBe(2);
+      });
+    });
   });
 
   describe('site_id ownership validation (issue #205)', () => {

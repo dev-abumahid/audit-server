@@ -205,6 +205,17 @@ const scoreCell = (compliant: number, total: number) => ({
  * red/orange/green grid the frontend renders. Compliant is defined as
  * status === 'compliant'. Computed from real rows at request time — no caching
  * needed at this scale (Phase 1).
+ *
+ * Methodology audit finding: 'not_applicable' obligations must be excluded
+ * from every ratio's denominator (and numerator, trivially — they're never
+ * 'compliant'), the same convention real compliance-management tooling uses
+ * (e.g. ServiceNow GRC). An obligation genuinely not applicable to an org
+ * isn't a compliance gap, so counting it against the org's score
+ * systematically understates real compliance — 7/10 compliant with 3 N/A
+ * used to score 70% (orange), when the real figure is 100% (green, 7/7
+ * scorable). statusCounts (the raw per-status tally the summary cards read)
+ * still covers every obligation including N/A, so the N/A count itself
+ * stays visible — only the ratio math excludes them.
  */
 const get_compliance_scorecard_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
@@ -221,15 +232,20 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
   });
 
   const isCompliant = (status: string) => status === 'compliant';
+  const isNotApplicable = (status: string) => status === 'not_applicable';
+  const scorableObligations = obligations.filter((o) => !isNotApplicable(o.status));
 
   // Overall
-  const overallTotal = obligations.length;
-  const overallCompliant = obligations.filter((o) => isCompliant(o.status)).length;
+  const overallTotal = scorableObligations.length;
+  const overallCompliant = scorableObligations.filter((o) => isCompliant(o.status)).length;
+  const excludedNotApplicable = obligations.length - scorableObligations.length;
 
   // Org-wide tally per status. The frontend summary cards (compliant /
   // non-compliant counts) need whole-org totals that stay correct once the
   // obligation LIST is server-side paginated — they can no longer be derived
-  // from a single page of rows. See aexa-frontend#161.
+  // from a single page of rows. See aexa-frontend#161. Covers every
+  // obligation including not_applicable ones (unlike the ratio math above)
+  // so the N/A count itself is still visible to the caller.
   const statusCounts: Record<string, number> = {};
   for (const o of obligations) {
     statusCounts[o.status] = (statusCounts[o.status] ?? 0) + 1;
@@ -254,7 +270,7 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
     }
   >();
 
-  for (const o of obligations) {
+  for (const o of scorableObligations) {
     const compliant = isCompliant(o.status) ? 1 : 0;
     const siteKey = o.site_id ?? '__org_wide__';
     const siteName = o.site?.name ?? null;
@@ -289,6 +305,7 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
 
   return {
     overall: scoreCell(overallCompliant, overallTotal),
+    excludedNotApplicable,
     statusCounts,
     byDomain: Array.from(domainMap.entries())
       .map(([domain, v]) => ({ domain, ...scoreCell(v.compliant, v.total) }))
