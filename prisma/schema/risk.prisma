@@ -33,6 +33,13 @@ model Risk {
     financial_impact_min  Int?
     financial_impact_max  Int?
     probability           Int?
+    // aexa-server#241: the risk matrix's likelihood x impact axes weren't
+    // actually independent — "impact" was faked from inherent_score (see
+    // #202). This is the real, separately-collected impact measurement
+    // (0-100, same scale as probability/inherent_score). Deliberately NOT
+    // wired back into inherent_score's own value in this change — see
+    // risk_scoring.ts's file comment for why that's scoped out.
+    impact                Int?
     velocity              String?
     trend                 String?
     status                String
@@ -43,6 +50,19 @@ model Risk {
     source_info           String?
     control_design_eff    Int?
     control_operating_eff Int?
+    // aexa-server#241: residual_score is now DERIVED from inherent_score and
+    // the two control-effectiveness fields above by default (see
+    // risk_scoring.ts). These columns track the derived-with-override
+    // pattern (mirrors ServiceNow IRM's real behavior, confirmed during
+    // research for this ticket): a manual override is still allowed but
+    // requires a reason, and an edit to any of the underlying inputs after
+    // an override was set marks it "stale" (needs re-confirmation) rather
+    // than silently discarding it.
+    residual_is_override     Boolean   @default(false)
+    residual_override_reason String?
+    residual_overridden_by   String?
+    residual_overridden_at   DateTime?
+    residual_override_stale  Boolean   @default(false)
     // #97: which IIA "line of defense" owns this item. Risk defaults to 1st
     // line (operational/management-owned), matching Fullbloom's per-entity
     // fallback.

@@ -6,6 +6,7 @@ import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { deriveApprovalState, risk_approval_service } from './risk.approval.service.js';
 import { createRiskWithGeneratedRef } from './risk_ref.js';
+import { resolveResidualFields } from './risk_scoring.js';
 
 const get_all_risk_from_db = async (req: Request) => {
   const { searchTerm, siteId, category } = req.query as Record<string, string>;
@@ -101,6 +102,29 @@ const create_risk_into_db = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const payload = req.body;
   payload.org_account_id = ctx.organizationId;
+
+  // aexa-server#241: residual_score is derived from inherent_score + control
+  // effectiveness by default (see risk_scoring.ts), not just whatever number
+  // the client sent. `existing` is null on create, so an unrequested
+  // override always falls through to the auto-computed value.
+  const residual = resolveResidualFields(
+    {
+      inherent_score: payload.inherent_score,
+      control_design_eff: payload.control_design_eff,
+      control_operating_eff: payload.control_operating_eff,
+    },
+    {
+      residual_override: payload.residual_override,
+      residual_score: payload.residual_score,
+      residual_override_reason: payload.residual_override_reason,
+    },
+    user.accountId,
+    null,
+  );
+  if (!residual.ok) throw new AppError(residual.message, 400);
+  Object.assign(payload, residual.fields);
+  delete payload.residual_override;
+
   // aexa-frontend#142: `ref` is generated server-side (category-derived
   // prefix + per-org-per-category sequence), never accepted from the
   // client — see risk_ref.ts for the scheme and its retry-on-conflict
@@ -136,6 +160,45 @@ const update_risk_into_db = async (req: Request) => {
   // them commit or roll back together. The hook's OrgAuditLog writes stay
   // fire-and-forget on the singleton, per recordOrgAuditEvent's contract.
   const result = await prisma.$transaction(async (tx) => {
+    // aexa-server#241: re-read the row's residual-affecting fields INSIDE
+    // the transaction, immediately before the write, rather than reusing
+    // the `existing` snapshot fetched above (before the transaction even
+    // opened). Deriving/writing residual_score now happens on every update
+    // (not just ones that touch a residual input), so reusing the earlier
+    // snapshot would let a concurrent edit to inherent_score/control_*_eff
+    // — committed in the window between that snapshot and this write — be
+    // silently clobbered by a residual_score computed from stale inputs.
+    const current = await tx.risk.findFirst({ where: { id } });
+    if (!current) throw new AppError('Risk not found', 404);
+    const effectiveInputs = {
+      inherent_score: safeBody.inherent_score ?? current.inherent_score,
+      control_design_eff: safeBody.control_design_eff ?? current.control_design_eff,
+      control_operating_eff: safeBody.control_operating_eff ?? current.control_operating_eff,
+    };
+    const residual = resolveResidualFields(
+      effectiveInputs,
+      {
+        residual_override: safeBody.residual_override,
+        residual_score: safeBody.residual_score,
+        residual_override_reason: safeBody.residual_override_reason,
+      },
+      user.accountId,
+      {
+        inherent_score: current.inherent_score,
+        control_design_eff: current.control_design_eff,
+        control_operating_eff: current.control_operating_eff,
+        residual_score: current.residual_score,
+        residual_is_override: current.residual_is_override,
+        residual_override_reason: current.residual_override_reason,
+        residual_overridden_by: current.residual_overridden_by,
+        residual_overridden_at: current.residual_overridden_at,
+        residual_override_stale: current.residual_override_stale,
+      },
+    );
+    if (!residual.ok) throw new AppError(residual.message, 400);
+    Object.assign(safeBody, residual.fields);
+    delete safeBody.residual_override;
+
     const updated = await tx.risk.update({
       where: { id },
       data: { ...safeBody, org_account_id: ctx.organizationId },

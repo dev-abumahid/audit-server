@@ -12,12 +12,17 @@ export const riskSwaggerDocs = {
               name: 'Data Breach Risk',
               description: 'Risk of unauthorized access to sensitive customer data',
               category: 'Cybersecurity',
-              inherent_score: 8,
-              residual_score: 5,
-              pagerank_score: 7,
+              inherent_score: 80,
+              // residual_score is omitted here — it's derived from
+              // inherent_score + control_design_eff/control_operating_eff
+              // (aexa-server#241). Pass residual_override: true with a
+              // residual_score and residual_override_reason to set it
+              // manually instead.
+              pagerank_score: 70,
               financial_impact_min: 50000,
               financial_impact_max: 250000,
-              probability: 6,
+              probability: 60,
+              impact: 75,
               velocity: 'High',
               trend: 'Increasing',
               status: 'Open',
@@ -25,8 +30,8 @@ export const riskSwaggerDocs = {
               ai_generated: false,
               is_edited: true,
               source_info: 'Internal risk assessment report',
-              control_design_eff: 7,
-              control_operating_eff: 6,
+              control_design_eff: 70,
+              control_operating_eff: 60,
             }),
           },
         },
@@ -117,12 +122,17 @@ export const riskSwaggerDocs = {
               name: 'Data Breach Risk',
               description: 'Risk of unauthorized access to sensitive customer data',
               category: 'Cybersecurity',
-              inherent_score: 8,
-              residual_score: 5,
-              pagerank_score: 7,
+              inherent_score: 80,
+              // residual_score is omitted here — it's derived from
+              // inherent_score + control_design_eff/control_operating_eff
+              // (aexa-server#241). Pass residual_override: true with a
+              // residual_score and residual_override_reason to set it
+              // manually instead.
+              pagerank_score: 70,
               financial_impact_min: 50000,
               financial_impact_max: 250000,
-              probability: 6,
+              probability: 60,
+              impact: 75,
               velocity: 'High',
               trend: 'Increasing',
               status: 'Open',
@@ -130,8 +140,8 @@ export const riskSwaggerDocs = {
               ai_generated: false,
               is_edited: true,
               source_info: 'Internal risk assessment report',
-              control_design_eff: 7,
-              control_operating_eff: 6,
+              control_design_eff: 70,
+              control_operating_eff: 60,
             }),
           },
         },

@@ -338,6 +338,87 @@ describe('risk service — org scoping (ticket #6)', () => {
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.ref).toBe('CYB-003');
     });
+
+    // aexa-server#241: residual_score is derived from inherent_score +
+    // control effectiveness on create, not just whatever the client sent.
+    describe('residual_score derivation (#241)', () => {
+      it('derives residual_score from inherent_score and control effectiveness, ignoring any client-supplied value', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({
+            body: {
+              name: 'Cyber risk',
+              category: 'Cyber',
+              inherent_score: 100,
+              control_design_eff: 80,
+              control_operating_eff: 80,
+              residual_score: 999, // must be ignored — no override requested
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.residual_score).toBe(36);
+        expect(callArg.data.residual_is_override).toBe(false);
+      });
+
+      it('defaults residual_score to inherent_score when control effectiveness is not yet assessed', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({ body: { name: 'Cyber risk', category: 'Cyber', inherent_score: 72 } }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.residual_score).toBe(72);
+      });
+
+      it('accepts a valid manual override, tracking who set it and why', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({
+            body: {
+              name: 'Cyber risk',
+              category: 'Cyber',
+              inherent_score: 100,
+              control_design_eff: 80,
+              control_operating_eff: 80,
+              residual_override: true,
+              residual_score: 50,
+              residual_override_reason: 'board-directed figure',
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data).toMatchObject({
+          residual_score: 50,
+          residual_is_override: true,
+          residual_override_reason: 'board-directed figure',
+          residual_overridden_by: ORG_A,
+        });
+        expect(callArg.data.residual_override).toBeUndefined();
+      });
+
+      it('rejects an override request without a reason with a 400', async () => {
+        await expect(
+          risk_service.create_risk_into_db(
+            makeReq({
+              body: {
+                name: 'Cyber risk',
+                category: 'Cyber',
+                residual_override: true,
+                residual_score: 50,
+              },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('update_risk_into_db', () => {
@@ -432,6 +513,155 @@ describe('risk service — org scoping (ticket #6)', () => {
       // The failing write happened inside the same $transaction as the risk
       // update — so a real DB would roll the risk update back with it.
       expect(txFn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // aexa-server#241: residual_score recalculates on edit whenever one of its
+  // inputs changes, and an existing manual override survives an unrelated
+  // edit (going stale rather than being silently discarded or recomputed).
+  describe('update_risk_into_db — residual_score derivation (#241)', () => {
+    it('recomputes residual_score when control effectiveness changes, using stored values for fields not in the request', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        inherent_score: 100,
+        control_design_eff: 80,
+        control_operating_eff: 80,
+        residual_score: 36,
+        residual_is_override: false,
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { control_design_eff: 100 } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      // 100 x (1 - 1.0*0.8) = 20
+      expect(callArg.data.residual_score).toBe(20);
+      expect(callArg.data.residual_is_override).toBe(false);
+    });
+
+    it('leaves an existing override untouched when the edit does not touch its inputs', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        inherent_score: 100,
+        control_design_eff: 80,
+        control_operating_eff: 80,
+        residual_score: 50,
+        residual_is_override: true,
+        residual_override_reason: 'board-directed figure',
+        residual_overridden_by: 'someone-else',
+        residual_overridden_at: new Date('2026-01-01'),
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { name: 'Renamed risk' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({
+        residual_score: 50,
+        residual_is_override: true,
+        residual_override_stale: false,
+      });
+    });
+
+    it('marks an existing override stale when inherent_score changes without re-confirming the override', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        inherent_score: 100,
+        control_design_eff: 80,
+        control_operating_eff: 80,
+        residual_score: 50,
+        residual_is_override: true,
+        residual_override_reason: 'board-directed figure',
+        residual_overridden_by: 'someone-else',
+        residual_overridden_at: new Date('2026-01-01'),
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { inherent_score: 90 } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      // The override value survives — it is NOT silently recomputed or dropped.
+      expect(callArg.data).toMatchObject({
+        residual_score: 50,
+        residual_is_override: true,
+        residual_override_stale: true,
+      });
+    });
+
+    it('rejects an override request without a reason with a 400, leaving the risk unmodified', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A, inherent_score: 100 });
+
+      await expect(
+        risk_service.update_risk_into_db(
+          makeReq({
+            params: { id: 'r1' },
+            body: { residual_override: true, residual_score: 40 },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('keeps an override stale on a later, unrelated edit instead of silently clearing the flag', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        inherent_score: 100,
+        control_design_eff: 80,
+        control_operating_eff: 80,
+        residual_score: 50,
+        residual_is_override: true,
+        residual_override_reason: 'board-directed figure',
+        residual_overridden_by: 'someone-else',
+        residual_overridden_at: new Date('2026-01-01'),
+        // Already marked stale by a prior edit — this request's own delta
+        // is empty (no residual-affecting field is changing here).
+        residual_override_stale: true,
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { name: 'Renamed again' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({ residual_score: 50, residual_override_stale: true });
+    });
+
+    // aexa-server#241: residual_score is now derived/written on every update,
+    // so the fields it's derived FROM must be re-read inside the same
+    // transaction as the write — otherwise a concurrent edit committed
+    // between the initial ownership check and this transaction could be
+    // clobbered by a residual_score computed from a stale pre-transaction
+    // snapshot.
+    it('re-reads the row inside the transaction (via tx.risk.findFirst) rather than reusing the pre-transaction snapshot', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        inherent_score: 100,
+        control_design_eff: 80,
+        control_operating_eff: 80,
+        residual_score: 36,
+        residual_is_override: false,
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(makeReq({ params: { id: 'r1' }, body: {} }));
+
+      // Called once for the outer ownership/404 check, once inside the
+      // transaction for the fresh residual-inputs read.
+      expect(db.findFirst).toHaveBeenCalledTimes(2);
+      expect(db.findFirst.mock.calls[1][0]).toEqual({ where: { id: 'r1' } });
     });
   });
 

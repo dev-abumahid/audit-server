@@ -12,11 +12,13 @@ const create_risk = z.object({
   description: z.string().optional(),
   category: z.string().min(1, 'Category is required'),
   inherent_score: z.number().int().optional(),
-  residual_score: z.number().int().optional(),
   pagerank_score: z.number().int().optional(),
   financial_impact_min: z.number().int().optional(),
   financial_impact_max: z.number().int().optional(),
   probability: z.number().int().optional(),
+  // aexa-server#241: real, independent impact axis for the risk matrix
+  // (previously faked from inherent_score — see #202).
+  impact: z.number().int().min(0).max(100).optional(),
   velocity: z.string().optional(),
   trend: z.string().optional(),
   status: z.string(),
@@ -28,6 +30,14 @@ const create_risk = z.object({
   control_design_eff: z.number().int().optional(),
   control_operating_eff: z.number().int().optional(),
   line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
+
+  // aexa-server#241: residual_score is derived by default (risk_scoring.ts).
+  // These three are the client's opt-in to a manual override — never
+  // persisted directly, consumed by risk.service.ts and stripped/replaced
+  // with the resolved residual_* fields before the Prisma write.
+  residual_override: z.boolean().optional(),
+  residual_score: z.number().int().min(0).max(100).optional(),
+  residual_override_reason: z.string().min(1).optional(),
 });
 const update_risk = create_risk.partial();
 
