@@ -28,6 +28,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
     auditEngagementRisk: {
       count: vi.fn(),
     },
+    riskLink: {
+      deleteMany: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -60,6 +63,7 @@ const auditEngagementRiskDb = prisma.auditEngagementRisk as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
+const riskLinkDb = prisma.riskLink as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const txFn = (prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }).$transaction;
@@ -102,6 +106,10 @@ describe('risk service — org scoping (ticket #6)', () => {
     // Default: risk is not linked to any audit engagement, so the
     // aexa-frontend#165 audit-link delete guard is a no-op unless overridden.
     auditEngagementRiskDb.count.mockResolvedValue(0);
+    // Default: no RiskLink rows reference this risk's ref, so the
+    // aexa-frontend#25 dangling-link cleanup on delete is a no-op unless a
+    // test overrides it.
+    riskLinkDb.deleteMany.mockResolvedValue({ count: 0 });
     // Default $transaction impl (aexa-server#203): run the interactive callback
     // immediately with the same mocked prisma as the tx client, and propagate
     // any error the callback throws (so a mid-transaction failure rejects,
@@ -601,7 +609,7 @@ describe('risk service — org scoping (ticket #6)', () => {
     });
 
     it('deletes a risk when it is not referenced by any inspection, recommendation, KRI, live approval cycle or audit engagement link', async () => {
-      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A, ref: 'RSK-001' });
       inspectionDb.count.mockResolvedValue(0);
       recommendationDb.count.mockResolvedValue(0);
       kriDb.count.mockResolvedValue(0);
@@ -613,6 +621,51 @@ describe('risk service — org scoping (ticket #6)', () => {
 
       expect(auditEngagementRiskDb.count).toHaveBeenCalledWith({ where: { riskId: 'r1' } });
       expect(db.delete).toHaveBeenCalledWith({ where: { id: 'r1' } });
+    });
+
+    // RiskLink.source_ref/target_ref reference Risk.ref as plain strings, not
+    // real FKs (risk.prisma's RiskLink comment), so nothing cascades
+    // automatically the way the onDelete: Cascade relations above do. Without
+    // this cleanup, a RiskLink pointing at the deleted risk would survive as
+    // a dangling reference forever (confirmed live during aexa-frontend#25
+    // testing). Unlike the in-use guards above, this doesn't block the
+    // delete — a RiskLink isn't substantive data worth losing the delete
+    // over, it's a "these two risks are related" pointer that stops being
+    // true the moment either side is gone.
+    it('deletes RiskLink rows referencing the deleted risk by ref, in the same transaction as the risk delete', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A, ref: 'RSK-001' });
+      inspectionDb.count.mockResolvedValue(0);
+      recommendationDb.count.mockResolvedValue(0);
+      kriDb.count.mockResolvedValue(0);
+      riskApprovalDb.count.mockResolvedValue(0);
+      auditEngagementRiskDb.count.mockResolvedValue(0);
+      riskLinkDb.deleteMany.mockResolvedValue({ count: 2 });
+      db.delete.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } }));
+
+      expect(riskLinkDb.deleteMany).toHaveBeenCalledWith({
+        where: {
+          org_account_id: ORG_A,
+          OR: [{ source_ref: 'RSK-001' }, { target_ref: 'RSK-001' }],
+        },
+      });
+      expect(db.delete).toHaveBeenCalledWith({ where: { id: 'r1' } });
+    });
+
+    it('still deletes the risk (not blocked) even when RiskLink rows reference it', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A, ref: 'RSK-001' });
+      inspectionDb.count.mockResolvedValue(0);
+      recommendationDb.count.mockResolvedValue(0);
+      kriDb.count.mockResolvedValue(0);
+      riskApprovalDb.count.mockResolvedValue(0);
+      auditEngagementRiskDb.count.mockResolvedValue(0);
+      riskLinkDb.deleteMany.mockResolvedValue({ count: 1 });
+      db.delete.mockResolvedValue({ id: 'r1' });
+
+      await expect(
+        risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
+      ).resolves.toEqual({ id: 'r1' });
     });
   });
 });

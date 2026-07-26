@@ -207,7 +207,25 @@ const delete_risk_from_db = async (req: Request) => {
     );
   }
 
-  const result = await prisma.risk.delete({ where: { id } });
+  // RiskLink.source_ref/target_ref reference Risk.ref as plain strings, not
+  // real FKs (see risk.prisma's RiskLink comment — deliberate, so a link
+  // survives a risk being recreated with a new id but the same ref). That
+  // means nothing cascades automatically the way the onDelete: Cascade
+  // relations above do: a RiskLink pointing at this risk would otherwise
+  // survive the delete as a dangling reference forever (aexa-frontend#25).
+  // Unlike the in-use guard above, a RiskLink isn't substantive data worth
+  // blocking a delete over — it's just a "these two risks are related"
+  // pointer that stops being true the moment either side is gone — so it's
+  // cleaned up here rather than treated as another reason to block.
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.riskLink.deleteMany({
+      where: {
+        org_account_id: ctx.organizationId,
+        OR: [{ source_ref: existing.ref }, { target_ref: existing.ref }],
+      },
+    });
+    return tx.risk.delete({ where: { id } });
+  });
   return result;
 };
 
