@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   computeControlEffectiveness,
+  computeInherentScore,
   computeResidualScore,
+  resolveInherentFields,
   resolveResidualFields,
 } from '../../app/modules/risk/risk_scoring.js';
 
@@ -258,5 +260,187 @@ describe('resolveResidualFields', () => {
       residual_overridden_by: 'user-2',
       residual_override_stale: false,
     });
+  });
+});
+
+describe('computeInherentScore', () => {
+  it('derives inherent score from likelihood (probability) x impact', () => {
+    // 60 x 80 / 100 = 48
+    expect(computeInherentScore(60, 80)).toBe(48);
+  });
+
+  it('returns null when probability is missing', () => {
+    expect(computeInherentScore(null, 80)).toBeNull();
+  });
+
+  it('returns null when impact is missing', () => {
+    expect(computeInherentScore(60, undefined)).toBeNull();
+  });
+
+  it('clamps out-of-range inputs into [0, 100] before combining', () => {
+    expect(computeInherentScore(150, 100)).toBe(100);
+    expect(computeInherentScore(-10, 100)).toBe(0);
+  });
+
+  it('rounds to the nearest integer', () => {
+    // 33 x 33 / 100 = 10.89 -> rounds to 11
+    expect(computeInherentScore(33, 33)).toBe(11);
+  });
+});
+
+describe('resolveInherentFields', () => {
+  const inputs = (over: Partial<Parameters<typeof resolveInherentFields>[0]> = {}) => ({
+    probability: 60,
+    impact: 80,
+    raw_inherent_score: undefined,
+    ...over,
+  });
+
+  const overriddenExisting = (
+    over: Partial<Parameters<typeof resolveInherentFields>[3] & object> = {},
+  ) => ({
+    probability: 60,
+    impact: 80,
+    inherent_score: 90,
+    inherent_is_override: true,
+    inherent_override_reason: 'board-directed figure',
+    inherent_overridden_by: 'user-1',
+    inherent_overridden_at: new Date('2026-01-01'),
+    inherent_override_stale: false,
+    ...over,
+  });
+
+  it('auto-computes from probability x impact on create when both are present', () => {
+    const result = resolveInherentFields(inputs(), {}, 'user-1', null);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields).toMatchObject({ inherent_score: 48, inherent_is_override: false });
+  });
+
+  it('falls back to the raw supplied inherent_score when probability/impact are not both present', () => {
+    // Mirrors the AI-onboarding/intelligence-promotion producers, which set
+    // inherent_score directly and don't collect impact.
+    const result = resolveInherentFields(
+      { probability: 60, impact: undefined, raw_inherent_score: 72 },
+      {},
+      'user-1',
+      null,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields).toMatchObject({ inherent_score: 72, inherent_is_override: false });
+  });
+
+  it('is null when neither derivable nor a raw value is supplied', () => {
+    const result = resolveInherentFields(
+      { probability: undefined, impact: undefined, raw_inherent_score: undefined },
+      {},
+      'user-1',
+      null,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields.inherent_score).toBeNull();
+  });
+
+  it('rejects an override request missing inherent_score', () => {
+    const result = resolveInherentFields(
+      inputs(),
+      { inherent_override: true, inherent_override_reason: 'client-approved manual figure' },
+      'user-1',
+      null,
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects an override request missing a reason', () => {
+    const result = resolveInherentFields(
+      inputs(),
+      { inherent_override: true, inherent_score: 65 },
+      'user-1',
+      null,
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('accepts a valid override on create, tracking who/when/why', () => {
+    const result = resolveInherentFields(
+      inputs(),
+      {
+        inherent_override: true,
+        inherent_score: 90,
+        inherent_override_reason: 'board-directed figure',
+      },
+      'user-1',
+      null,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields).toMatchObject({
+      inherent_score: 90,
+      inherent_is_override: true,
+      inherent_override_reason: 'board-directed figure',
+      inherent_overridden_by: 'user-1',
+      inherent_override_stale: false,
+    });
+  });
+
+  it('auto-recomputes on update when the existing row was never overridden', () => {
+    const existing = {
+      ...inputs(),
+      inherent_score: 48,
+      inherent_is_override: false,
+      inherent_override_reason: null,
+      inherent_overridden_by: null,
+      inherent_overridden_at: null,
+      inherent_override_stale: false,
+    };
+    // impact improved from 80 -> 100.
+    const result = resolveInherentFields(inputs({ impact: 100 }), {}, 'user-2', existing);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 60 x 100 / 100 = 60
+    expect(result.fields).toMatchObject({ inherent_score: 60, inherent_is_override: false });
+  });
+
+  it('preserves an existing override untouched when inputs are unchanged', () => {
+    const existing = overriddenExisting();
+    const result = resolveInherentFields(inputs(), {}, 'user-2', existing);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields).toMatchObject({
+      inherent_score: 90,
+      inherent_is_override: true,
+      inherent_override_stale: false,
+    });
+  });
+
+  it('marks an existing override stale when probability or impact changes', () => {
+    const existing = overriddenExisting();
+    const result = resolveInherentFields(inputs({ impact: 50 }), {}, 'user-2', existing);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields).toMatchObject({ inherent_score: 90, inherent_override_stale: true });
+  });
+
+  it('keeps an override stale on a later unrelated edit instead of silently clearing the flag', () => {
+    const existing = overriddenExisting({ inherent_override_stale: true });
+    const result = resolveInherentFields(inputs(), {}, 'user-2', existing);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields).toMatchObject({ inherent_score: 90, inherent_override_stale: true });
+  });
+
+  it('clears an override and reverts to the computed value when inherent_override is explicitly false', () => {
+    const existing = overriddenExisting();
+    const result = resolveInherentFields(
+      inputs(),
+      { inherent_override: false },
+      'user-2',
+      existing,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.fields).toMatchObject({ inherent_score: 48, inherent_is_override: false });
   });
 });

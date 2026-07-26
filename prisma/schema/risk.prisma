@@ -27,7 +27,19 @@ model Risk {
     name                  String
     description           String?
     category              String
+    // aexa-server#247: derived by default from probability x impact when
+    // both are known (see risk_scoring.ts's computeInherentScore) — same
+    // derive-with-override-and-staleness pattern as residual_score below.
+    // Falls back to whatever raw value is supplied when probability/impact
+    // aren't both present (the AI-onboarding and intelligence-promotion
+    // producers don't collect `impact` yet, so this is a no-op there —
+    // see risk_scoring.ts's file comment).
     inherent_score        Int?
+    inherent_is_override     Boolean   @default(false)
+    inherent_override_reason String?
+    inherent_overridden_by   String?
+    inherent_overridden_at   DateTime?
+    inherent_override_stale  Boolean   @default(false)
     residual_score        Int?
     pagerank_score        Int?
     financial_impact_min  Int?

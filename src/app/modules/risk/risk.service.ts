@@ -6,7 +6,7 @@ import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { deriveApprovalState, risk_approval_service } from './risk.approval.service.js';
 import { createRiskWithGeneratedRef } from './risk_ref.js';
-import { resolveResidualFields } from './risk_scoring.js';
+import { resolveInherentFields, resolveResidualFields } from './risk_scoring.js';
 
 const get_all_risk_from_db = async (req: Request) => {
   const { searchTerm, siteId, category } = req.query as Record<string, string>;
@@ -103,6 +103,29 @@ const create_risk_into_db = async (req: Request) => {
   const payload = req.body;
   payload.org_account_id = ctx.organizationId;
 
+  // aexa-server#247: resolve inherent_score BEFORE residual_score, since
+  // residual is derived from inherent — residual must see the freshly
+  // derived inherent value, not the raw client-supplied one it might
+  // override. `existing` is null on create, so an unrequested override
+  // always falls through to the auto-computed (or raw-fallback) value.
+  const inherent = resolveInherentFields(
+    {
+      probability: payload.probability,
+      impact: payload.impact,
+      raw_inherent_score: payload.inherent_score,
+    },
+    {
+      inherent_override: payload.inherent_override,
+      inherent_score: payload.inherent_score,
+      inherent_override_reason: payload.inherent_override_reason,
+    },
+    user.accountId,
+    null,
+  );
+  if (!inherent.ok) throw new AppError(inherent.message, 400);
+  Object.assign(payload, inherent.fields);
+  delete payload.inherent_override;
+
   // aexa-server#241: residual_score is derived from inherent_score + control
   // effectiveness by default (see risk_scoring.ts), not just whatever number
   // the client sent. `existing` is null on create, so an unrequested
@@ -170,8 +193,40 @@ const update_risk_into_db = async (req: Request) => {
     // silently clobbered by a residual_score computed from stale inputs.
     const current = await tx.risk.findFirst({ where: { id } });
     if (!current) throw new AppError('Risk not found', 404);
+
+    // aexa-server#247: resolve inherent_score first (same in-transaction
+    // re-read rationale as #241's residual fix above), then feed the
+    // freshly-resolved value — not the raw request body's — into the
+    // residual resolution below.
+    const inherent = resolveInherentFields(
+      {
+        probability: safeBody.probability ?? current.probability,
+        impact: safeBody.impact ?? current.impact,
+        raw_inherent_score: safeBody.inherent_score ?? current.inherent_score,
+      },
+      {
+        inherent_override: safeBody.inherent_override,
+        inherent_score: safeBody.inherent_score,
+        inherent_override_reason: safeBody.inherent_override_reason,
+      },
+      user.accountId,
+      {
+        probability: current.probability,
+        impact: current.impact,
+        inherent_score: current.inherent_score,
+        inherent_is_override: current.inherent_is_override,
+        inherent_override_reason: current.inherent_override_reason,
+        inherent_overridden_by: current.inherent_overridden_by,
+        inherent_overridden_at: current.inherent_overridden_at,
+        inherent_override_stale: current.inherent_override_stale,
+      },
+    );
+    if (!inherent.ok) throw new AppError(inherent.message, 400);
+    Object.assign(safeBody, inherent.fields);
+    delete safeBody.inherent_override;
+
     const effectiveInputs = {
-      inherent_score: safeBody.inherent_score ?? current.inherent_score,
+      inherent_score: safeBody.inherent_score,
       control_design_eff: safeBody.control_design_eff ?? current.control_design_eff,
       control_operating_eff: safeBody.control_operating_eff ?? current.control_operating_eff,
     };

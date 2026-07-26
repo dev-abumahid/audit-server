@@ -12,11 +12,12 @@ export const riskSwaggerDocs = {
               name: 'Data Breach Risk',
               description: 'Risk of unauthorized access to sensitive customer data',
               category: 'Cybersecurity',
-              inherent_score: 80,
-              // residual_score is omitted here — it's derived from
-              // inherent_score + control_design_eff/control_operating_eff
-              // (aexa-server#241). Pass residual_override: true with a
-              // residual_score and residual_override_reason to set it
+              // inherent_score and residual_score are both omitted here —
+              // inherent_score is derived from probability x impact
+              // (aexa-server#247), and residual_score from inherent_score +
+              // control_design_eff/control_operating_eff (aexa-server#241).
+              // Pass inherent_override/residual_override: true with the
+              // matching _score and _override_reason fields to set either
               // manually instead.
               pagerank_score: 70,
               financial_impact_min: 50000,
@@ -122,11 +123,12 @@ export const riskSwaggerDocs = {
               name: 'Data Breach Risk',
               description: 'Risk of unauthorized access to sensitive customer data',
               category: 'Cybersecurity',
-              inherent_score: 80,
-              // residual_score is omitted here — it's derived from
-              // inherent_score + control_design_eff/control_operating_eff
-              // (aexa-server#241). Pass residual_override: true with a
-              // residual_score and residual_override_reason to set it
+              // inherent_score and residual_score are both omitted here —
+              // inherent_score is derived from probability x impact
+              // (aexa-server#247), and residual_score from inherent_score +
+              // control_design_eff/control_operating_eff (aexa-server#241).
+              // Pass inherent_override/residual_override: true with the
+              // matching _score and _override_reason fields to set either
               // manually instead.
               pagerank_score: 70,
               financial_impact_min: 50000,

@@ -14,14 +14,13 @@
  *
  * Scope note (ticket #241 decision 3): a real `impact` field was added
  * (risk.prisma) so the risk matrix's likelihood x impact axes are
- * independent instead of faking impact from inherent_score (#202). This
- * file deliberately does NOT redefine inherent_score as
- * probability x impact — inherent_score is fed by several existing
- * producers (manual entry, AI onboarding generation, intelligence-item
- * promotion) that each have their own established semantics for it, and
- * retroactively changing what it means is a larger, separate change than
- * "wire up the control-effectiveness fields that already exist." Deferred
- * as a fast-follow rather than bundled in silently.
+ * independent instead of faking impact from inherent_score (#202). At the
+ * time, this file deliberately did NOT redefine inherent_score as
+ * probability x impact — that's now done below (aexa-server#247), scoped
+ * the same way: only the manual-entry service-layer path (risk.service.ts)
+ * derives it. The AI onboarding and intelligence-promotion producers don't
+ * collect `impact` yet, so `computeInherentScore` returns null for them and
+ * they keep setting inherent_score directly, unaffected by this change.
  */
 
 const MAX_CONTROL_EFFECTIVENESS = 0.9;
@@ -189,6 +188,145 @@ export function resolveResidualFields(
       residual_overridden_by: existing.residual_overridden_by,
       residual_overridden_at: existing.residual_overridden_at,
       residual_override_stale: existing.residual_override_stale || inputsChanged,
+    },
+  };
+}
+
+/**
+ * aexa-server#247 — derives `inherent_score` from `probability` (likelihood)
+ * and `impact` when both are known: Inherent = Likelihood x Impact / 100
+ * (both on the 0-100 scale already established for every score field in this
+ * model). Returns null when either input is missing — unlike residual_score,
+ * there's no meaningful "full value" fallback here, so `resolveInherentFields`
+ * below falls back to whatever raw inherent_score value was supplied instead
+ * (preserving the AI-onboarding/intelligence-promotion producers' existing
+ * behavior of setting inherent_score directly).
+ */
+export function computeInherentScore(
+  probability: number | null | undefined,
+  impact: number | null | undefined,
+): number | null {
+  if (probability == null || impact == null) return null;
+  return Math.round((clampPercent(probability) * clampPercent(impact)) / 100);
+}
+
+export type InherentInputs = {
+  probability: number | null | undefined;
+  impact: number | null | undefined;
+  // The raw inherent_score value as supplied by the caller (or, for an
+  // update, the stored value when the caller didn't include it) — used as
+  // the fallback when probability/impact aren't both present to derive from.
+  raw_inherent_score: number | null | undefined;
+};
+
+export type InherentOverrideRequest = {
+  inherent_override?: boolean;
+  inherent_score?: number | null;
+  inherent_override_reason?: string | null;
+};
+
+export type InherentExistingState = {
+  probability: number | null | undefined;
+  impact: number | null | undefined;
+  inherent_score: number | null;
+  inherent_is_override: boolean;
+  inherent_override_reason: string | null;
+  inherent_overridden_by: string | null;
+  inherent_overridden_at: Date | null;
+  inherent_override_stale: boolean;
+};
+
+export type InherentFields = {
+  inherent_score: number | null;
+  inherent_is_override: boolean;
+  inherent_override_reason: string | null;
+  inherent_overridden_by: string | null;
+  inherent_overridden_at: Date | null;
+  inherent_override_stale: boolean;
+};
+
+const autoInherentFields = (inherent_score: number | null): InherentFields => ({
+  inherent_score,
+  inherent_is_override: false,
+  inherent_override_reason: null,
+  inherent_overridden_by: null,
+  inherent_overridden_at: null,
+  inherent_override_stale: false,
+});
+
+/**
+ * Resolves the full set of inherent_score fields to persist, mirroring
+ * `resolveResidualFields`'s override/staleness shape exactly (same 5
+ * branches). The one structural difference: the "auto" value is
+ * `computeInherentScore(...) ?? effectiveInputs.raw_inherent_score` rather
+ * than always the computed value, since there's no derivation possible (and
+ * therefore nothing to prefer over the caller's own value) when
+ * probability/impact aren't both present.
+ */
+export function resolveInherentFields(
+  effectiveInputs: InherentInputs,
+  overrideRequest: InherentOverrideRequest,
+  actorId: string,
+  existing: InherentExistingState | null,
+): { ok: true; fields: InherentFields } | { ok: false; message: string } {
+  const computed =
+    computeInherentScore(effectiveInputs.probability, effectiveInputs.impact) ??
+    effectiveInputs.raw_inherent_score ??
+    null;
+
+  if (overrideRequest.inherent_override === true) {
+    if (overrideRequest.inherent_score == null) {
+      return {
+        ok: false,
+        message: 'inherent_score is required when inherent_override is true.',
+      };
+    }
+    if (!overrideRequest.inherent_override_reason?.trim()) {
+      return {
+        ok: false,
+        message: 'inherent_override_reason is required when inherent_override is true.',
+      };
+    }
+    return {
+      ok: true,
+      fields: {
+        inherent_score: overrideRequest.inherent_score,
+        inherent_is_override: true,
+        inherent_override_reason: overrideRequest.inherent_override_reason.trim(),
+        inherent_overridden_by: actorId,
+        inherent_overridden_at: new Date(),
+        inherent_override_stale: false,
+      },
+    };
+  }
+
+  if (overrideRequest.inherent_override === false) {
+    return { ok: true, fields: autoInherentFields(computed) };
+  }
+
+  if (!existing) {
+    return { ok: true, fields: autoInherentFields(computed) };
+  }
+
+  if (!existing.inherent_is_override) {
+    return { ok: true, fields: autoInherentFields(computed) };
+  }
+
+  // Same monotonic staleness rule as resolveResidualFields: once stale,
+  // stays stale until explicitly re-confirmed/replaced.
+  const inputsChanged =
+    effectiveInputs.probability !== existing.probability ||
+    effectiveInputs.impact !== existing.impact;
+
+  return {
+    ok: true,
+    fields: {
+      inherent_score: existing.inherent_score,
+      inherent_is_override: true,
+      inherent_override_reason: existing.inherent_override_reason,
+      inherent_overridden_by: existing.inherent_overridden_by,
+      inherent_overridden_at: existing.inherent_overridden_at,
+      inherent_override_stale: existing.inherent_override_stale || inputsChanged,
     },
   };
 }

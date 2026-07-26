@@ -11,7 +11,7 @@ const create_risk = z.object({
   name: z.string().min(1, 'Name is required'),
   description: z.string().optional(),
   category: z.string().min(1, 'Category is required'),
-  inherent_score: z.number().int().optional(),
+  inherent_score: z.number().int().min(0).max(100).optional(),
   pagerank_score: z.number().int().optional(),
   financial_impact_min: z.number().int().optional(),
   financial_impact_max: z.number().int().optional(),
@@ -38,6 +38,12 @@ const create_risk = z.object({
   residual_override: z.boolean().optional(),
   residual_score: z.number().int().min(0).max(100).optional(),
   residual_override_reason: z.string().min(1).optional(),
+
+  // aexa-server#247: same opt-in-override shape as residual_override above,
+  // for inherent_score (derived from probability x impact when both are
+  // known).
+  inherent_override: z.boolean().optional(),
+  inherent_override_reason: z.string().min(1).optional(),
 });
 const update_risk = create_risk.partial();
 

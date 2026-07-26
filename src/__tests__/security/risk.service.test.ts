@@ -419,6 +419,109 @@ describe('risk service — org scoping (ticket #6)', () => {
         expect(db.create).not.toHaveBeenCalled();
       });
     });
+
+    // aexa-server#247: inherent_score is derived from probability x impact on
+    // create, resolved BEFORE residual_score so residual sees the freshly
+    // derived value, not the raw client-supplied one.
+    describe('inherent_score derivation (#247)', () => {
+      it('derives inherent_score from probability and impact, ignoring any client-supplied value', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({
+            body: {
+              name: 'Cyber risk',
+              category: 'Cyber',
+              probability: 60,
+              impact: 80,
+              inherent_score: 999, // must be ignored — no override requested
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.inherent_score).toBe(48);
+        expect(callArg.data.inherent_is_override).toBe(false);
+      });
+
+      it('falls back to the raw inherent_score when probability/impact are not both supplied', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({ body: { name: 'Cyber risk', category: 'Cyber', inherent_score: 72 } }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.inherent_score).toBe(72);
+      });
+
+      it('feeds the derived inherent_score (not the raw one) into the residual_score calculation', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({
+            body: {
+              name: 'Cyber risk',
+              category: 'Cyber',
+              probability: 60,
+              impact: 80, // derives inherent_score = 48
+              inherent_score: 10, // must be overridden by the derivation above
+              control_design_eff: 80,
+              control_operating_eff: 80, // control_eff = 0.64
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.inherent_score).toBe(48);
+        // 48 x (1 - 0.64) = 17.28 -> rounds to 17
+        expect(callArg.data.residual_score).toBe(17);
+      });
+
+      it('accepts a valid manual override, tracking who set it and why', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({
+            body: {
+              name: 'Cyber risk',
+              category: 'Cyber',
+              probability: 60,
+              impact: 80,
+              inherent_override: true,
+              inherent_score: 90,
+              inherent_override_reason: 'board-directed figure',
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data).toMatchObject({
+          inherent_score: 90,
+          inherent_is_override: true,
+          inherent_override_reason: 'board-directed figure',
+          inherent_overridden_by: ORG_A,
+        });
+        expect(callArg.data.inherent_override).toBeUndefined();
+      });
+
+      it('rejects an override request without a reason with a 400', async () => {
+        await expect(
+          risk_service.create_risk_into_db(
+            makeReq({
+              body: {
+                name: 'Cyber risk',
+                category: 'Cyber',
+                inherent_override: true,
+                inherent_score: 90,
+              },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('update_risk_into_db', () => {
@@ -662,6 +765,96 @@ describe('risk service — org scoping (ticket #6)', () => {
       // transaction for the fresh residual-inputs read.
       expect(db.findFirst).toHaveBeenCalledTimes(2);
       expect(db.findFirst.mock.calls[1][0]).toEqual({ where: { id: 'r1' } });
+    });
+  });
+
+  describe('update_risk_into_db — inherent_score derivation (#247)', () => {
+    it('recomputes inherent_score when probability/impact changes, and feeds it into residual_score', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        probability: 60,
+        impact: 80,
+        inherent_score: 48,
+        inherent_is_override: false,
+        control_design_eff: 80,
+        control_operating_eff: 80,
+        residual_score: 17,
+        residual_is_override: false,
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { impact: 100 } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      // 60 x 100 / 100 = 60 -> residual: 60 x (1 - 0.64) = 21.6 -> 22
+      expect(callArg.data.inherent_score).toBe(60);
+      expect(callArg.data.residual_score).toBe(22);
+    });
+
+    it('leaves an existing inherent_score override untouched when the edit does not touch its inputs', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        probability: 60,
+        impact: 80,
+        inherent_score: 90,
+        inherent_is_override: true,
+        inherent_override_reason: 'board-directed figure',
+        inherent_overridden_by: 'someone-else',
+        inherent_overridden_at: new Date('2026-01-01'),
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { name: 'Renamed risk' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({
+        inherent_score: 90,
+        inherent_is_override: true,
+        inherent_override_stale: false,
+      });
+    });
+
+    it('marks an existing inherent_score override stale when probability changes without re-confirming it', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        probability: 60,
+        impact: 80,
+        inherent_score: 90,
+        inherent_is_override: true,
+        inherent_override_reason: 'board-directed figure',
+        inherent_overridden_by: 'someone-else',
+        inherent_overridden_at: new Date('2026-01-01'),
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { probability: 40 } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({ inherent_score: 90, inherent_override_stale: true });
+    });
+
+    it('rejects an override request without a reason with a 400, leaving the risk unmodified', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+
+      await expect(
+        risk_service.update_risk_into_db(
+          makeReq({
+            params: { id: 'r1' },
+            body: { inherent_override: true, inherent_score: 90 },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(db.update).not.toHaveBeenCalled();
     });
   });
 
