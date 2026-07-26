@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
 
 // setup.ts sets AI_INTERNAL_SECRET = 'test-ai-internal-secret' before any
@@ -63,6 +63,21 @@ const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER'
 
 function mockAiResponse(ok: boolean, status = 502) {
   return { ok, status, json: vi.fn() } as unknown as Response;
+}
+
+// Simulates aexa-ai hanging indefinitely: the returned fetch mock never
+// resolves/rejects on its own, it only reacts to the AbortSignal passed in
+// `init` -- exactly what a real hung `fetch` does once its controller is
+// aborted. Used with `vi.useFakeTimers()` so the per-call timeout (issue
+// #233) can be advanced deterministically instead of waiting on a real timer.
+function mockHangingFetch() {
+  return vi.fn((_url: string, init?: RequestInit) => {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('The operation was aborted.', 'AbortError'));
+      });
+    });
+  });
 }
 
 describe('ai service — AI response error handling', () => {
@@ -969,5 +984,119 @@ describe('ai service — signed org-identity token on aexa-ai calls (issue #56)'
     expect(init.headers).toHaveProperty('X-Internal-Secret');
     expect(init.headers).toHaveProperty('X-Org-Token');
     expect(jwtDecode(init.headers['X-Org-Token']).org_account_id).toBe(ORG_A);
+  });
+});
+
+// Issue #233 — every outbound aexa-ai fetch now has an AbortController-based
+// timeout (see ai.service.ts's LLM_CALL_TIMEOUT_MS / PDF_PROCESSING_TIMEOUT_MS
+// / LIGHTWEIGHT_CALL_TIMEOUT_MS). These tests use fake timers and a fetch mock
+// that only ever settles via the AbortSignal (mockHangingFetch above) so a
+// hung upstream call is simulated deterministically -- no real waiting on a
+// 15s/45s/90s timer in the test suite -- and asserts the call aborts and
+// surfaces a clean 500 via wrapAiServiceError rather than hanging forever.
+// One call site per timeout-value group is covered here.
+describe('ai service — fetch timeout on hung aexa-ai calls (issue #233)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('generate_template_with_prompt_with_ai (LLM_CALL_TIMEOUT_MS group) aborts and surfaces a clean 500 instead of hanging', async () => {
+    vi.stubGlobal('fetch', mockHangingFetch());
+
+    const rejection = ai_service
+      .generate_template_with_prompt_with_ai(makeReq({ body: { prompt: 'fire safety' } }))
+      .catch((error) => error);
+
+    // 45s (LLM_CALL_TIMEOUT_MS) -- fires the AbortController's setTimeout.
+    await vi.advanceTimersByTimeAsync(45_000);
+
+    const error = await rejection;
+    expect(error).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to generate template with AI',
+    });
+    expect(db.template.create).not.toHaveBeenCalled();
+  });
+
+  it('generate_template_with_pdf_with_ai (PDF_PROCESSING_TIMEOUT_MS group) aborts and surfaces a clean 500 instead of hanging', async () => {
+    vi.stubGlobal('fetch', mockHangingFetch());
+
+    const rejection = ai_service
+      .generate_template_with_pdf_with_ai(
+        makeReq({
+          file: {
+            path: '/tmp/does-not-matter',
+            mimetype: 'application/pdf',
+            originalname: 'a.pdf',
+          },
+        } as never),
+      )
+      .catch((error) => error);
+
+    // 90s (PDF_PROCESSING_TIMEOUT_MS) -- longer than the LLM group, matching
+    // PDF OCR/embedding actually taking longer than a plain completion call.
+    await vi.advanceTimersByTimeAsync(90_000);
+
+    const error = await rejection;
+    expect(error).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to generate template from PDF',
+    });
+    expect(db.template.create).not.toHaveBeenCalled();
+  });
+
+  it('check_upload_file_status_from_ai (LIGHTWEIGHT_CALL_TIMEOUT_MS group) aborts and surfaces a clean 500 instead of hanging', async () => {
+    const pineconeDb = prisma.pineconeDocument as unknown as Record<
+      string,
+      ReturnType<typeof vi.fn>
+    >;
+    pineconeDb.findFirst.mockResolvedValue({ id: 'doc-1', fileId: 'file-1', orgAccountId: ORG_A });
+    vi.stubGlobal('fetch', mockHangingFetch());
+
+    const rejection = ai_service
+      .check_upload_file_status_from_ai(makeReq({ params: { fileId: 'file-1' } }))
+      .catch((error) => error);
+
+    // 15s (LIGHTWEIGHT_CALL_TIMEOUT_MS) -- shortest group, matching this
+    // being a cheap status lookup rather than a generation call.
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    const error = await rejection;
+    expect(error).toMatchObject({
+      statusCode: 500,
+      message: 'Failed to check upload status',
+    });
+  });
+
+  it('does not time out when aexa-ai responds well within LLM_CALL_TIMEOUT_MS (sanity check the timer is cleared, not just present)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          data: {
+            templateName: 'Fire safety',
+            pages: [{ pageIndex: 0, title: 'Page 1', questions: [] }],
+          },
+        }),
+      }),
+    );
+    db.template.create.mockResolvedValue({ id: 'tpl-1' });
+
+    const result = await ai_service.generate_template_with_prompt_with_ai(
+      makeReq({ body: { prompt: 'fire safety' } }),
+    );
+
+    expect(result).toEqual({ id: 'tpl-1' });
+    // Advancing time well past the timeout afterward must not retroactively
+    // reject anything -- clearTimeout in the `finally` block must have
+    // actually cancelled the pending abort.
+    await vi.advanceTimersByTimeAsync(60_000);
   });
 });

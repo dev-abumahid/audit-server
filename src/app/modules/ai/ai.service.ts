@@ -59,6 +59,55 @@ export const wrapAiServiceError = (error: unknown, fallbackMessage: string): nev
   throw new AppError(fallbackMessage, 500);
 };
 
+// Issue #233 — none of the 8 outbound fetch calls to aexa-ai below had a
+// timeout, so a hung/slow aexa-ai process (or a dropped connection that
+// never resolves) left the request pending indefinitely. Follows the same
+// AbortController + `finally { clearTimeout(timeout) }` pattern already
+// established by intelligence/rss_scraper.ts's fetchRSSFeed.
+//
+// Three tiers, not one blanket value, because these are meaningfully
+// different operations:
+//   - LLM_CALL_TIMEOUT_MS: plain LLM-completion calls (template/recommendation
+//     /risk-analysis generation) — no OCR/embedding work, should return in
+//     well under a minute under normal load.
+//   - PDF_PROCESSING_TIMEOUT_MS: PDF-based calls (OCR/parsing a document,
+//     embedding it into Pinecone) — genuinely slower, needs more headroom.
+//   - LIGHTWEIGHT_CALL_TIMEOUT_MS: cheap status/delete lookups against
+//     Pinecone metadata, not a generation call — should return almost
+//     immediately, so a short timeout is appropriate.
+//
+// Note on #232's 60s org-identity JWT (minted per call via buildAiHeaders,
+// see utils/org_token.ts): that token is only used as the RATE-LIMIT KEY on
+// aexa-ai's side, not as a precondition for the request to succeed or fail.
+// A fetch timeout LONGER than 60s (like PDF_PROCESSING_TIMEOUT_MS below)
+// does not cause an error if the token has already expired by the time
+// aexa-ai looks at it — it just means aexa-ai's rate limiter falls back to
+// IP-based keying for that one call (fails safe, per #232's design). So
+// these timeouts are sized for realistic operation duration, not artificially
+// capped at 60s to "match" the token TTL — the two are unrelated constraints.
+const LLM_CALL_TIMEOUT_MS = 45_000;
+const PDF_PROCESSING_TIMEOUT_MS = 90_000;
+const LIGHTWEIGHT_CALL_TIMEOUT_MS = 15_000;
+
+// Shared by all 8 call sites below instead of each one hand-rolling its own
+// AbortController/setTimeout/finally boilerplate (found duplicated verbatim
+// 8 times by independent review). Centralizes the abort-and-cleanup logic
+// in one place so a 9th call site added later gets it for free by using this
+// instead of raw `fetch`.
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 const generate_template_with_prompt_with_ai = async (req: Request) => {
   try {
     const user = req.user as JwtPayloadType;
@@ -69,17 +118,21 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
     if (!prompt) {
       throw new AppError('Prompt is required', 400);
     }
-    const aiResponse = await fetch(`${configs.ai_server_end_point}/template_from_topic`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildAiHeaders(ctx.organizationId),
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/template_from_topic`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAiHeaders(ctx.organizationId),
+        },
+        body: JSON.stringify({
+          topic: prompt,
+          organization_username: ctx.organizationId,
+        }),
       },
-      body: JSON.stringify({
-        topic: prompt,
-        organization_username: ctx.organizationId,
-      }),
-    });
+      LLM_CALL_TIMEOUT_MS,
+    );
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }
@@ -121,11 +174,15 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
 
     formData.append('file', blob, file.originalname);
     formData.append('organization_username', ctx.organizationId);
-    const aiResponse = await fetch(`${configs.ai_server_end_point}/template_from_pdf`, {
-      method: 'POST',
-      headers: buildAiHeaders(ctx.organizationId),
-      body: formData,
-    });
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/template_from_pdf`,
+      {
+        method: 'POST',
+        headers: buildAiHeaders(ctx.organizationId),
+        body: formData,
+      },
+      PDF_PROCESSING_TIMEOUT_MS,
+    );
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }
@@ -171,33 +228,37 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
       throw new AppError('Risk not found', 404);
     }
 
-    const aiResponse = await fetch(`${configs.ai_server_end_point}/tamplate_from_risk`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildAiHeaders(ctx.organizationId),
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/tamplate_from_risk`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAiHeaders(ctx.organizationId),
+        },
+        body: JSON.stringify({
+          name: risk.name,
+          description: risk.description,
+          category: risk.category,
+          inherent_score: risk.inherent_score,
+          residual_score: risk.residual_score,
+          pagerank_score: risk.pagerank_score,
+          financial_impact_min: risk.financial_impact_min,
+          financial_impact_max: risk.financial_impact_max,
+          probability: risk.probability,
+          velocity: risk.velocity,
+          trend: risk.trend,
+          status: risk.status,
+          ai_generated: risk.ai_generated,
+          is_edited: risk.is_edited,
+          site_id: risk.site_id,
+          source_info: risk.source_info,
+          control_design_eff: risk.control_design_eff,
+          control_operating_eff: risk.control_operating_eff,
+        }),
       },
-      body: JSON.stringify({
-        name: risk.name,
-        description: risk.description,
-        category: risk.category,
-        inherent_score: risk.inherent_score,
-        residual_score: risk.residual_score,
-        pagerank_score: risk.pagerank_score,
-        financial_impact_min: risk.financial_impact_min,
-        financial_impact_max: risk.financial_impact_max,
-        probability: risk.probability,
-        velocity: risk.velocity,
-        trend: risk.trend,
-        status: risk.status,
-        ai_generated: risk.ai_generated,
-        is_edited: risk.is_edited,
-        site_id: risk.site_id,
-        source_info: risk.source_info,
-        control_design_eff: risk.control_design_eff,
-        control_operating_eff: risk.control_operating_eff,
-      }),
-    });
+      LLM_CALL_TIMEOUT_MS,
+    );
 
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
@@ -245,23 +306,27 @@ const analyze_site_risks_with_ai = async (req: Request) => {
     // Deliberately not including a system_prompt field — see the comment on
     // ai_validations.analyze_site_risks. site_legal_entity has no analog on
     // the Site model yet, so it's sent empty rather than guessed.
-    const aiResponse = await fetch(`${configs.ai_server_end_point}/risk_analysis`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildAiHeaders(ctx.organizationId),
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/risk_analysis`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAiHeaders(ctx.organizationId),
+        },
+        body: JSON.stringify({
+          site_name: site.name,
+          site_location: site.location || '',
+          site_legal_entity: '',
+          site_primary_activity: site.activity || '',
+          site_country: site.country || '',
+          site_revenue: String(site.revenue),
+          site_employees: String(site.employees_count),
+          site_type: site.site_type,
+        }),
       },
-      body: JSON.stringify({
-        site_name: site.name,
-        site_location: site.location || '',
-        site_legal_entity: '',
-        site_primary_activity: site.activity || '',
-        site_country: site.country || '',
-        site_revenue: String(site.revenue),
-        site_employees: String(site.employees_count),
-        site_type: site.site_type,
-      }),
-    });
+      LLM_CALL_TIMEOUT_MS,
+    );
 
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
@@ -336,7 +401,7 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
     };
 
     // Call ai api for generating recommendation
-    const aiResponse = await fetch(
+    const aiResponse = await fetchWithTimeout(
       `${configs.ai_server_end_point}/generate_recommendations_from_answer`,
       {
         method: 'POST',
@@ -346,6 +411,7 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
         },
         body: JSON.stringify(aiPayload),
       },
+      LLM_CALL_TIMEOUT_MS,
     );
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
@@ -422,11 +488,15 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
 
     formData.append('file', blob, file.originalname);
     formData.append('organization_username', ctx.organizationId);
-    const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-pdf-to-pinecone`, {
-      method: 'POST',
-      headers: buildAiHeaders(ctx.organizationId),
-      body: formData,
-    });
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/upload-pdf-to-pinecone`,
+      {
+        method: 'POST',
+        headers: buildAiHeaders(ctx.organizationId),
+        body: formData,
+      },
+      PDF_PROCESSING_TIMEOUT_MS,
+    );
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }
@@ -479,11 +549,12 @@ const check_upload_file_status_from_ai = async (req: Request) => {
     // as a defense-in-depth check (issue #79 on aexa-ai) -- it returns 404 if
     // the caller-supplied org doesn't match the org the job was created under.
     // We already know the org from the Prisma lookup above, so pass it through.
-    const aiResponse = await fetch(
+    const aiResponse = await fetchWithTimeout(
       `${configs.ai_server_end_point}/upload-status/${fileId}?organization_username=${encodeURIComponent(ctx.organizationId)}`,
       {
         headers: buildAiHeaders(ctx.organizationId),
       },
+      LIGHTWEIGHT_CALL_TIMEOUT_MS,
     );
     if (aiResponse.status === 404) {
       throw new AppError('Upload status not found', 404);
@@ -546,7 +617,7 @@ const delete_pinecone_data_from_database = async (req: Request) => {
       organization_username: ctx.organizationId,
     });
 
-    const aiResponse = await fetch(
+    const aiResponse = await fetchWithTimeout(
       `${configs.ai_server_end_point}/delete-vectors-by-filename?${deleteParams.toString()}`,
       {
         method: 'DELETE',
@@ -556,6 +627,7 @@ const delete_pinecone_data_from_database = async (req: Request) => {
         },
         body: JSON.stringify({ file_name: fileName }),
       },
+      LIGHTWEIGHT_CALL_TIMEOUT_MS,
     );
     // Every other AI-service call in this file throws on a non-ok response;
     // this one proceeded to delete the local DB record regardless, letting
