@@ -661,4 +661,57 @@ describe('report service — org scoping (issue #94)', () => {
       expect(byRef['ghost123'].approval_status).toBeUndefined();
     });
   });
+
+  // Methodology audit finding: the AI is never told compute_kri_status's
+  // formula or which direction each indicator runs, so its own guessed
+  // kri_dashboard status could disagree with what the live KRI Dashboard
+  // shows for the exact same numbers. Recomputed deterministically from the
+  // same three numbers the AI already echoed back, same
+  // "keep authoritative data out of the LLM's hands" pattern as the
+  // approval-status annotation above.
+  describe('generate_report_into_db — KRI status is recomputed, not trusted from the AI (methodology audit)', () => {
+    beforeEach(() => {
+      primeOrgDataMocks();
+    });
+
+    it('overrides an AI-guessed status with the real compute_kri_status result, for both KRI directions', async () => {
+      const aiContent = {
+        ...AI_CONTENT,
+        kri_dashboard: [
+          // "Higher is better" (target above threshold): current 90 is
+          // above target 80 -> real status is OK, AI guessed "breached".
+          {
+            name: 'Compliance Coverage %',
+            unit: '%',
+            current_value: 90,
+            target_value: 80,
+            alert_threshold: 50,
+            status: 'breached',
+            commentary: 'On track.',
+          },
+          // "Lower is better" (target below threshold): current 45 is at/above
+          // the 40 alert_threshold -> real status is ALERT, AI guessed "on_track".
+          {
+            name: 'Supplier Lead Time',
+            unit: 'days',
+            current_value: 45,
+            target_value: 10,
+            alert_threshold: 40,
+            status: 'on_track',
+            commentary: 'Looking fine.',
+          },
+        ],
+      };
+      primeSuccessfulPipeline(aiContent);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const rendered = mockRender.mock.calls[0][0];
+      const byName: Record<string, { status: string }> = {};
+      for (const k of rendered.kri_dashboard) byName[k.name] = k;
+
+      expect(byName['Compliance Coverage %'].status).toBe('OK');
+      expect(byName['Supplier Lead Time'].status).toBe('ALERT');
+    });
+  });
 });

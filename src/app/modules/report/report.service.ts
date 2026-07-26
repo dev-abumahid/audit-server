@@ -22,6 +22,7 @@ import {
   type ReportRiskApprovalStatus,
 } from '../../utils/report_pdf.js';
 import { buildAiHeaders } from '../ai/ai.service.js';
+import { compute_kri_status } from '../kri/kri.service.js';
 import {
   deriveApprovalState,
   type RiskApprovalDisplayState,
@@ -265,6 +266,27 @@ const annotateApprovalStatus = (
   return content;
 };
 
+/**
+ * Same "keep authoritative data out of the LLM's hands" pattern as
+ * annotateApprovalStatus, for KRI status. The AI is only ever sent
+ * current_value/alert_threshold/target_value (kris in fetchOrgData's
+ * PipelineInput) and asked to produce a board narrative around them -- it is
+ * never told the app's own three-way OK/WARNING/ALERT formula or which
+ * direction each indicator runs (kri.service.ts's compute_kri_status infers
+ * "lower is better" vs "higher is better" from target vs threshold), so its
+ * guessed status can disagree with what the live KRI Dashboard shows for the
+ * exact same numbers. Recomputed here from the same three numbers the AI
+ * already echoed back in kri_dashboard, using the one real formula, so the
+ * board PDF can never show a different status than the dashboard for
+ * identical data.
+ */
+const annotateKriStatus = (content: ReportContent): ReportContent => {
+  for (const kri of content.kri_dashboard ?? []) {
+    kri.status = compute_kri_status(kri.current_value, kri.alert_threshold, kri.target_value);
+  }
+  return content;
+};
+
 // Writes the rendered PDF buffer to a temp file so it can go through the same
 // proven uploadCloud path every other upload in this codebase uses (uploadCloud
 // reads from disk and unlinks the temp file itself, on success and on error).
@@ -402,9 +424,8 @@ const generate_report_into_db = async (req: Request) => {
 
   try {
     const { input, approvalByRef } = await fetchOrgData(ctx.organizationId);
-    const content = annotateApprovalStatus(
-      await callReportContentAi(input, ctx.organizationId),
-      approvalByRef,
+    const content = annotateKriStatus(
+      annotateApprovalStatus(await callReportContentAi(input, ctx.organizationId), approvalByRef),
     );
     const pdf = await renderReportPdf(content);
     const fileUrl = await uploadReportPdf(pdf);
