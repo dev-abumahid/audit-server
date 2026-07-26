@@ -1,6 +1,6 @@
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
-import { AI_INTERNAL_SECRET_HEADER, wrapAiServiceError } from '../ai/ai.service.js';
+import { buildAiHeaders, wrapAiServiceError } from '../ai/ai.service.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
@@ -49,16 +49,23 @@ const fetchSites = async (organizationId: string): Promise<SiteContext[]> => {
 };
 
 // Every outbound call to one of aexa-ai's 5 /intelligence/* endpoints shares
-// this shape (POST, JSON body, AI_INTERNAL_SECRET_HEADER, non-ok -> 502) --
-// mirrors ai.service.ts's per-call-site pattern exactly, just factored once
-// since this module calls 5 different aexa-ai routes instead of ai.service's
-// mix of 1-off proxies.
-const callAexaAiIntelligence = async <T>(path: string, body: unknown): Promise<T> => {
+// this shape (POST, JSON body, buildAiHeaders, non-ok -> 502) -- mirrors
+// ai.service.ts's per-call-site pattern exactly, just factored once since
+// both analyze_items_into_db (/analyze) and runOrgLevelAction (which fans
+// out to 4 more routes: predict/mitigations/rcsa/resilience-scan) call
+// through this one helper. Takes the caller's org id so it can mint a fresh
+// signed org-identity token per call (issue #56) instead of each caller
+// building the headers itself.
+const callAexaAiIntelligence = async <T>(
+  path: string,
+  body: unknown,
+  orgAccountId: string,
+): Promise<T> => {
   const aiResponse = await fetch(`${configs.ai_server_end_point}/intelligence${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...AI_INTERNAL_SECRET_HEADER,
+      ...buildAiHeaders(orgAccountId),
     },
     body: JSON.stringify(body),
   });
@@ -212,18 +219,22 @@ const analyze_items_into_db = async (req: Request) => {
         source_evidence?: string | null;
       }>;
       count: number;
-    }>('/analyze', {
-      org,
-      existing_risks: existingRisks,
-      items: representativeItems.map((item) => ({
-        title: item.title,
-        description: item.description ?? undefined,
-        source_name: item.source_name,
-        source_category: item.source_category ?? undefined,
-        source_credibility: item.source_credibility ?? undefined,
-        published_at: item.published_at ? item.published_at.toISOString() : undefined,
-      })),
-    });
+    }>(
+      '/analyze',
+      {
+        org,
+        existing_risks: existingRisks,
+        items: representativeItems.map((item) => ({
+          title: item.title,
+          description: item.description ?? undefined,
+          source_name: item.source_name,
+          source_category: item.source_category ?? undefined,
+          source_credibility: item.source_credibility ?? undefined,
+          published_at: item.published_at ? item.published_at.toISOString() : undefined,
+        })),
+      },
+      ctx.organizationId,
+    );
 
     const analyzedByTitle = new Map(result.analyzed.map((entry) => [entry.original_title, entry]));
 
@@ -281,7 +292,7 @@ const runOrgLevelAction = async (
       body.sites = await fetchSites(ctx.organizationId);
     }
 
-    const result = await callAexaAiIntelligence(aiPath, body);
+    const result = await callAexaAiIntelligence(aiPath, body, ctx.organizationId);
 
     const run = await prisma.intelligenceRun.create({
       data: {

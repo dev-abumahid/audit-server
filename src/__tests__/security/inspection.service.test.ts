@@ -1,5 +1,10 @@
+import jwt from 'jsonwebtoken';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
+
+// setup.ts sets AI_INTERNAL_SECRET = 'test-ai-internal-secret' before any
+// config import — the exact secret mintOrgToken signs the X-Org-Token with.
+const jwtDecode = (token: string) => jwt.verify(token, 'test-ai-internal-secret') as jwt.JwtPayload;
 
 vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
@@ -467,6 +472,24 @@ describe('inspection service — org scoping (ticket #6)', () => {
           where: { id: 'insp-1', orgAccountId: ORG_A },
         }),
       );
+    });
+
+    it('sends the shared internal secret and a signed org-identity token on the aexa-ai call (#56)', async () => {
+      noteDb.findUnique.mockResolvedValue({ extracted_text: 'text' });
+      inspectionDb.findUnique.mockResolvedValue({ questionAnswers: [] });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }),
+      );
+
+      await inspection_service.split_note_into_inspection_using_ai(
+        makeReq({ params: { inspectionId: 'insp-1' } }),
+      );
+
+      const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(init.headers).toHaveProperty('X-Internal-Secret');
+      expect(init.headers).toHaveProperty('X-Org-Token');
+      expect(jwtDecode(init.headers['X-Org-Token']).org_account_id).toBe(ORG_A);
     });
 
     it('throws 404 when the inspection belongs to another org', async () => {

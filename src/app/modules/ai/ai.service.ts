@@ -11,6 +11,7 @@ import {
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
+import { mintOrgToken, ORG_TOKEN_HEADER } from '../../utils/org_token.js';
 import { recommendation_validations } from '../recommendation/recommendation.validation.js';
 import { mapTemplateData } from '../template/template.utils.js';
 import { template_validations } from '../template/template.validation.js';
@@ -23,6 +24,19 @@ import { ai_validations } from './ai.validation.js';
 export const AI_INTERNAL_SECRET_HEADER = {
   'X-Internal-Secret': configs.ai_internal_secret,
 };
+
+// Issue #56 stage 2 — every aexa-server -> aexa-ai call site that has a
+// resolved caller org should use this instead of AI_INTERNAL_SECRET_HEADER
+// directly: it attaches the shared-secret header AND a freshly minted,
+// short-lived signed org-identity token (see utils/org_token.ts), so
+// aexa-ai's rate limiter keys on a real authenticated org instead of a
+// self-reported header. Centralizing this here means a future new call site
+// gets both headers by construction instead of a developer having to
+// remember to hand-roll the org token on top of the secret header.
+export const buildAiHeaders = (orgAccountId: string): Record<string, string> => ({
+  ...AI_INTERNAL_SECRET_HEADER,
+  [ORG_TOKEN_HEADER]: mintOrgToken(orgAccountId),
+});
 
 // Closes #134 — every AI proxy function below re-wraps whatever it catches
 // (a ZodError from response-shape validation, a raw Prisma error, a
@@ -59,7 +73,7 @@ const generate_template_with_prompt_with_ai = async (req: Request) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...AI_INTERNAL_SECRET_HEADER,
+        ...buildAiHeaders(ctx.organizationId),
       },
       body: JSON.stringify({
         topic: prompt,
@@ -109,7 +123,7 @@ const generate_template_with_pdf_with_ai = async (req: Request) => {
     formData.append('organization_username', ctx.organizationId);
     const aiResponse = await fetch(`${configs.ai_server_end_point}/template_from_pdf`, {
       method: 'POST',
-      headers: AI_INTERNAL_SECRET_HEADER,
+      headers: buildAiHeaders(ctx.organizationId),
       body: formData,
     });
     if (!aiResponse.ok) {
@@ -161,7 +175,7 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...AI_INTERNAL_SECRET_HEADER,
+        ...buildAiHeaders(ctx.organizationId),
       },
       body: JSON.stringify({
         name: risk.name,
@@ -235,7 +249,7 @@ const analyze_site_risks_with_ai = async (req: Request) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...AI_INTERNAL_SECRET_HEADER,
+        ...buildAiHeaders(ctx.organizationId),
       },
       body: JSON.stringify({
         site_name: site.name,
@@ -328,7 +342,7 @@ const generate_recommendation_with_inspection_from_ai = async (req: Request) => 
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...AI_INTERNAL_SECRET_HEADER,
+          ...buildAiHeaders(ctx.organizationId),
         },
         body: JSON.stringify(aiPayload),
       },
@@ -410,7 +424,7 @@ const upload_pdf_into_pinecone_via_ai = async (req: Request) => {
     formData.append('organization_username', ctx.organizationId);
     const aiResponse = await fetch(`${configs.ai_server_end_point}/upload-pdf-to-pinecone`, {
       method: 'POST',
-      headers: AI_INTERNAL_SECRET_HEADER,
+      headers: buildAiHeaders(ctx.organizationId),
       body: formData,
     });
     if (!aiResponse.ok) {
@@ -468,7 +482,7 @@ const check_upload_file_status_from_ai = async (req: Request) => {
     const aiResponse = await fetch(
       `${configs.ai_server_end_point}/upload-status/${fileId}?organization_username=${encodeURIComponent(ctx.organizationId)}`,
       {
-        headers: AI_INTERNAL_SECRET_HEADER,
+        headers: buildAiHeaders(ctx.organizationId),
       },
     );
     if (aiResponse.status === 404) {
@@ -538,7 +552,7 @@ const delete_pinecone_data_from_database = async (req: Request) => {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
-          ...AI_INTERNAL_SECRET_HEADER,
+          ...buildAiHeaders(ctx.organizationId),
         },
         body: JSON.stringify({ file_name: fileName }),
       },

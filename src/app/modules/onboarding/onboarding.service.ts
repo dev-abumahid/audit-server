@@ -27,6 +27,16 @@ const wrapError = (error: unknown, fallbackMessage: string): never => {
   throw new AppError(fallbackMessage, 500);
 };
 
+// Issue #56 (org-identity token for aexa-ai rate limiting): every other
+// aexa-server -> aexa-ai call site sends buildAiHeaders(ctx.organizationId)
+// instead of AI_INTERNAL_SECRET_HEADER alone. This one deliberately does
+// not: /company-profile and /risk_analysis run during onboarding stages 1-3
+// (identify/generate), which is admin-triggered tenant CREATION -- the
+// Organization row these calls would key a token to does not exist yet
+// (it's only created in stage 4's commit_onboarding transaction). There is
+// no real org_account_id to mint a token for here, so this call site is left
+// on the pre-#56 fallback path (aexa-ai's limiter falls through to remote
+// IP, same as before this issue) rather than sending a fabricated id.
 async function callAi(path: string, body: unknown): Promise<any> {
   const response = await fetch(`${configs.ai_server_end_point}${path}`, {
     method: 'POST',

@@ -1,5 +1,10 @@
+import jwt from 'jsonwebtoken';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
+
+// setup.ts sets AI_INTERNAL_SECRET = 'test-ai-internal-secret' before any
+// config import — the exact secret mintOrgToken signs the X-Org-Token with.
+const jwtDecode = (token: string) => jwt.verify(token, 'test-ai-internal-secret') as jwt.JwtPayload;
 
 vi.mock('../../app/lib/logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -113,7 +118,7 @@ describe('risk_correlation_service — POST /risk/root-cause-bucketing (mocked a
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('sends risks by ref (not id) and findings mapped from Action, with the internal-secret header', async () => {
+  it('sends risks by ref (not id) and findings mapped from Action, with the internal-secret header and a signed org-identity token (#56)', async () => {
     riskDb.findMany.mockResolvedValue([
       {
         ref: 'CYB-001',
@@ -147,6 +152,8 @@ describe('risk_correlation_service — POST /risk/root-cause-bucketing (mocked a
     expect(String(url)).toContain('/risk/rootcause-bucketing');
     expect(init.method).toBe('POST');
     expect(init.headers['X-Internal-Secret']).toBeDefined();
+    expect(init.headers['X-Org-Token']).toBeDefined();
+    expect(jwtDecode(init.headers['X-Org-Token']).org_account_id).toBe(ORG_A);
 
     const body = JSON.parse(init.body);
     expect(body.organizationContext).toEqual({

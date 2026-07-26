@@ -1,5 +1,10 @@
+import jwt from 'jsonwebtoken';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
+
+// setup.ts sets AI_INTERNAL_SECRET = 'test-ai-internal-secret' before any
+// config import — the exact secret mintOrgToken signs the X-Org-Token with.
+const jwtDecode = (token: string) => jwt.verify(token, 'test-ai-internal-secret') as jwt.JwtPayload;
 
 vi.mock('../../app/lib/logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -274,7 +279,7 @@ describe('report service — org scoping (issue #94)', () => {
       expect(reportDb.create).toHaveBeenCalled();
     });
 
-    it('sends X-Organization on the aexa-ai call so per-org limiting applies (#219)', async () => {
+    it('sends a signed org-identity token on the aexa-ai call so per-org limiting applies (#219, superseded by #56)', async () => {
       primeOrgDataMocks();
       reportDb.create.mockResolvedValue({ id: 'rep-1', title: 'x' });
       (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -288,7 +293,13 @@ describe('report service — org scoping (issue #94)', () => {
       await report_service.generate_report_into_db(makeReq({ body: {} }));
 
       const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
-      expect(init.headers['X-Organization']).toBe(ORG_A);
+      // Issue #56: the old plain, self-reported X-Organization header is
+      // replaced by a signed, verifiable org-identity token — aexa-ai's
+      // limiter can no longer be fooled by a caller rotating a header value.
+      expect(init.headers['X-Organization']).toBeUndefined();
+      expect(init.headers).toHaveProperty('X-Org-Token');
+      const payload = jwtDecode(init.headers['X-Org-Token']);
+      expect(payload.org_account_id).toBe(ORG_A);
     });
   });
 

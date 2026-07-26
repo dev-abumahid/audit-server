@@ -1,5 +1,10 @@
+import jwt from 'jsonwebtoken';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
+
+// setup.ts sets AI_INTERNAL_SECRET = 'test-ai-internal-secret' before any
+// config import — the exact secret mintOrgToken signs the X-Org-Token with.
+const jwtDecode = (token: string) => jwt.verify(token, 'test-ai-internal-secret') as jwt.JwtPayload;
 
 vi.mock('fs', () => ({
   readFileSync: vi.fn(() => Buffer.from('')),
@@ -894,5 +899,75 @@ describe('ai service — check_upload_file_status_from_ai (issue #35)', () => {
       expect.stringContaining('/upload-status/file-1'),
       expect.anything(),
     );
+  });
+});
+
+// Issue #56: every aexa-ai call site in this file goes through
+// buildAiHeaders(ctx.organizationId) now instead of the bare
+// AI_INTERNAL_SECRET_HEADER. Spot-checks a representative call site of each
+// header shape used in this file: an inline JSON-body object (the majority
+// pattern) and a FormData upload (headers passed as the object directly,
+// no Content-Type override) — both must carry the signed org token.
+describe('ai service — signed org-identity token on aexa-ai calls (issue #56)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  it('generate_template_with_prompt_with_ai sends X-Internal-Secret and a signed X-Org-Token for the caller org', async () => {
+    // Headers are attached on the outbound request regardless of aexa-ai's
+    // response — non-ok (like every other error-handling test in this file)
+    // keeps this test from also depending on the downstream Zod-validated
+    // success-path schema, which is unrelated to what's under test here.
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse(false, 502));
+
+    await expect(
+      ai_service.generate_template_with_prompt_with_ai(
+        makeReq({ body: { prompt: 'fire safety' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 502 });
+
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(init.headers).toHaveProperty('X-Internal-Secret');
+    expect(init.headers).toHaveProperty('X-Org-Token');
+    expect(jwtDecode(init.headers['X-Org-Token']).org_account_id).toBe(ORG_A);
+  });
+
+  it('generate_template_with_pdf_with_ai (FormData upload) sends the same headers', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse(false, 502));
+
+    await expect(
+      ai_service.generate_template_with_pdf_with_ai(
+        makeReq({
+          file: { path: '/tmp/x', mimetype: 'application/pdf', originalname: 'a.pdf' },
+        } as never),
+      ),
+    ).rejects.toMatchObject({ statusCode: 502 });
+
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(init.headers).toHaveProperty('X-Internal-Secret');
+    expect(init.headers).toHaveProperty('X-Org-Token');
+    expect(jwtDecode(init.headers['X-Org-Token']).org_account_id).toBe(ORG_A);
+  });
+
+  it('check_upload_file_status_from_ai (GET, headers-only init) sends the same headers', async () => {
+    const pineconeDb = prisma.pineconeDocument as unknown as Record<
+      string,
+      ReturnType<typeof vi.fn>
+    >;
+    pineconeDb.findFirst.mockResolvedValue({ id: 'doc-1', fileId: 'file-1', orgAccountId: ORG_A });
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ status: 'completed' }),
+    });
+
+    await ai_service.check_upload_file_status_from_ai(makeReq({ params: { fileId: 'file-1' } }));
+
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(init.headers).toHaveProperty('X-Internal-Secret');
+    expect(init.headers).toHaveProperty('X-Org-Token');
+    expect(jwtDecode(init.headers['X-Org-Token']).org_account_id).toBe(ORG_A);
   });
 });

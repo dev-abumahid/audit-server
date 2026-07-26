@@ -1,6 +1,11 @@
 import { Prisma } from '@prisma/client';
+import jwt from 'jsonwebtoken';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, ORG_B, makeReq } from '../helpers/makeReq.js';
+
+// setup.ts sets AI_INTERNAL_SECRET = 'test-ai-internal-secret' before any
+// config import — the exact secret mintOrgToken signs the X-Org-Token with.
+const jwtDecode = (token: string) => jwt.verify(token, 'test-ai-internal-secret') as jwt.JwtPayload;
 
 vi.mock('../../app/lib/logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -382,6 +387,21 @@ describe('intelligence service', () => {
       expect(runDb.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ org_account_id: ORG_A, run_type: 'PREDICT' }),
       });
+    });
+
+    it('predict_into_db sends the shared internal secret and a signed org-identity token on the aexa-ai call (#56)', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(mockAiResponse(true, { score_7d: 1, score_30d: 2 }));
+      vi.stubGlobal('fetch', fetchMock);
+      runDb.create.mockResolvedValue({ id: 'run-1', run_type: 'PREDICT' });
+
+      await intelligence_service.predict_into_db(makeReq());
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.headers).toHaveProperty('X-Internal-Secret');
+      expect(init.headers).toHaveProperty('X-Org-Token');
+      expect(jwtDecode(init.headers['X-Org-Token']).org_account_id).toBe(ORG_A);
     });
 
     it('generate_mitigations_into_db persists an IntelligenceRun of type MITIGATIONS', async () => {

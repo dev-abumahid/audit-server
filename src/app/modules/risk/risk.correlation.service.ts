@@ -4,7 +4,7 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { applyActionScope, resolveCallerOrgContext } from '../../utils/org_scope.js';
-import { AI_INTERNAL_SECRET_HEADER, wrapAiServiceError } from '../ai/ai.service.js';
+import { buildAiHeaders, wrapAiServiceError } from '../ai/ai.service.js';
 
 /**
  * aexa-frontend#142 — GET /risk/correlation-matrix
@@ -215,7 +215,7 @@ const run_root_cause_bucketing = async (req: Request) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...AI_INTERNAL_SECRET_HEADER,
+        ...buildAiHeaders(ctx.organizationId),
       },
       body: JSON.stringify(requestBody),
     });

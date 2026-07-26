@@ -37,9 +37,14 @@ vi.mock('../../app/lib/prisma.js', () => ({
 }));
 
 import * as fs from 'fs';
+import jwt from 'jsonwebtoken';
 import { prisma } from '../../app/lib/prisma.js';
 import uploadCloud from '../../app/utils/cloudinary.js';
 import { note_service } from '../../app/modules/note/note.service.js';
+
+// setup.ts sets AI_INTERNAL_SECRET = 'test-ai-internal-secret' before any
+// config import — the exact secret mintOrgToken signs the X-Org-Token with.
+const jwtDecode = (token: string) => jwt.verify(token, 'test-ai-internal-secret') as jwt.JwtPayload;
 
 const mockUploadCloud = vi.mocked(uploadCloud);
 const mockUnlinkSync = vi.mocked(fs.unlinkSync);
@@ -304,6 +309,27 @@ describe('note service — org scoping', () => {
       // the "does not double-delete" regression test below for the case
       // that actually exercises this.
       expect(mockUnlinkSync).not.toHaveBeenCalled();
+    });
+
+    it('sends the signed org-identity token and the shared internal secret on the aexa-ai call (#56)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ title: 'T', extracted_text: 'X' }),
+      });
+      mockUploadCloud.mockResolvedValue({ secure_url: 'https://s3.example.com/a.pdf' } as never);
+      db.create.mockResolvedValue({});
+
+      await note_service.extract_note_from_any_file_or_image_and_save_into_db(
+        makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+      );
+
+      const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(init.headers).toHaveProperty('X-Internal-Secret');
+      expect(init.headers).toHaveProperty('X-Org-Token');
+      const payload = jwtDecode(init.headers['X-Org-Token']);
+      expect(payload.org_account_id).toBe(ORG_A);
     });
 
     it('deletes the temp file even when the AI service responds with a non-ok status (#112)', async () => {

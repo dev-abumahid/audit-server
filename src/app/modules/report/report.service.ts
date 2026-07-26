@@ -21,7 +21,7 @@ import {
   type ReportContent,
   type ReportRiskApprovalStatus,
 } from '../../utils/report_pdf.js';
-import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
+import { buildAiHeaders } from '../ai/ai.service.js';
 import {
   deriveApprovalState,
   type RiskApprovalDisplayState,
@@ -220,14 +220,16 @@ const callReportContentAi = async (
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...AI_INTERNAL_SECRET_HEADER,
         // aexa-ai's /report_content is @limiter.limit(expensive) and its
-        // get_org_key (app/limiter.py) keys that budget on the X-Organization
-        // header, falling back to remote IP. Without this header every org fell
-        // through to aexa-server's single shared IP, so one org's heavy use
-        // starved every other org's report generation. Send the caller's org id
-        // so the per-org bucket actually applies (#219).
-        'X-Organization': organizationId,
+        // get_org_key (app/limiter.py) keys that budget on the caller's real
+        // org so one org's heavy use can't starve every other org's report
+        // generation (#219). Originally sent as the plain, self-reported
+        // X-Organization header; issue #56 replaced that with a signed,
+        // verified org-identity token (buildAiHeaders) that aexa-ai's
+        // limiter now prefers — X-Organization is dropped here since the
+        // signed token supersedes it and aexa-ai's fallback chain no longer
+        // needs it from this call site.
+        ...buildAiHeaders(organizationId),
       },
       body: JSON.stringify({ report_type: SUPPORTED_TYPE, ...input }),
       signal: controller.signal,
