@@ -50,6 +50,14 @@ vi.mock('../../app/lib/prisma.js', () => ({
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    // aexa-server#252: finding closure maker-checker workflow.
+    actionClosureApproval: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
+      create: vi.fn(),
+      updateMany: vi.fn(),
+    },
     orgAuditLog: {
       create: vi.fn(),
     },
@@ -57,6 +65,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findFirst: vi.fn(),
       findUnique: vi.fn(),
     },
+    // aexa-server#252: update_action_into_db now wraps the finding update
+    // and the closure-invalidation-on-edit hook in a $transaction, same
+    // pattern as risk.service.ts's #203 precedent. The mock runs the
+    // interactive callback with the same mocked prisma as the tx client.
+    $transaction: vi.fn(),
   },
 }));
 
@@ -77,6 +90,11 @@ const dbAuditEngagement = prisma.auditEngagement as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
+const closureDb = prisma.actionClosureApproval as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const txFn = (prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }).$transaction;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const assignmentDb = prisma.inspectionAssignment as unknown as Record<
@@ -118,6 +136,11 @@ describe('action service — org scoping (ticket #6)', () => {
     // backward-compat ADMIN-of-self fallback (org anchor === caller's own
     // accountId).
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // aexa-server#252: update_action_into_db wraps the update + closure-
+    // invalidation-on-edit hook in a $transaction; default to no live
+    // closure cycle (the common case) unless a test overrides it.
+    txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
+    closureDb.findMany.mockResolvedValue([]);
   });
 
   // ── getAll ───────────────────────────────────────────────────────────────
@@ -334,6 +357,39 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(db.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ orgAccountId: ORG_A }) }),
       );
+    });
+
+    // aexa-server#252: a finding can't be born already closed — that would
+    // bypass the closure verification workflow entirely.
+    describe('closure verification (#252)', () => {
+      it.each(['COMPLETE', 'CANT_DO'])(
+        'rejects creating a finding with status: %s',
+        async (status) => {
+          await expect(
+            action_service.create_action_into_db(
+              makeReq({ body: { inspectionId: 'insp-1', title: 'x', status } }),
+            ),
+          ).rejects.toMatchObject({ statusCode: 400 });
+
+          expect(dbInspection.findFirst).not.toHaveBeenCalled();
+          expect(db.create).not.toHaveBeenCalled();
+        },
+      );
+
+      it('allows creating a finding with status: TO_DO or IN_PROGRESS', async () => {
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-1',
+          siteId: 'site-1',
+          orgAccountId: ORG_A,
+        });
+        db.create.mockResolvedValue({});
+
+        await action_service.create_action_into_db(
+          makeReq({ body: { inspectionId: 'insp-1', title: 'x', status: 'IN_PROGRESS' } }),
+        );
+
+        expect(db.create).toHaveBeenCalled();
+      });
     });
 
     // Issue #97: no extra role gate needed on create — assertCanWriteToInspection
@@ -867,6 +923,98 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(db.update).not.toHaveBeenCalled();
     });
 
+    // aexa-server#252: COMPLETE/CANT_DO are only ever reached via an
+    // APPROVED closure cycle, never a direct PATCH.
+    describe('closure verification (#252)', () => {
+      it.each(['COMPLETE', 'CANT_DO'])(
+        'rejects a direct PATCH setting status: %s',
+        async (status) => {
+          db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+
+          await expect(
+            action_service.update_action_into_db(
+              makeReq({ params: { id: 'a1' }, body: { status } }),
+            ),
+          ).rejects.toMatchObject({ statusCode: 400 });
+
+          expect(db.update).not.toHaveBeenCalled();
+        },
+      );
+
+      it('allows a direct PATCH setting status: TO_DO or IN_PROGRESS', async () => {
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+        db.update.mockResolvedValue({});
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { status: 'IN_PROGRESS' } }),
+        );
+
+        expect(db.update).toHaveBeenCalled();
+      });
+
+      // invalidateLiveClosureApprovalsOnEdit resolves the real Organization.id
+      // via requireCallerOrganizationId, which needs a real OrgMember row (the
+      // default ADMIN-of-self fallback has no Organization to resolve) — same
+      // requirement risk.approval.service.ts's equivalent hook has.
+      const REAL_ORG_ID = 'real-org-00000000-0000-0000-0000-000000000252';
+      const mockRealOrgMembership = () => {
+        orgMemberDb.findUnique.mockResolvedValue({
+          id: 'caller-member-00000000-0000-0000-0000-000000000252',
+          organizationId: REAL_ORG_ID,
+          accountId: ORG_A,
+          role: 'ADMIN',
+          status: 'ACTIVE',
+          expiresAt: null,
+        });
+        organizationDb.findUnique.mockResolvedValue({ id: REAL_ORG_ID, anchorAccountId: ORG_A });
+      };
+
+      it('invalidates a live closure cycle when the finding is edited', async () => {
+        mockRealOrgMembership();
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+        db.update.mockResolvedValue({ id: 'a1' });
+        closureDb.findMany.mockResolvedValue([{ id: 'ca-1' }]);
+        closureDb.updateMany.mockResolvedValue({ count: 1 });
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { title: 'Revised' } }),
+        );
+
+        expect(closureDb.updateMany).toHaveBeenCalledWith({
+          where: { actionId: 'a1', invalidatedAt: null, status: 'PENDING_APPROVAL' },
+          data: { invalidatedAt: expect.any(Date), invalidatedById: ORG_A },
+        });
+      });
+
+      it('does NOT touch closure cycles when the edited finding has none live', async () => {
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+        db.update.mockResolvedValue({ id: 'a1' });
+        closureDb.findMany.mockResolvedValue([]);
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { title: 'Revised' } }),
+        );
+
+        expect(closureDb.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('wraps the finding update and the closure invalidation in a single $transaction', async () => {
+        mockRealOrgMembership();
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+        db.update.mockResolvedValue({ id: 'a1' });
+        closureDb.findMany.mockResolvedValue([{ id: 'ca-1' }]);
+        closureDb.updateMany.mockResolvedValue({ count: 1 });
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { title: 'Revised' } }),
+        );
+
+        expect(txFn).toHaveBeenCalledTimes(1);
+        expect(db.update).toHaveBeenCalled();
+        expect(closureDb.updateMany).toHaveBeenCalled();
+      });
+    });
+
     it('updates attachments when provided', async () => {
       db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
       db.update.mockResolvedValue({});
@@ -1331,7 +1479,7 @@ describe('action service — org scoping (ticket #6)', () => {
       db.update.mockResolvedValue({});
 
       await action_service.update_action_into_db(
-        makeReq({ params: { id: 'action-1' }, body: { status: 'COMPLETE' } }),
+        makeReq({ params: { id: 'action-1' }, body: { status: 'IN_PROGRESS' } }),
       );
 
       expect(db.update).toHaveBeenCalled();
@@ -1351,7 +1499,7 @@ describe('action service — org scoping (ticket #6)', () => {
         makeReq({
           params: { id: 'action-1' },
           body: {
-            status: 'COMPLETE',
+            status: 'IN_PROGRESS',
             orgAccountId: 'other-org',
             inspectionId: 'other-inspection',
             siteId: 'other-site',
@@ -1360,7 +1508,7 @@ describe('action service — org scoping (ticket #6)', () => {
       );
 
       const callArg = db.update.mock.calls[0][0];
-      expect(callArg.data).toEqual({ status: 'COMPLETE' });
+      expect(callArg.data).toEqual({ status: 'IN_PROGRESS' });
       expect(callArg.data.orgAccountId).toBeUndefined();
       expect(callArg.data.inspectionId).toBeUndefined();
       expect(callArg.data.siteId).toBeUndefined();
@@ -1585,7 +1733,7 @@ describe('action service — org scoping (ticket #6)', () => {
         db.update.mockResolvedValue({});
 
         await action_service.update_action_into_db(
-          makeReq({ params: { id: 'action-1' }, body: { status: 'COMPLETE' } }),
+          makeReq({ params: { id: 'action-1' }, body: { status: 'IN_PROGRESS' } }),
         );
 
         expect(db.update).toHaveBeenCalled();
@@ -2409,6 +2557,10 @@ describe('action service — external Light User sub-assignment (issue #55 slice
   beforeEach(() => {
     vi.clearAllMocks();
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // aexa-server#252: update_action_for_external_member now wraps its
+    // update + closure-invalidation-on-edit hook in a $transaction too.
+    txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
+    closureDb.findMany.mockResolvedValue([]);
   });
 
   describe('assign_light_user_to_action (externalOrgMemberId)', () => {
@@ -2686,6 +2838,59 @@ describe('action service — external Light User sub-assignment (issue #55 slice
       ).rejects.toMatchObject({ statusCode: 403 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    // aexa-server#252: an external Light User is exactly the "person
+    // remediating closes their own finding" case this ticket exists to fix.
+    it.each(['COMPLETE', 'CANT_DO'])(
+      'rejects a direct PATCH setting status: %s',
+      async (status) => {
+        db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+
+        await expect(
+          action_service.update_action_for_external_member(
+            makeReq({
+              params: { id: 'action-1' },
+              body: { status },
+              externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+            } as never),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it('invalidates a live closure cycle when an external Light User edits the finding, using orgId from ExternalCallerContext', async () => {
+      const REAL_ORG_ID = 'real-org-00000000-0000-0000-0000-000000000252';
+      db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      db.update.mockResolvedValue({ id: 'action-1' });
+      closureDb.findMany.mockResolvedValue([{ id: 'ca-1' }]);
+      closureDb.updateMany.mockResolvedValue({ count: 1 });
+
+      await action_service.update_action_for_external_member(
+        makeReq({
+          params: { id: 'action-1' },
+          body: { actionTitle: 'Revised' },
+          externalMember: {
+            externalOrgMemberId: EXTERNAL_MEMBER_ID,
+            organizationId: ANCHOR,
+            orgId: REAL_ORG_ID,
+          },
+        } as never),
+      );
+
+      expect(closureDb.updateMany).toHaveBeenCalledWith({
+        where: { actionId: 'action-1', invalidatedAt: null, status: 'PENDING_APPROVAL' },
+        data: { invalidatedAt: expect.any(Date), invalidatedById: EXTERNAL_MEMBER_ID },
+      });
+      // The crux of the fix: the audit write must use orgId (the real
+      // Organization.id), NOT organizationId (the anchor Account.id) —
+      // those are two different fields on ExternalCallerContext.
+      const [auditArg] = (prisma.orgAuditLog.create as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(auditArg.data).toMatchObject({ organizationId: REAL_ORG_ID });
     });
 
     it('throws 404 for another org action', async () => {

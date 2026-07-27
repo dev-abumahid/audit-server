@@ -679,7 +679,11 @@ export const recordOrgAuditEvent = async (entry: {
     | 'RISK_SUBMITTED_FOR_APPROVAL'
     | 'RISK_APPROVAL_APPROVED'
     | 'RISK_APPROVAL_REJECTED'
-    | 'RISK_APPROVAL_INVALIDATED';
+    | 'RISK_APPROVAL_INVALIDATED'
+    | 'ACTION_CLOSURE_SUBMITTED'
+    | 'ACTION_CLOSURE_APPROVED'
+    | 'ACTION_CLOSURE_REJECTED'
+    | 'ACTION_CLOSURE_INVALIDATED';
   actorAccountId?: string | null;
   subjectOrgMemberId?: string | null;
   subjectExternalOrgMemberId?: string | null;

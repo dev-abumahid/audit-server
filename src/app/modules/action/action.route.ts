@@ -62,6 +62,26 @@ router.delete(
 );
 router.get('/:id/assignments', auth('ORGANIZATION'), action_controller.get_finding_assignments);
 
+// aexa-server#252: finding closure maker-checker workflow. Submission is
+// nested under /:id (it's about one specific finding); approve/reject
+// mirror the assignments pattern above (not nested under /:id — a
+// verifier reviews from a pending-closures list, not necessarily while
+// looking at one specific finding).
+router.post(
+  '/:id/closure/submit',
+  auth('ORGANIZATION'),
+  RequestValidator(action_validations.submit_action_closure),
+  action_controller.submit_action_closure,
+);
+router.get('/:id/closure', auth('ORGANIZATION'), action_controller.get_action_closure_state);
+router.post('/closure/:id/approve', auth('ORGANIZATION'), action_controller.approve_action_closure);
+router.post(
+  '/closure/:id/reject',
+  auth('ORGANIZATION'),
+  RequestValidator(action_validations.reject_action_closure),
+  action_controller.reject_action_closure,
+);
+
 // Self-scoped — any member can see their own sub-assignments (including
 // pending/rejected ones), since there's no cross-member data exposed. Not
 // nested under /:id since it's not about one finding.

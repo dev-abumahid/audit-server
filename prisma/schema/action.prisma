@@ -151,6 +151,9 @@ model Action {
     // Slice-1 (#55) prep
     findingAssignments FindingAssignment[]
 
+    // aexa-server#252: finding closure maker-checker workflow.
+    closureApprovals ActionClosureApproval[]
+
     // "Assigned Responsible" — who's nominally on the hook for this
     // finding. Deliberately NOT FindingAssignment: that model is a real
     // access-control mechanism (Light User sub-assignment, approval-gated,
@@ -211,4 +214,67 @@ model ActionResponsible {
 
     @@unique([actionId, orgMemberId])
     @@index([orgMemberId])
+}
+
+// aexa-server#252 — finding closure maker-checker workflow. IIA Standard
+// 2500.A1 requires a follow-up process ensuring corrective actions were
+// effectively implemented (or that risk was formally accepted), not a
+// self-report — previously update_action_into_db wrote `status` with no
+// state-machine at all, and a Light User sub-assigned to a finding could
+// mark it COMPLETE themselves with no independent check.
+//
+// Structural twin of RiskApproval (risk.prisma) — same submit -> pending ->
+// approve/reject shape, same invalidatedAt soft-supersede-on-edit, same
+// "at most one live cycle" partial unique index (see this migration's raw
+// SQL, no Prisma DSL equivalent). The one addition: `requestedStatus`,
+// since a finding's closure cycle must record WHICH terminal status
+// (COMPLETE or CANT_DO) is being requested — RiskApproval has no
+// equivalent because a Risk's operational status isn't gated by its
+// approval cycle the way Action.status now is for its two terminal values.
+//
+// CANT_DO (risk acceptance, 2500.A1's other outcome) deliberately shares
+// this exact flow rather than a separate lighter-weight one — no compelling
+// reason surfaced to treat "management accepted the risk" as needing less
+// rigor than "the remediation was verified effective".
+enum ActionClosureApprovalStatus {
+    PENDING_APPROVAL
+    APPROVED
+    REJECTED
+}
+
+model ActionClosureApproval {
+    id       String @id @default(uuid())
+    actionId String
+    action   Action @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+    status ActionClosureApprovalStatus @default(PENDING_APPROVAL)
+    // The terminal status this cycle is requesting — COMPLETE or CANT_DO.
+    // Only applied to Action.status once this cycle is APPROVED (see
+    // action.closure.service.ts's approve_action_closure).
+    requestedStatus STATUS
+
+    // accountId of whoever submitted the closure request. Plain string,
+    // mirroring RiskApproval.submittedById.
+    submittedById String
+    // accountId of the ADMIN/LEAD_AUDITOR who approved/rejected; null while
+    // pending. Maker-checker separation (action.closure.service.ts):
+    // decidedById can never equal submittedById for the same cycle.
+    decidedById String?
+    decidedAt   DateTime?
+    // Required on REJECTED so the reviewer's reason travels back to the
+    // submitter, same precedent as RiskApproval.decisionNote.
+    decisionNote String?
+
+    // Soft-supersede: editing the finding after a cycle started sets
+    // invalidatedAt, forcing a resubmission — the content being closed has
+    // changed, so the prior verification no longer reflects reality. Same
+    // shape as RiskApproval.invalidatedAt.
+    invalidatedAt   DateTime?
+    invalidatedById String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([actionId])
+    @@index([status])
 }

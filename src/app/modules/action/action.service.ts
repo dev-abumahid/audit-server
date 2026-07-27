@@ -4,6 +4,7 @@ import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
+import { action_closure_service, isClosureTerminalStatus } from './action.closure.service.js';
 import {
   applyActionScope,
   assertCanWriteOrgResource,
@@ -171,6 +172,17 @@ const create_action_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   const body = req.body;
+
+  // aexa-server#252: a finding can't be born already closed — that would
+  // bypass the closure verification workflow entirely (see
+  // update_action_into_db's identical guard for why COMPLETE/CANT_DO are
+  // gated).
+  if (isClosureTerminalStatus(body.status)) {
+    throw new AppError(
+      `A finding cannot be created with status ${body.status} — create it, then submit it for closure once ready (POST /action/:id/closure/submit).`,
+      400,
+    );
+  }
 
   const inspection = await prisma.inspection.findFirst({
     where: { id: body.inspectionId, orgAccountId: ctx.organizationId },
@@ -344,39 +356,65 @@ const update_action_into_db = async (req: Request) => {
     }
   }
 
-  const result = await prisma.action.update({
-    where: { id },
-    data: {
-      ...(req.body.actionTitle !== undefined && { actionTitle: req.body.actionTitle }),
-      ...(req.body.actionDisc !== undefined && { actionDisc: req.body.actionDisc }),
-      // aexa-server#244: Five Cs fields ARE writable on update (unlike
-      // complianceObligationId/auditEngagementId, which stay set-once) —
-      // internal (ADMIN/LEAD_AUDITOR/sub-assigned LIGHT_USER) path only; the
-      // external-member update path below deliberately does NOT accept
-      // these, same reasoning as line_of_defense being restricted to the
-      // stricter internal gate — an external Light User works the
-      // remediation, not the formal finding characterization.
-      ...(req.body.criteria !== undefined && { criteria: req.body.criteria }),
-      ...(req.body.condition !== undefined && { condition: req.body.condition }),
-      ...(req.body.cause !== undefined && { cause: req.body.cause }),
-      ...(req.body.effect !== undefined && { effect: req.body.effect }),
-      ...(req.body.priority !== undefined && { priority: req.body.priority }),
-      ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
-      ...(req.body.status !== undefined && { status: req.body.status }),
-      ...(req.body.attachments !== undefined && { attachments: req.body.attachments }),
-      ...(req.body.line_of_defense !== undefined && {
-        line_of_defense: req.body.line_of_defense,
-      }),
-      // Full replace, not a merge — matches how the frontend's multi-select
-      // submits the complete desired set every time, not a delta.
-      ...(req.body.assignBy !== undefined && {
-        responsibleAssignees: {
-          deleteMany: {},
-          create: (req.body.assignBy as string[]).map((orgMemberId) => ({ orgMemberId })),
-        },
-      }),
-    },
-    include: { ...RESPONSIBLE_INCLUDE },
+  // aexa-server#252: a finding's closure is no longer a self-report — COMPLETE
+  // and CANT_DO are only ever reached via an APPROVED closure cycle (see
+  // action.closure.service.ts), not a direct PATCH. TO_DO/IN_PROGRESS (and
+  // reverting away from a terminal status) are unaffected; only a PATCH that
+  // would itself set one of the two terminal values is blocked here.
+  if (isClosureTerminalStatus(req.body.status)) {
+    throw new AppError(
+      `A finding cannot be set to ${req.body.status} directly — submit it for closure instead (POST /action/:id/closure/submit).`,
+      400,
+    );
+  }
+
+  // aexa-server#252: the finding update and the closure-cycle invalidation
+  // must commit or roll back together, same rationale as risk.service.ts's
+  // #203 precedent — a crash between them must not leave an edited finding
+  // still wearing a live PENDING_APPROVAL closure badge for content that no
+  // longer exists.
+  const result = await prisma.$transaction(async (tx) => {
+    const updated = await tx.action.update({
+      where: { id },
+      data: {
+        ...(req.body.actionTitle !== undefined && { actionTitle: req.body.actionTitle }),
+        ...(req.body.actionDisc !== undefined && { actionDisc: req.body.actionDisc }),
+        // aexa-server#244: Five Cs fields ARE writable on update (unlike
+        // complianceObligationId/auditEngagementId, which stay set-once) —
+        // internal (ADMIN/LEAD_AUDITOR/sub-assigned LIGHT_USER) path only; the
+        // external-member update path below deliberately does NOT accept
+        // these, same reasoning as line_of_defense being restricted to the
+        // stricter internal gate — an external Light User works the
+        // remediation, not the formal finding characterization.
+        ...(req.body.criteria !== undefined && { criteria: req.body.criteria }),
+        ...(req.body.condition !== undefined && { condition: req.body.condition }),
+        ...(req.body.cause !== undefined && { cause: req.body.cause }),
+        ...(req.body.effect !== undefined && { effect: req.body.effect }),
+        ...(req.body.priority !== undefined && { priority: req.body.priority }),
+        ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
+        ...(req.body.status !== undefined && { status: req.body.status }),
+        ...(req.body.attachments !== undefined && { attachments: req.body.attachments }),
+        ...(req.body.line_of_defense !== undefined && {
+          line_of_defense: req.body.line_of_defense,
+        }),
+        // Full replace, not a merge — matches how the frontend's multi-select
+        // submits the complete desired set every time, not a delta.
+        ...(req.body.assignBy !== undefined && {
+          responsibleAssignees: {
+            deleteMany: {},
+            create: (req.body.assignBy as string[]).map((orgMemberId) => ({ orgMemberId })),
+          },
+        }),
+      },
+      include: { ...RESPONSIBLE_INCLUDE },
+    });
+    await action_closure_service.invalidateLiveClosureApprovalsOnEdit(
+      id,
+      () => requireCallerOrganizationId(ctx),
+      user.accountId,
+      tx,
+    );
+    return updated;
   });
   return shapeResponsibleAssignees(result);
 };
@@ -944,21 +982,47 @@ const update_action_for_external_member = async (req: Request) => {
   await assertCanWriteToActionForExternalMember(externalMember.externalOrgMemberId, {
     id: existing.id,
   });
+  // aexa-server#252: same closure-verification guard as
+  // update_action_into_db — an external Light User is exactly the "person
+  // remediating closes their own finding" case #252 exists to fix, so this
+  // path is gated identically.
+  if (isClosureTerminalStatus(req.body.status)) {
+    throw new AppError(
+      `A finding cannot be set to ${req.body.status} directly — submit it for closure instead (POST /action/:id/closure/submit).`,
+      400,
+    );
+  }
   // assignBy deliberately not accepted here — an external Light User can
   // update the finding they were sub-assigned, not reassign who else is
   // responsible for it. Still included on the read-back below so the
   // response shape matches IAction the same as every other endpoint that
   // returns an Action.
-  const result = await prisma.action.update({
-    where: { id },
-    data: {
-      ...(req.body.actionTitle !== undefined && { actionTitle: req.body.actionTitle }),
-      ...(req.body.actionDisc !== undefined && { actionDisc: req.body.actionDisc }),
-      ...(req.body.priority !== undefined && { priority: req.body.priority }),
-      ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
-      ...(req.body.status !== undefined && { status: req.body.status }),
-    },
-    include: { ...RESPONSIBLE_INCLUDE },
+  //
+  // aexa-server#252: same $transaction + invalidation-on-edit as
+  // update_action_into_db — an external Light User editing finding content
+  // while a closure cycle is pending must force a fresh submission too, not
+  // just the internal path. Uses ExternalCallerContext.orgId directly (the
+  // real Organization.id) rather than requireCallerOrganizationId(ctx),
+  // which needs a CallerOrgContext this caller doesn't have.
+  const result = await prisma.$transaction(async (tx) => {
+    const updated = await tx.action.update({
+      where: { id },
+      data: {
+        ...(req.body.actionTitle !== undefined && { actionTitle: req.body.actionTitle }),
+        ...(req.body.actionDisc !== undefined && { actionDisc: req.body.actionDisc }),
+        ...(req.body.priority !== undefined && { priority: req.body.priority }),
+        ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
+        ...(req.body.status !== undefined && { status: req.body.status }),
+      },
+      include: { ...RESPONSIBLE_INCLUDE },
+    });
+    await action_closure_service.invalidateLiveClosureApprovalsOnEdit(
+      id,
+      () => Promise.resolve(externalMember.orgId),
+      externalMember.externalOrgMemberId,
+      tx,
+    );
+    return updated;
   });
   return shapeResponsibleAssignees(result);
 };

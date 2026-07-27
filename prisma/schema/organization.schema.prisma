@@ -242,6 +242,13 @@ enum OrgAuditAction {
     RISK_APPROVAL_APPROVED
     RISK_APPROVAL_REJECTED
     RISK_APPROVAL_INVALIDATED
+    // aexa-server#252: finding closure maker-checker workflow, structural
+    // twin of the Risk approval events above — a finding's closure cycle
+    // carries actionId/closureApprovalId in metadata, same reasoning.
+    ACTION_CLOSURE_SUBMITTED
+    ACTION_CLOSURE_APPROVED
+    ACTION_CLOSURE_REJECTED
+    ACTION_CLOSURE_INVALIDATED
 }
 
 model OrgAuditLog {

@@ -178,4 +178,90 @@ export const actionSwaggerDocs = {
       },
     },
   },
+
+  // aexa-server#252: finding closure maker-checker workflow. A finding only
+  // ever reaches status COMPLETE/CANT_DO via an approved closure request —
+  // a direct PATCH /action/:id with either status is rejected (400).
+  '/api/action/{id}/closure/submit': {
+    post: {
+      tags: ['action'],
+      summary: 'Submit a finding for closure',
+      description:
+        "Requests a terminal status (COMPLETE or CANT_DO). Requires at least one attachment on the finding. Does not change the finding's status — only an approved closure request does.",
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            example: JSON.stringify({ requestedStatus: 'COMPLETE' }),
+          },
+        },
+      },
+      responses: {
+        200: { description: 'finding submitted for closure successfully' },
+        400: { description: 'invalid requestedStatus, or no evidence attachment' },
+        401: { description: 'unauthorized' },
+        404: { description: 'action not found' },
+        409: { description: 'a closure request is already live for this finding' },
+      },
+    },
+  },
+
+  '/api/action/{id}/closure': {
+    get: {
+      tags: ['action'],
+      summary: "Get a finding's closure state",
+      description: '',
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      responses: {
+        200: { description: 'finding closure state fetched successfully' },
+        401: { description: 'unauthorized' },
+        404: { description: 'action not found' },
+      },
+    },
+  },
+
+  '/api/action/closure/{id}/approve': {
+    post: {
+      tags: ['action'],
+      summary: 'Approve a finding closure request',
+      description:
+        'ADMIN/LEAD_AUDITOR only, and never the same person who submitted the request. Atomically applies the requested status to the finding.',
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      responses: {
+        200: { description: 'finding closure approved successfully' },
+        400: { description: 'not pending, or invalidated by an edit since submission' },
+        401: { description: 'unauthorized' },
+        403: { description: 'self-approval, or insufficient role' },
+        404: { description: 'closure request not found' },
+        409: { description: 'already decided or invalidated by another request' },
+      },
+    },
+  },
+
+  '/api/action/closure/{id}/reject': {
+    post: {
+      tags: ['action'],
+      summary: 'Reject a finding closure request',
+      description:
+        'ADMIN/LEAD_AUDITOR only, and never the same person who submitted the request. Requires a decisionNote. The finding is left untouched (it was never advanced while pending).',
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            example: JSON.stringify({ decisionNote: 'Evidence insufficient — please redo.' }),
+          },
+        },
+      },
+      responses: {
+        200: { description: 'finding closure rejected successfully' },
+        400: { description: 'missing decisionNote, not pending, or invalidated by an edit' },
+        401: { description: 'unauthorized' },
+        403: { description: 'self-rejection, or insufficient role' },
+        404: { description: 'closure request not found' },
+        409: { description: 'already decided or invalidated by another request' },
+      },
+    },
+  },
 };

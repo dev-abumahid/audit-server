@@ -153,6 +153,15 @@ const update_action_messages = z.object({
   message: z.string('Message text is required!').min(1),
 });
 
+// aexa-server#252: finding closure maker-checker workflow.
+const submit_action_closure = z.object({
+  requestedStatus: z.enum(['COMPLETE', 'CANT_DO']),
+});
+
+const reject_action_closure = z.object({
+  decisionNote: z.string().min(1, 'decisionNote is required when rejecting a closure request.'),
+});
+
 // Export
 export const action_validations = {
   create_action,
@@ -160,4 +169,6 @@ export const action_validations = {
   actionMessageSchema,
   assign_light_user,
   update_action_messages,
+  submit_action_closure,
+  reject_action_closure,
 };

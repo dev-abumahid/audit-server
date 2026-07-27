@@ -1,5 +1,6 @@
 import catchAsync from '../../utils/catch_async.js';
 import manageResponse from '../../utils/manage_response.js';
+import { action_closure_service } from './action.closure.service.js';
 import { action_service } from './action.service.js';
 
 const get_all_action = catchAsync(async (req, res) => {
@@ -189,6 +190,51 @@ const update_action_messages = catchAsync(async (req, res) => {
   });
 });
 
+// aexa-server#252: finding closure maker-checker workflow.
+const submit_action_closure = catchAsync(async (req, res) => {
+  const result = await action_closure_service.submit_action_for_closure(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Finding submitted for closure successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const approve_action_closure = catchAsync(async (req, res) => {
+  const result = await action_closure_service.approve_action_closure(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Finding closure approved successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const reject_action_closure = catchAsync(async (req, res) => {
+  const result = await action_closure_service.reject_action_closure(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Finding closure rejected successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const get_action_closure_state = catchAsync(async (req, res) => {
+  const result = await action_closure_service.get_action_closure_state(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Finding closure state fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const action_controller = {
   get_all_action,
   get_single_action,
@@ -207,4 +253,8 @@ export const action_controller = {
   get_single_action_external,
   update_action_external,
   update_action_messages,
+  submit_action_closure,
+  approve_action_closure,
+  reject_action_closure,
+  get_action_closure_state,
 };
