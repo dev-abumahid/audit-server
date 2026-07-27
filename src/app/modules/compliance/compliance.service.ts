@@ -7,6 +7,62 @@ import { JwtPayloadType } from '../../utils/JWT.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
+// aexa-server#243: due dates previously had zero teeth — an obligation 18
+// months past due_date with no attachments stayed "compliant" in the
+// scorecard forever, with no derived flag anywhere. Computed at read time
+// (same pattern as kri.service.ts's compute_kri_overdue), not a stored
+// column or an auto-degraded status: overdue is a passive signal a caller
+// can act on, not a silent rewrite of a user-set status. Deliberately does
+// NOT auto-force status out of 'compliant' — a bigger, more surprising
+// behavior change than this ticket's "which decision" framing asked to
+// settle outright, and the real fix for "a compliant obligation silently
+// goes stale" is the recurrence/re-attestation model (deferred — see the
+// file-level PR description) rather than a blunt auto-flip here. Also NOT
+// wired into a new Alert/BullMQ job: no scheduled-sweep infrastructure
+// exists in this codebase yet (same reasoning as kri.service.ts's overdue).
+//
+// 'not_applicable' is excluded, mirroring the scorecard's own N/A exclusion
+// (aexa-server#239/#240) — an obligation that doesn't apply to this org was
+// never going to be met by its due_date, so it isn't a real compliance gap.
+// Every other status (including 'compliant') is eligible: a "compliant"
+// obligation still sitting past its due_date with no re-attestation is
+// exactly the stale-data gap this ticket describes.
+export const compute_obligation_overdue = (
+  due_date: Date | null | undefined,
+  status: string,
+  now: Date = new Date(),
+): boolean => {
+  if (!due_date) return false;
+  if (status === 'not_applicable') return false;
+  return due_date.getTime() < now.getTime();
+};
+
+const with_overdue = <T extends { due_date: Date | null; status: string }>(
+  obligation: T,
+): T & { overdue: boolean } => ({
+  ...obligation,
+  overdue: compute_obligation_overdue(obligation.due_date, obligation.status),
+});
+
+// aexa-server#243: evidence was decorative — attachments were validated as
+// HTTPS URLs but never inspected by any business logic, so nothing required
+// evidence to claim "compliant". This is the concretely-buildable hard gate
+// the ticket posed as an option (vs. staying a soft/UI-only recommendation):
+// a GRC product whose value proposition includes audit-readiness can't let
+// an unbacked "compliant" claim through. Applies to the EFFECTIVE
+// (merged-with-existing, for an update) status/attachments — not just
+// whichever of the two fields the request happens to touch — so an edit
+// that leaves status: 'compliant' with zero attachments in place (e.g. a
+// pre-existing grandfathered row, or a request that clears attachments
+// without also downgrading status) is blocked too, not just a create/update
+// that explicitly sets both at once.
+const assertCompliantHasEvidence = (status: string, attachments: string[] | undefined): void => {
+  if (status !== 'compliant') return;
+  if (!attachments || attachments.length === 0) {
+    throw new AppError('A compliant obligation requires at least one evidence attachment.', 400);
+  }
+};
+
 const get_all_compliance_from_db = async (req: Request) => {
   const { searchTerm, status, domain, page, limit } = req.query;
   const user = req.user as JwtPayloadType;
@@ -58,7 +114,7 @@ const get_all_compliance_from_db = async (req: Request) => {
   ]);
 
   return {
-    data,
+    data: data.map(with_overdue),
     meta: buildPaginationMeta(pagination, total),
   };
 };
@@ -73,7 +129,7 @@ const get_single_compliance_from_db = async (req: Request) => {
   // Every sibling module's get_single_* throws 404 for a missing/cross-org
   // record rather than returning a bare 200 with data: null.
   if (!result) throw new AppError('Compliance obligation not found', 404);
-  return result;
+  return with_overdue(result);
 };
 
 /**
@@ -100,9 +156,10 @@ const create_compliance_into_db = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const payload = req.body;
   await assertSiteBelongsToOrg(payload.site_id, ctx.organizationId);
+  assertCompliantHasEvidence(payload.status, payload.attachments);
   payload.org_account_id = ctx.organizationId;
   const result = await prisma.complianceObligation.create({ data: payload });
-  return result;
+  return with_overdue(result);
 };
 
 const update_compliance_into_db = async (req: Request) => {
@@ -123,11 +180,18 @@ const update_compliance_into_db = async (req: Request) => {
   // integrity issue even though ownership of the *existing* row was verified
   // above. Same guard audit.service.ts / site.service.ts apply.
   const { org_account_id: _ignored, ...safeBody } = req.body;
+  // aexa-server#243: check the EFFECTIVE (merged) status/attachments, not
+  // just whichever of the two fields this particular PATCH happens to
+  // include — see assertCompliantHasEvidence's own comment for why.
+  assertCompliantHasEvidence(
+    safeBody.status ?? existing.status,
+    safeBody.attachments ?? existing.attachments,
+  );
   const result = await prisma.complianceObligation.update({
     where: { id },
     data: { ...safeBody, org_account_id: ctx.organizationId },
   });
-  return result;
+  return with_overdue(result);
 };
 
 const delete_compliance_from_db = async (req: Request) => {
@@ -228,6 +292,7 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
       domain: true,
       site_id: true,
       site: { select: { name: true } },
+      due_date: true,
     },
   });
 
@@ -239,6 +304,12 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
   const overallTotal = scorableObligations.length;
   const overallCompliant = scorableObligations.filter((o) => isCompliant(o.status)).length;
   const excludedNotApplicable = obligations.length - scorableObligations.length;
+  // aexa-server#243: whole-org overdue count, same rationale as
+  // statusCounts below (must stay correct once the obligation list is
+  // server-side paginated, can't be derived from a single page of rows).
+  const overdueCount = obligations.filter((o) =>
+    compute_obligation_overdue(o.due_date, o.status),
+  ).length;
 
   // Org-wide tally per status. The frontend summary cards (compliant /
   // non-compliant counts) need whole-org totals that stay correct once the
@@ -306,6 +377,7 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
   return {
     overall: scoreCell(overallCompliant, overallTotal),
     excludedNotApplicable,
+    overdueCount,
     statusCounts,
     byDomain: Array.from(domainMap.entries())
       .map(([domain, v]) => ({ domain, ...scoreCell(v.compliant, v.total) }))

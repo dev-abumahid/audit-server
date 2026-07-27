@@ -57,6 +57,10 @@ const create_compliance = z.object({
   owner: z.string().optional(),
   due_date: optionalDate,
   attachments: z.array(httpsUrl).optional(),
+  // aexa-server#243: which specific law/regulation/clause this obligation
+  // derives from (ISO 37301 obligations-register basis). Free text, same
+  // reasoning as `domain` staying a free string.
+  regulation_reference: z.string().optional(),
   ai_generated: z.boolean().optional(),
   is_edited: z.boolean().optional(),
   line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),

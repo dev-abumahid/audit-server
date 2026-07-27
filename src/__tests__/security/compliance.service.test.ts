@@ -30,7 +30,10 @@ vi.mock('../../app/utils/cloudinary.js', () => ({
 }));
 
 import { prisma } from '../../app/lib/prisma.js';
-import { compliance_service } from '../../app/modules/compliance/compliance.service.js';
+import {
+  compliance_service,
+  compute_obligation_overdue,
+} from '../../app/modules/compliance/compliance.service.js';
 import { compliance_validations } from '../../app/modules/compliance/compliance.validation.js';
 import uploadCloud from '../../app/utils/cloudinary.js';
 
@@ -55,6 +58,39 @@ const mockMembership = (role: 'ADMIN' | 'LEAD_AUDITOR' | 'LIGHT_USER' | 'VIEWER'
   });
   organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
 };
+
+describe('compute_obligation_overdue', () => {
+  const NOW = new Date('2026-07-26T12:00:00.000Z');
+  const daysAgo = (n: number) => new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000);
+  const daysFromNow = (n: number) => new Date(NOW.getTime() + n * 24 * 60 * 60 * 1000);
+
+  it('is false when there is no due_date', () => {
+    expect(compute_obligation_overdue(null, 'in_progress', NOW)).toBe(false);
+  });
+
+  it('is false when the due_date is in the future', () => {
+    expect(compute_obligation_overdue(daysFromNow(1), 'in_progress', NOW)).toBe(false);
+  });
+
+  it('is true once the due_date has passed', () => {
+    expect(compute_obligation_overdue(daysAgo(1), 'in_progress', NOW)).toBe(true);
+  });
+
+  // aexa-server#243: this is the specific gap the ticket describes — a
+  // "compliant" obligation sitting past its due_date with no re-attestation
+  // is exactly the stale-data problem, so it must still flag overdue (a
+  // passive signal, not an auto-downgrade of the stored status).
+  it('is true for a "compliant" obligation whose due_date has passed', () => {
+    expect(compute_obligation_overdue(daysAgo(1), 'compliant', NOW)).toBe(true);
+  });
+
+  // Mirrors the scorecard's own not_applicable exclusion (#239/#240): an
+  // obligation that doesn't apply to this org was never going to be met by
+  // its due_date, so it isn't a real compliance gap.
+  it('is false for a not_applicable obligation even with a past due_date', () => {
+    expect(compute_obligation_overdue(daysAgo(365), 'not_applicable', NOW)).toBe(false);
+  });
+});
 
 describe('compliance service — org scoping (issue #93)', () => {
   beforeEach(() => {
@@ -200,6 +236,26 @@ describe('compliance service — org scoping (issue #93)', () => {
         totalPage: 0,
       });
     });
+
+    // aexa-server#243: overdue is computed at read time (like the KRI
+    // module's `overdue`), so a list of obligations can flag a past-due one
+    // — including a "compliant" one — without a background job.
+    it('attaches computed overdue per obligation', async () => {
+      const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+      const future = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+      db.findMany.mockResolvedValue([
+        { id: 'c1', status: 'in_progress', due_date: past },
+        { id: 'c2', status: 'compliant', due_date: future },
+        { id: 'c3', status: 'not_applicable', due_date: past },
+      ]);
+      db.count.mockResolvedValue(3);
+
+      const result = await compliance_service.get_all_compliance_from_db(makeReq({ query: {} }));
+
+      expect(result.data.find((o) => o.id === 'c1')?.overdue).toBe(true);
+      expect(result.data.find((o) => o.id === 'c2')?.overdue).toBe(false);
+      expect(result.data.find((o) => o.id === 'c3')?.overdue).toBe(false);
+    });
   });
 
   describe('get_single_compliance_from_db', () => {
@@ -220,6 +276,22 @@ describe('compliance service — org scoping (issue #93)', () => {
         compliance_service.get_single_compliance_from_db(makeReq({ params: { id: 'org-b-c1' } })),
       ).rejects.toMatchObject({ statusCode: 404 });
     });
+
+    it('attaches computed overdue', async () => {
+      const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+      db.findUnique.mockResolvedValue({
+        id: 'c1',
+        org_account_id: ORG_A,
+        status: 'in_progress',
+        due_date: past,
+      });
+
+      const result = await compliance_service.get_single_compliance_from_db(
+        makeReq({ params: { id: 'c1' } }),
+      );
+
+      expect(result.overdue).toBe(true);
+    });
   });
 
   describe('create_compliance_into_db', () => {
@@ -232,6 +304,69 @@ describe('compliance service — org scoping (issue #93)', () => {
 
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.org_account_id).toBe(ORG_A);
+    });
+
+    // aexa-server#243: evidence was decorative — nothing required an
+    // attachment to claim "compliant". This is the hard gate the ticket
+    // posed as an option, now enforced on create.
+    describe('evidence gating for status: compliant (#243)', () => {
+      it('rejects a compliant obligation with no attachments', async () => {
+        await expect(
+          compliance_service.create_compliance_into_db(
+            makeReq({
+              body: { title: 'GDPR Art. 30', domain: 'Data Protection', status: 'compliant' },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+
+      it('rejects a compliant obligation with an explicitly empty attachments array', async () => {
+        await expect(
+          compliance_service.create_compliance_into_db(
+            makeReq({
+              body: {
+                title: 'GDPR Art. 30',
+                domain: 'Data Protection',
+                status: 'compliant',
+                attachments: [],
+              },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+
+      it('allows a compliant obligation with at least one attachment', async () => {
+        db.create.mockResolvedValue({});
+
+        await compliance_service.create_compliance_into_db(
+          makeReq({
+            body: {
+              title: 'GDPR Art. 30',
+              domain: 'Data Protection',
+              status: 'compliant',
+              attachments: ['https://cdn.example/evidence.pdf'],
+            },
+          }),
+        );
+
+        expect(db.create).toHaveBeenCalled();
+      });
+
+      it('does not gate a non-compliant status even with zero attachments', async () => {
+        db.create.mockResolvedValue({});
+
+        await compliance_service.create_compliance_into_db(
+          makeReq({
+            body: { title: 'GDPR Art. 30', domain: 'Data Protection', status: 'in_progress' },
+          }),
+        );
+
+        expect(db.create).toHaveBeenCalled();
+      });
     });
   });
 
@@ -256,6 +391,125 @@ describe('compliance service — org scoping (issue #93)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    describe('evidence gating for status: compliant (#243)', () => {
+      it('rejects setting status to compliant on an obligation with no existing attachments', async () => {
+        db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, attachments: [] });
+
+        await expect(
+          compliance_service.update_compliance_into_db(
+            makeReq({ params: { id: 'c1' }, body: { status: 'compliant' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.update).not.toHaveBeenCalled();
+      });
+
+      it('allows setting status to compliant when attachments are supplied in the same request', async () => {
+        db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, attachments: [] });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { status: 'compliant', attachments: ['https://cdn.example/e.pdf'] },
+          }),
+        );
+
+        expect(db.update).toHaveBeenCalled();
+      });
+
+      it('allows setting status to compliant when the existing row already has attachments', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          attachments: ['https://cdn.example/already-uploaded.pdf'],
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { status: 'compliant' } }),
+        );
+
+        expect(db.update).toHaveBeenCalled();
+      });
+
+      it('allows a legacy compliant-with-no-evidence row to get its first attachment via an update that does not touch status', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          status: 'compliant',
+          attachments: [],
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { attachments: ['https://cdn.example/first-evidence.pdf'] },
+          }),
+        );
+
+        expect(db.update).toHaveBeenCalled();
+      });
+
+      // The single most realistic accidental-PATCH scenario: someone edits
+      // an unrelated field on a legacy compliant-with-no-evidence row,
+      // touching neither status nor attachments. The effective state is
+      // still compliant + zero evidence, so this must still 400.
+      it('rejects a no-op-on-evidence update (unrelated field only) against a legacy compliant-with-no-evidence row', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          status: 'compliant',
+          attachments: [],
+        });
+
+        await expect(
+          compliance_service.update_compliance_into_db(
+            makeReq({ params: { id: 'c1' }, body: { title: 'Revised' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.update).not.toHaveBeenCalled();
+      });
+
+      // The effective (merged) state is checked, not just the touched
+      // fields — a request that clears attachments on an already-compliant
+      // row must not silently leave it "compliant" with zero evidence.
+      it('rejects clearing attachments to empty on an obligation that is already compliant', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          status: 'compliant',
+          attachments: ['https://cdn.example/e.pdf'],
+        });
+
+        await expect(
+          compliance_service.update_compliance_into_db(
+            makeReq({ params: { id: 'c1' }, body: { attachments: [] } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.update).not.toHaveBeenCalled();
+      });
+
+      it('does not gate an update that leaves status non-compliant, even with zero attachments', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          status: 'in_progress',
+          attachments: [],
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { title: 'Revised' } }),
+        );
+
+        expect(db.update).toHaveBeenCalled();
+      });
     });
   });
 
@@ -503,6 +757,37 @@ describe('compliance service — org scoping (issue #93)', () => {
         non_compliant: 1,
         in_progress: 1,
       });
+    });
+
+    // aexa-server#243: whole-org overdue count, same "must stay correct once
+    // the list is paginated" rationale as statusCounts above.
+    it('returns overdueCount across the whole org, including compliant-but-overdue obligations', async () => {
+      const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+      const future = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+      db.findMany.mockResolvedValue([
+        { status: 'in_progress', domain: 'Financial', site_id: null, site: null, due_date: past },
+        { status: 'compliant', domain: 'Financial', site_id: null, site: null, due_date: past },
+        {
+          status: 'compliant',
+          domain: 'Financial',
+          site_id: null,
+          site: null,
+          due_date: future,
+        },
+        {
+          status: 'not_applicable',
+          domain: 'Financial',
+          site_id: null,
+          site: null,
+          due_date: past,
+        },
+      ]);
+
+      const result = await compliance_service.get_compliance_scorecard_from_db(
+        makeReq({ query: {} }),
+      );
+
+      expect(result.overdueCount).toBe(2);
     });
 
     // Methodology audit finding: 'not_applicable' obligations must be
@@ -774,6 +1059,27 @@ describe('compliance validation schemas', () => {
         attachments: ['https://res.cloudinary.com/demo/raw/upload/v1/e.pdf'],
       });
       expect(parsed.attachments).toEqual(['https://res.cloudinary.com/demo/raw/upload/v1/e.pdf']);
+    });
+  });
+
+  describe('regulation_reference (aexa-server#243)', () => {
+    it('accepts a free-text regulatory source', async () => {
+      const parsed = await compliance_validations.create_compliance.parseAsync({
+        title: 'x',
+        domain: 'Financial',
+        status: 'pending',
+        regulation_reference: 'GDPR Art. 30(1)',
+      });
+      expect(parsed.regulation_reference).toBe('GDPR Art. 30(1)');
+    });
+
+    it('is optional', async () => {
+      const parsed = await compliance_validations.create_compliance.parseAsync({
+        title: 'x',
+        domain: 'Financial',
+        status: 'pending',
+      });
+      expect('regulation_reference' in parsed).toBe(false);
     });
   });
 });

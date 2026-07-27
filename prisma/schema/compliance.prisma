@@ -30,7 +30,21 @@ model ComplianceObligation {
     owner       String?
     due_date    DateTime?
     // Evidence URLs, same pattern as Action.attachments (Cloudinary upload).
+    // aexa-server#243: no longer purely decorative — compliance.service.ts's
+    // assertCompliantHasEvidence hard-gates status: 'compliant' on at least
+    // one entry here (a GRC product whose value proposition includes
+    // audit-readiness can't let an unbacked "compliant" claim through).
     attachments String[]  @default([])
+    // aexa-server#243: which specific law/regulation/clause this obligation
+    // derives from — a core ISO 37301 obligations-register column ("basis
+    // for monitoring, audit and reporting"), previously entirely absent.
+    // Free text, not a structured regulation+clause reference or a seeded
+    // taxonomy — same reasoning as Risk.category/ComplianceObligation.domain
+    // staying free strings paired with a curated frontend constant rather
+    // than a DB enum, and simplest to ship first; a structured reference
+    // table is a bigger, separate change if the free-text form proves
+    // insufficient in practice.
+    regulation_reference String?
 
     ai_generated Boolean @default(false)
     is_edited    Boolean @default(false)

@@ -17,6 +17,7 @@ export const complianceSwaggerDocs = {
               owner: 'Jane Doe',
               due_date: '2026-12-31T00:00:00Z',
               attachments: [],
+              regulation_reference: 'GDPR Art. 30(1)',
             }),
           },
         },
@@ -103,12 +104,21 @@ export const complianceSwaggerDocs = {
         required: true,
         content: {
           'application/json': {
-            example: JSON.stringify({ status: 'compliant', is_edited: true }),
+            // aexa-server#243: setting status: 'compliant' now requires at
+            // least one attachment (either supplied here or already present
+            // on the row) — see compliance.service.ts's
+            // assertCompliantHasEvidence.
+            example: JSON.stringify({
+              status: 'compliant',
+              is_edited: true,
+              attachments: ['https://res.cloudinary.com/demo/raw/upload/v1/evidence.pdf'],
+            }),
           },
         },
       },
       responses: {
         200: { description: 'compliance obligation updated successfully' },
+        400: { description: 'compliant status requires at least one evidence attachment' },
         500: { description: 'Validation error or internal server error' },
       },
     },
