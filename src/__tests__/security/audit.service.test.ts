@@ -384,17 +384,32 @@ describe('audit service — org scoping (issue #92)', () => {
       expect(db.update).not.toHaveBeenCalled();
     });
 
-    it('ADMIN can reassign line_of_defense', async () => {
+    // aexa-frontend#208: third-line independence — an ADMIN (management)
+    // must not be able to reclassify a third-line AuditEngagement's own
+    // classification. Only LEAD_AUDITOR may reassign now.
+    it('ADMIN cannot reassign line_of_defense (third-line independence)', async () => {
       mockMembership('ADMIN');
       db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ANCHOR });
-      db.update.mockResolvedValue({ id: 'a1', line_of_defense: 'FIRST' });
+
+      await expect(
+        audit_service.update_audit_into_db(
+          makeReq({ params: { id: 'a1' }, body: { line_of_defense: 'FIRST' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can still update other fields on the same request as long as line_of_defense is untouched', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ANCHOR });
+      db.update.mockResolvedValue({ id: 'a1', title: 'Renamed' });
 
       await audit_service.update_audit_into_db(
-        makeReq({ params: { id: 'a1' }, body: { line_of_defense: 'FIRST' } }),
+        makeReq({ params: { id: 'a1' }, body: { title: 'Renamed' } }),
       );
 
-      const callArg = db.update.mock.calls[0][0];
-      expect(callArg.data.line_of_defense).toBe('FIRST');
+      expect(db.update).toHaveBeenCalled();
     });
 
     it('LEAD_AUDITOR can reassign line_of_defense', async () => {

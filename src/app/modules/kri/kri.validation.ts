@@ -2,9 +2,13 @@ import { z } from 'zod';
 
 // #97: Three Lines of Defense classification. Not required on create — Kri
 // has a sensible schema-level default (SECOND, see kri.prisma). Reassignment
-// is further gated in kri.service.ts (only ADMIN/LEAD_AUDITOR via
-// assertCanWriteOrgResource, which already applies to the whole payload).
-const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+// is gated in kri.service.ts: ADMIN/LEAD_AUDITOR via assertCanWriteOrgResource
+// for the whole payload, plus (aexa-frontend#208) a stricter ADMIN-only
+// check specifically when line_of_defense itself is being changed — see
+// risk.validation.ts's identical comment for the third-line-independence
+// reasoning. GOVERNING_BODY (aexa-frontend#208) added as a 4th selectable
+// value.
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD', 'GOVERNING_BODY']);
 
 const create_kri = z
   .object({

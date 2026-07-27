@@ -24,7 +24,16 @@ const STATUS_ENUM = z.enum(['TO_DO', 'IN_PROGRESS', 'COMPLETE', 'CANT_DO']);
 // going forward is explicitly classified; existing rows stay NULL
 // ("Unclassified" in the UI) and are never forced through this requirement
 // via update_action, which keeps it optional (see below).
-const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+//
+// aexa-frontend#208: unlike the other 4 models, Action's line_of_defense
+// reassignment gate is NOT tightened by the new third-line-independence
+// check (assertCanReassignLineOfDefense) — Action deliberately serves both
+// roles by design (that's exactly why it has no default above), so there's
+// no single "which line owns this" answer to gate against the way there is
+// for Risk/Kri/ComplianceObligation (management-line) or AuditEngagement
+// (audit-line). It keeps the existing ADMIN-or-LEAD_AUDITOR gate
+// (action.service.ts). GOVERNING_BODY added as a 4th selectable value.
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD', 'GOVERNING_BODY']);
 
 // Message Schema
 const actionMessageSchema = z.object({

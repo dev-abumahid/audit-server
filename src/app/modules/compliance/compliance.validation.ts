@@ -2,10 +2,13 @@ import { z } from 'zod';
 
 // #97: Three Lines of Defense classification. Not required on create —
 // ComplianceObligation has a sensible schema-level default (SECOND, see
-// compliance.prisma). Reassignment is further gated in compliance.service.ts
-// (only ADMIN/LEAD_AUDITOR via assertCanWriteOrgResource, which already
-// applies to the whole payload).
-const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+// compliance.prisma). Reassignment is gated in compliance.service.ts:
+// ADMIN/LEAD_AUDITOR via assertCanWriteOrgResource for the whole payload,
+// plus (aexa-frontend#208) a stricter ADMIN-only check specifically when
+// line_of_defense itself is being changed — see risk.validation.ts's
+// identical comment for the third-line-independence reasoning.
+// GOVERNING_BODY (aexa-frontend#208) added as a 4th selectable value.
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD', 'GOVERNING_BODY']);
 
 // The frontend date inputs submit "" (empty string) when left blank, not
 // null/undefined. z.coerce.date() would turn "" into an Invalid Date and

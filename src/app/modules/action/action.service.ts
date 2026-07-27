@@ -320,6 +320,13 @@ const update_action_into_db = async (req: Request) => {
   // able to reclassify a finding's governance line. Only run this extra gate
   // when line_of_defense is actually part of the payload, same "only check
   // what's touched" pattern assignBy already uses just below.
+  //
+  // aexa-frontend#208: unlike Risk/Kri/ComplianceObligation/AuditEngagement,
+  // this stays the plain ADMIN-or-LEAD_AUDITOR gate — NOT the stricter
+  // assertCanReassignLineOfDefense split those 4 models now use. Action
+  // deliberately covers both the management line and the audit line by
+  // design (no schema default — see action.prisma), so there's no single
+  // "which line owns this" answer to gate reassignment against.
   if (req.body.line_of_defense !== undefined) {
     assertCanWriteOrgResource(ctx);
   }

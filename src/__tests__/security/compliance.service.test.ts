@@ -557,17 +557,32 @@ describe('compliance service — org scoping (issue #93)', () => {
       expect(callArg.data.line_of_defense).toBe('THIRD');
     });
 
-    it('LEAD_AUDITOR can reassign line_of_defense', async () => {
+    // aexa-frontend#208: third-line independence — a LEAD_AUDITOR (third
+    // line) must not be able to reclassify a first/second-line entity's
+    // (ComplianceObligation's) ownership. Only ADMIN may reassign now.
+    it('LEAD_AUDITOR cannot reassign line_of_defense (third-line independence)', async () => {
       mockMembership('LEAD_AUDITOR');
       db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ANCHOR });
-      db.update.mockResolvedValue({ id: 'c1', line_of_defense: 'FIRST' });
+
+      await expect(
+        compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { line_of_defense: 'FIRST' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR can still update other fields on the same request as long as line_of_defense is untouched', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ANCHOR });
+      db.update.mockResolvedValue({ id: 'c1', title: 'Renamed' });
 
       await compliance_service.update_compliance_into_db(
-        makeReq({ params: { id: 'c1' }, body: { line_of_defense: 'FIRST' } }),
+        makeReq({ params: { id: 'c1' }, body: { title: 'Renamed' } }),
       );
 
-      const callArg = db.update.mock.calls[0][0];
-      expect(callArg.data.line_of_defense).toBe('FIRST');
+      expect(db.update).toHaveBeenCalled();
     });
   });
 

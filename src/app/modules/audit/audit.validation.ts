@@ -2,10 +2,14 @@ import { z } from 'zod';
 
 // #97: Three Lines of Defense classification. Not required on create —
 // AuditEngagement has a sensible schema-level default (THIRD, see
-// audit.prisma). Reassignment is further gated in audit.service.ts (only
-// ADMIN/LEAD_AUDITOR via assertCanWriteOrgResource, which already applies to
-// the whole payload).
-const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD']);
+// audit.prisma). Reassignment is gated in audit.service.ts: ADMIN/
+// LEAD_AUDITOR via assertCanWriteOrgResource for the whole payload, plus
+// (aexa-frontend#208) a stricter LEAD_AUDITOR-only check specifically when
+// line_of_defense itself is being changed — the Three Lines Model's
+// third-line-independence principle means an ADMIN (management) must not
+// get to redefine what internal audit's own engagements are classified as.
+// GOVERNING_BODY (aexa-frontend#208) added as a 4th selectable value.
+const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD', 'GOVERNING_BODY']);
 
 // The frontend date inputs submit "" (empty string) when left blank, not
 // null/undefined. z.coerce.date() would turn "" into an Invalid Date and

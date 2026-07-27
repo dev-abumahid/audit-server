@@ -4,7 +4,11 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
-import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
+import {
+  assertCanReassignLineOfDefense,
+  assertCanWriteOrgResource,
+  resolveCallerOrgContext,
+} from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 // aexa-server#243: due dates previously had zero teeth — an obligation 18
@@ -166,6 +170,12 @@ const update_compliance_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   assertCanWriteOrgResource(ctx);
+  // aexa-frontend#208: third-line independence — a LEAD_AUDITOR must not be
+  // able to reclassify a first/second-line entity's ownership. Only checked
+  // when line_of_defense is actually part of this update.
+  if (req.body.line_of_defense !== undefined) {
+    assertCanReassignLineOfDefense(ctx, 'MANAGEMENT_LINE');
+  }
   const id = req.params.id as string;
   const existing = await prisma.complianceObligation.findFirst({
     where: { id, org_account_id: ctx.organizationId },

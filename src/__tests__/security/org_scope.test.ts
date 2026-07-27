@@ -26,8 +26,10 @@ import { prisma } from '../../app/lib/prisma.js';
 import {
   applyActionScope,
   applyInspectionScope,
+  assertCanReassignLineOfDefense,
   assertCanWriteToAction,
   assertCanWriteToActionForExternalMember,
+  CallerOrgContext,
   hasActiveFindingAssignmentForExternalMember,
   isExternalMembershipActive,
   resolveAccountOrgAnchor,
@@ -650,6 +652,70 @@ describe('org_scope — external member helpers (issue #55 slice 5)', () => {
       await expect(
         assertCanWriteToActionForExternalMember('ext-1', { id: 'action-1' }),
       ).rejects.toMatchObject({ statusCode: 403 });
+    });
+  });
+});
+
+// aexa-frontend#208: third-line independence. Management-line entities
+// (Risk/Kri/ComplianceObligation) may only have their line_of_defense
+// reassigned by ADMIN; audit-line entities (AuditEngagement) only by
+// LEAD_AUDITOR — neither direction may cross into the other's territory.
+describe('org_scope — assertCanReassignLineOfDefense (aexa-frontend#208)', () => {
+  const ctxWithRole = (role: CallerOrgContext['role']): CallerOrgContext => ({
+    organizationId: 'org-1',
+    role,
+    orgMemberId: 'member-1',
+  });
+
+  describe("ownerRole: 'MANAGEMENT_LINE' (Risk / Kri / ComplianceObligation)", () => {
+    it('allows ADMIN', () => {
+      expect(() =>
+        assertCanReassignLineOfDefense(ctxWithRole('ADMIN'), 'MANAGEMENT_LINE'),
+      ).not.toThrow();
+    });
+
+    it('blocks LEAD_AUDITOR — third line must not reclassify first/second-line ownership', () => {
+      expect(() =>
+        assertCanReassignLineOfDefense(ctxWithRole('LEAD_AUDITOR'), 'MANAGEMENT_LINE'),
+      ).toThrow(expect.objectContaining({ statusCode: 403 }));
+    });
+
+    it('blocks LIGHT_USER', () => {
+      expect(() =>
+        assertCanReassignLineOfDefense(ctxWithRole('LIGHT_USER'), 'MANAGEMENT_LINE'),
+      ).toThrow(expect.objectContaining({ statusCode: 403 }));
+    });
+
+    it('blocks VIEWER', () => {
+      expect(() =>
+        assertCanReassignLineOfDefense(ctxWithRole('VIEWER'), 'MANAGEMENT_LINE'),
+      ).toThrow(expect.objectContaining({ statusCode: 403 }));
+    });
+  });
+
+  describe("ownerRole: 'AUDIT_LINE' (AuditEngagement)", () => {
+    it('allows LEAD_AUDITOR', () => {
+      expect(() =>
+        assertCanReassignLineOfDefense(ctxWithRole('LEAD_AUDITOR'), 'AUDIT_LINE'),
+      ).not.toThrow();
+    });
+
+    it('blocks ADMIN — management must not reclassify what internal audit covers', () => {
+      expect(() => assertCanReassignLineOfDefense(ctxWithRole('ADMIN'), 'AUDIT_LINE')).toThrow(
+        expect.objectContaining({ statusCode: 403 }),
+      );
+    });
+
+    it('blocks LIGHT_USER', () => {
+      expect(() => assertCanReassignLineOfDefense(ctxWithRole('LIGHT_USER'), 'AUDIT_LINE')).toThrow(
+        expect.objectContaining({ statusCode: 403 }),
+      );
+    });
+
+    it('blocks VIEWER', () => {
+      expect(() => assertCanReassignLineOfDefense(ctxWithRole('VIEWER'), 'AUDIT_LINE')).toThrow(
+        expect.objectContaining({ statusCode: 403 }),
+      );
     });
   });
 });

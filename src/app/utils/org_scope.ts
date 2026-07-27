@@ -590,6 +590,46 @@ export const assertCanWriteOrgResource = (ctx: CallerOrgContext): void => {
 };
 
 /**
+ * aexa-frontend#208 — methodology audit finding: the IIA Three Lines Model
+ * requires third-line independence (internal audit reports to the
+ * governing body, not management; management doesn't get to redefine what
+ * internal audit covers). Before this, every model's line_of_defense
+ * reassignment rode the same assertCanWriteOrgResource gate as the rest of
+ * the payload — ADMIN or LEAD_AUDITOR, no distinction — so a LEAD_AUDITOR
+ * (third line) could reclassify a first-line Risk's ownership, and an ADMIN
+ * (management) could reclassify a third-line AuditEngagement's own
+ * classification. Both are the "one line encroaching on another's
+ * ownership" pitfall the 2020 model's principles warn against.
+ *
+ * Callers apply this as an ADDITIONAL check, only when line_of_defense is
+ * actually part of the request — assertCanWriteOrgResource still gates the
+ * rest of the payload as before. `ownerRole` names which line genuinely
+ * owns the entity being reassigned:
+ *   - 'MANAGEMENT_LINE': Risk, Kri, ComplianceObligation (1st/2nd line by
+ *     default) — only ADMIN may reassign; LEAD_AUDITOR is blocked.
+ *   - 'AUDIT_LINE': AuditEngagement (3rd line by default) — only
+ *     LEAD_AUDITOR may reassign; ADMIN is blocked.
+ *
+ * Action is deliberately NOT gated by this function — it covers both roles
+ * by design (no schema default, see action.prisma's own comment), so
+ * there's no single "which line owns this" answer to check against; it
+ * keeps the plain assertCanWriteOrgResource gate.
+ */
+export type LineOfDefenseOwnerRole = 'MANAGEMENT_LINE' | 'AUDIT_LINE';
+
+export const assertCanReassignLineOfDefense = (
+  ctx: CallerOrgContext,
+  ownerRole: LineOfDefenseOwnerRole,
+): void => {
+  if (ownerRole === 'MANAGEMENT_LINE' && ctx.role === 'ADMIN') return;
+  if (ownerRole === 'AUDIT_LINE' && ctx.role === 'LEAD_AUDITOR') return;
+  throw new AppError(
+    "You do not have permission to reclassify this resource's line of defense.",
+    403,
+  );
+};
+
+/**
  * Admin-only gate for privileged organization-wide actions that aren't
  * "write to a resource" so much as "change who can access something" —
  * currently just Template access grant/revoke. Found by independent review:

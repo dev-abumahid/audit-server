@@ -4,10 +4,22 @@
 // See action.prisma's LineOfDefense-related comment on Action for why that
 // model is the one deliberate exception (nullable, no default) among the 5
 // entities this classification was added to.
+// aexa-frontend#208: GOVERNING_BODY added on top of the original three
+// values above. The 2020 IIA Three Lines Model's headline structural
+// addition over the 2013 version (which #97/#206 modeled) is an explicit
+// governing body sitting above the three lines — the enum only had
+// FIRST/SECOND/THIRD before this, with no governing-body concept anywhere.
+// No existing model's default changes: this is purely an additional
+// explicit selection for an entity that genuinely sits at governing-body
+// oversight (e.g. a board-mandated audit engagement, or a risk formally
+// accepted by the board). See org_scope.ts's
+// assertCanReassignLineOfDefense for the companion third-line-independence
+// permission fix from the same ticket.
 enum LineOfDefense {
     FIRST
     SECOND
     THIRD
+    GOVERNING_BODY
 }
 
 model Risk {

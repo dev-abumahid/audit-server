@@ -24,7 +24,10 @@ import { compute_kri_status } from '../kri/kri.service.js';
 type ThreeLinesRow = {
   id: string;
   title: string;
-  line_of_defense: 'FIRST' | 'SECOND' | 'THIRD' | null;
+  // aexa-frontend#208: GOVERNING_BODY added as a 4th value to the shared
+  // LineOfDefense enum — kept in sync here since this type isn't derived
+  // from the Prisma-generated enum type.
+  line_of_defense: 'FIRST' | 'SECOND' | 'THIRD' | 'GOVERNING_BODY' | null;
 };
 
 const get_three_lines_of_defense_from_db = async (req: Request) => {

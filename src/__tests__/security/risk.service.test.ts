@@ -50,6 +50,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
 
 import { prisma } from '../../app/lib/prisma.js';
 import { risk_service } from '../../app/modules/risk/risk.service.js';
+import { risk_validations } from '../../app/modules/risk/risk.validation.js';
 
 const db = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const inspectionDb = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -903,17 +904,48 @@ describe('risk service — org scoping (ticket #6)', () => {
       expect(callArg.data.line_of_defense).toBe('SECOND');
     });
 
-    it('LEAD_AUDITOR can reassign line_of_defense', async () => {
+    // aexa-frontend#208: third-line independence — a LEAD_AUDITOR (third
+    // line) must not be able to reclassify a first/second-line entity's
+    // (Risk's) ownership. Only ADMIN may reassign Risk.line_of_defense now.
+    it('LEAD_AUDITOR cannot reassign line_of_defense (third-line independence)', async () => {
       mockMembership('LEAD_AUDITOR');
       db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
-      db.update.mockResolvedValue({ id: 'r1', line_of_defense: 'THIRD' });
+
+      await expect(
+        risk_service.update_risk_into_db(
+          makeReq({ params: { id: 'r1' }, body: { line_of_defense: 'THIRD' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR can still update other fields on the same request as long as line_of_defense is untouched', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'r1', name: 'Renamed' });
 
       await risk_service.update_risk_into_db(
-        makeReq({ params: { id: 'r1' }, body: { line_of_defense: 'THIRD' } }),
+        makeReq({ params: { id: 'r1' }, body: { name: 'Renamed' } }),
+      );
+
+      expect(db.update).toHaveBeenCalled();
+    });
+
+    // aexa-frontend#208: GOVERNING_BODY is a real, persistable value, not
+    // just a permission-gate branch — round-trips end-to-end through
+    // validation -> service -> Prisma the same as FIRST/SECOND/THIRD.
+    it('ADMIN can reassign line_of_defense to the new GOVERNING_BODY value', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'r1', line_of_defense: 'GOVERNING_BODY' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { line_of_defense: 'GOVERNING_BODY' } }),
       );
 
       const callArg = db.update.mock.calls[0][0];
-      expect(callArg.data.line_of_defense).toBe('THIRD');
+      expect(callArg.data.line_of_defense).toBe('GOVERNING_BODY');
     });
   });
 
@@ -1090,5 +1122,17 @@ describe('risk service — org scoping (ticket #6)', () => {
         risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
       ).resolves.toEqual({ id: 'r1' });
     });
+  });
+});
+
+describe('risk validation schemas', () => {
+  // aexa-frontend#208: GOVERNING_BODY is a real, Zod-accepted value for
+  // line_of_defense, not just something the service layer happens to pass
+  // through unchecked.
+  it('accepts GOVERNING_BODY as a valid line_of_defense value', async () => {
+    const parsed = await risk_validations.update_risk.parseAsync({
+      line_of_defense: 'GOVERNING_BODY',
+    });
+    expect(parsed.line_of_defense).toBe('GOVERNING_BODY');
   });
 });

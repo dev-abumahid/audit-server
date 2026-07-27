@@ -2,7 +2,11 @@ import { Request } from 'express';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
-import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
+import {
+  assertCanReassignLineOfDefense,
+  assertCanWriteOrgResource,
+  resolveCallerOrgContext,
+} from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 export type KriStatus = 'OK' | 'ALERT' | 'WARNING';
@@ -164,6 +168,12 @@ const update_kri_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   assertCanWriteOrgResource(ctx);
+  // aexa-frontend#208: third-line independence — a LEAD_AUDITOR must not be
+  // able to reclassify a first/second-line entity's ownership. Only checked
+  // when line_of_defense is actually part of this update.
+  if (req.body.line_of_defense !== undefined) {
+    assertCanReassignLineOfDefense(ctx, 'MANAGEMENT_LINE');
+  }
   const { id } = req.params as Record<string, string>;
   const existing = await prisma.kri.findFirst({
     where: { id, org_account_id: ctx.organizationId },

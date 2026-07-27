@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "LineOfDefense" ADD VALUE 'GOVERNING_BODY';
