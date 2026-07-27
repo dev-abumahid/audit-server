@@ -37,6 +37,38 @@ const normalizeRiskIds = (riskIds: unknown): string[] => {
 };
 
 /**
+ * aexa-server#244: findings_count was a plain number an admin manually
+ * typed into the engagement form (AuditPage.tsx), never derived from any
+ * real query — it could simply be wrong. Now that Action has a real
+ * auditEngagementId link (action.prisma), this derives the count
+ * server-side via a single grouped query (not one COUNT per engagement on a
+ * paginated list) and overwrites whatever's in the stored `findings_count`
+ * column for every response. Client-supplied findings_count is discarded
+ * entirely — see create_audit_into_db/update_audit_into_db, which never
+ * write it.
+ */
+const attachFindingsCounts = async <T extends { id: string }>(
+  engagements: T[],
+  orgAccountId: string,
+): Promise<(T & { findings_count: number })[]> => {
+  if (engagements.length === 0) return [];
+  const grouped = await prisma.action.groupBy({
+    by: ['auditEngagementId'],
+    where: {
+      auditEngagementId: { in: engagements.map((e) => e.id) },
+      orgAccountId,
+    },
+    _count: { _all: true },
+  });
+  const countsById = new Map(
+    grouped
+      .filter((g) => g.auditEngagementId != null)
+      .map((g) => [g.auditEngagementId as string, g._count._all]),
+  );
+  return engagements.map((e) => ({ ...e, findings_count: countsById.get(e.id) ?? 0 }));
+};
+
+/**
  * Every supplied risk id must resolve to a Risk in the caller's own org.
  * Without this a caller could link an engagement to another org's Risk UUID
  * (the raw FK accepts it), and the GET response's `risk: { name, category }`
@@ -105,8 +137,9 @@ const get_all_audit_from_db = async (req: Request) => {
     }),
   ]);
 
+  const flattened = data.map(flattenLinkedRisks);
   return {
-    data: data.map(flattenLinkedRisks),
+    data: await attachFindingsCounts(flattened, ctx.organizationId),
     meta: buildPaginationMeta(pagination, total),
   };
 };
@@ -122,7 +155,8 @@ const get_single_audit_from_db = async (req: Request) => {
   // Every sibling module's get_single_* throws 404 for a missing/cross-org
   // record rather than returning a bare 200 with data: null.
   if (!result) throw new AppError('Audit engagement not found', 404);
-  return flattenLinkedRisks(result);
+  const [withCount] = await attachFindingsCounts([flattenLinkedRisks(result)], ctx.organizationId);
+  return withCount;
 };
 
 const create_audit_into_db = async (req: Request) => {
@@ -132,7 +166,12 @@ const create_audit_into_db = async (req: Request) => {
   // Pull riskIds out of the payload — they're a relation, not a column, so they
   // must become nested join-row writes rather than a scalar field. Validate the
   // set belongs to the caller's org before any link row is written.
-  const { riskIds, ...payload } = req.body;
+  //
+  // aexa-server#244: findings_count is also pulled out and discarded — a
+  // brand-new engagement has no linked findings yet regardless of what the
+  // client sends (findings link to it via Action.auditEngagementId AFTER
+  // this engagement exists), and it's never trusted as client input anyway.
+  const { riskIds, findings_count: _ignoredCount, ...payload } = req.body;
   await assertRisksBelongToOrg(riskIds, ctx.organizationId);
   payload.org_account_id = ctx.organizationId;
   const linkIds = normalizeRiskIds(riskIds);
@@ -143,7 +182,8 @@ const create_audit_into_db = async (req: Request) => {
     },
     include: auditRiskInclude,
   });
-  return flattenLinkedRisks(result);
+  const [withCount] = await attachFindingsCounts([flattenLinkedRisks(result)], ctx.organizationId);
+  return withCount;
 };
 
 const update_audit_into_db = async (req: Request) => {
@@ -167,7 +207,15 @@ const update_audit_into_db = async (req: Request) => {
   // presence is significant — an OMITTED riskIds leaves the existing links
   // untouched (partial update), while an explicit array (including []) is a
   // full replacement of the link set. See aexa-frontend#165.
-  const { org_account_id: _ignored, riskIds, ...safeBody } = req.body;
+  //
+  // aexa-server#244: findings_count is pulled out and discarded too — never
+  // trusted as client input, see attachFindingsCounts.
+  const {
+    org_account_id: _ignored,
+    riskIds,
+    findings_count: _ignoredCount,
+    ...safeBody
+  } = req.body;
   await assertRisksBelongToOrg(riskIds, ctx.organizationId);
   // deleteMany + create nested inside the one update runs in a single Prisma
   // transaction, so the old links are never dropped without the new ones
@@ -191,7 +239,8 @@ const update_audit_into_db = async (req: Request) => {
     data: { ...safeBody, org_account_id: ctx.organizationId, ...riskRelationWrite },
     include: auditRiskInclude,
   });
-  return flattenLinkedRisks(result);
+  const [withCount] = await attachFindingsCounts([flattenLinkedRisks(result)], ctx.organizationId);
+  return withCount;
 };
 
 const delete_audit_from_db = async (req: Request) => {

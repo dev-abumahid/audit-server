@@ -15,6 +15,12 @@ vi.mock('../../app/lib/prisma.js', () => ({
     risk: {
       count: vi.fn(),
     },
+    // aexa-server#244: audit.service.ts's attachFindingsCounts now derives
+    // findings_count via a single grouped query over Action instead of
+    // trusting the stored column.
+    action: {
+      groupBy: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -35,6 +41,7 @@ import uploadCloud from '../../app/utils/cloudinary.js';
 const uploadCloudMock = uploadCloud as unknown as ReturnType<typeof vi.fn>;
 const db = prisma.auditEngagement as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const actionDb = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -61,6 +68,9 @@ describe('audit service — org scoping (issue #92)', () => {
     // caller's own accountId), same convention every service test in this
     // suite uses.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default: no linked findings, so findings_count computes to 0 unless a
+    // test overrides it.
+    actionDb.groupBy.mockResolvedValue([]);
   });
 
   describe('write-path role scoping (issue #55 slice 3)', () => {
@@ -180,6 +190,29 @@ describe('audit service — org scoping (issue #92)', () => {
         totalPage: 0,
       });
     });
+
+    // aexa-server#244: findings_count is derived server-side from the real
+    // Action<->engagement link via a single grouped query, not trusted from
+    // the stored column.
+    it('overrides findings_count with a server-derived count per engagement', async () => {
+      db.findMany.mockResolvedValue([
+        { id: 'eng-1', findings_count: 999, risks: [] }, // stale/bogus stored value
+        { id: 'eng-2', findings_count: 0, risks: [] },
+      ]);
+      db.count.mockResolvedValue(2);
+      actionDb.groupBy.mockResolvedValue([{ auditEngagementId: 'eng-1', _count: { _all: 3 } }]);
+
+      const result = await audit_service.get_all_audit_from_db(makeReq({ query: {} }));
+
+      expect(actionDb.groupBy).toHaveBeenCalledWith({
+        by: ['auditEngagementId'],
+        where: { auditEngagementId: { in: ['eng-1', 'eng-2'] }, orgAccountId: ORG_A },
+        _count: { _all: true },
+      });
+      expect(result.data.find((e) => e.id === 'eng-1')?.findings_count).toBe(3);
+      // No Action rows link to eng-2 -> derived count is 0, not the stale stored value.
+      expect(result.data.find((e) => e.id === 'eng-2')?.findings_count).toBe(0);
+    });
   });
 
   describe('get_single_audit_from_db', () => {
@@ -202,6 +235,17 @@ describe('audit service — org scoping (issue #92)', () => {
         audit_service.get_single_audit_from_db(makeReq({ params: { id: 'org-b-audit' } })),
       ).rejects.toMatchObject({ statusCode: 404 });
     });
+
+    it('overrides findings_count with a server-derived count', async () => {
+      db.findUnique.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, findings_count: 999 });
+      actionDb.groupBy.mockResolvedValue([{ auditEngagementId: 'a1', _count: { _all: 5 } }]);
+
+      const result = await audit_service.get_single_audit_from_db(
+        makeReq({ params: { id: 'a1' } }),
+      );
+
+      expect(result.findings_count).toBe(5);
+    });
   });
 
   describe('create_audit_into_db', () => {
@@ -214,6 +258,31 @@ describe('audit service — org scoping (issue #92)', () => {
 
       const callArg = db.create.mock.calls[0][0];
       expect(callArg.data.org_account_id).toBe(ORG_A);
+    });
+
+    // aexa-server#244: findings_count is never trusted as client input — a
+    // brand-new engagement always derives to 0 (no Action could possibly
+    // link to an id that didn't exist until this call), regardless of what
+    // the client sent.
+    it('discards a client-supplied findings_count and never persists it', async () => {
+      db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+
+      await audit_service.create_audit_into_db(
+        makeReq({ body: { title: 'Q3 Audit', status: 'planned', findings_count: 999 } }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('findings_count');
+    });
+
+    it('returns findings_count: 0 for a freshly created engagement', async () => {
+      db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+
+      const result = await audit_service.create_audit_into_db(
+        makeReq({ body: { title: 'Q3 Audit', status: 'planned' } }),
+      );
+
+      expect(result.findings_count).toBe(0);
     });
   });
 
@@ -267,6 +336,20 @@ describe('audit service — org scoping (issue #92)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('discards a client-supplied findings_count and overrides the response with the server-derived count', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      actionDb.groupBy.mockResolvedValue([{ auditEngagementId: 'a1', _count: { _all: 7 } }]);
+
+      const result = await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { title: 'Revised', findings_count: 999 } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('findings_count');
+      expect(result.findings_count).toBe(7);
     });
   });
 

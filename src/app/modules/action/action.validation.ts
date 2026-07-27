@@ -46,12 +46,31 @@ const create_action = z.object({
   // (a bare id here is not proof the caller owns that obligation).
   complianceObligationId: z.string().optional(),
 
+  // aexa-server#244: formal engagement<->finding link, same "sparse optional
+  // FK, id string only, ownership verified org-side" shape as
+  // complianceObligationId above. Accepted here for both create and update
+  // (update_action is this schema's `.partial()`), but — like
+  // complianceObligationId — deliberately NOT part of
+  // update_action_into_db's writable field set; see action.prisma's
+  // auditEngagementId comment for why it's set-once-at-creation only.
+  auditEngagementId: z.string().optional(),
+
   actionTitle: z.string().min(1).max(255),
   // Deliberately optional -- aexa-frontend's CreateNewFindingModal.tsx labels
   // this "Description (Optional)" and sends `undefined` (not "") when left
   // blank. Matches templateDisc's String?/optional() convention (same
   // "-Disc" naming, same "genuinely optional description" shape).
   actionDisc: z.string().optional(),
+
+  // aexa-server#244: IIA's "Five Cs" minus Corrective Action (already
+  // covered by actionTitle/actionDisc/priority/dueDate above). All optional
+  // — see action.prisma's own comment for why this stays a product-level
+  // "not required" rather than mirroring line_of_defense's
+  // required-on-create treatment.
+  criteria: z.string().max(5000).optional(),
+  condition: z.string().max(5000).optional(),
+  cause: z.string().max(5000).optional(),
+  effect: z.string().max(5000).optional(),
 
   priority: PRIORITY_ENUM,
 

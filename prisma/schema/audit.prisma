@@ -28,6 +28,12 @@ model AuditEngagement {
     // feature only shipped this session and there's no structured data to move.
     risks AuditEngagementRisk[]
 
+    // aexa-server#244: formal engagement<->finding link (see action.prisma's
+    // auditEngagementId comment). findings_count above is no longer trusted
+    // as client input — audit.service.ts now derives it server-side from
+    // this relation's real count instead.
+    findings Action[]
+
     @@index([org_account_id])
 }
 

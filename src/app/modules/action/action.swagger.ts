@@ -15,6 +15,13 @@ export const actionSwaggerDocs = {
               actionTitle: 'Repair damaged safety railing',
               actionDisc:
                 'The safety railing near the loading dock is damaged and requires immediate repair to prevent workplace accidents.',
+              // aexa-server#244: IIA's Five Cs for a defensible finding
+              // record (all optional — a plain remediation task can omit
+              // these entirely).
+              criteria: 'OSHA workplace safety standard, walking-working surfaces',
+              condition: 'Loading dock safety railing found damaged during inspection',
+              cause: 'Railing was struck by a forklift and never reported',
+              effect: 'Increased risk of a fall injury near the loading dock',
               priority: 'High',
               dueDate: new Date('2026-07-15'),
               status: 'TO_DO',

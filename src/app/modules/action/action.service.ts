@@ -214,6 +214,18 @@ const create_action_into_db = async (req: Request) => {
     if (!obligation) throw new AppError('Compliance obligation not found', 404);
   }
 
+  // aexa-server#244: auditEngagementId is optional (the formal
+  // engagement<->finding link) but, when present, must belong to the
+  // caller's own org — same IDOR guard as complianceObligationId above.
+  // AuditEngagement is org-scoped via org_account_id, same field name as
+  // ComplianceObligation.
+  if (body.auditEngagementId) {
+    const engagement = await prisma.auditEngagement.findFirst({
+      where: { id: body.auditEngagementId, org_account_id: ctx.organizationId },
+    });
+    if (!engagement) throw new AppError('Audit engagement not found', 404);
+  }
+
   // Every assignBy id must be a real OrgMember in the caller's own org —
   // without this, any org could tag an arbitrary orgMemberId from a
   // completely different org as "responsible" for their finding, the same
@@ -245,8 +257,20 @@ const create_action_into_db = async (req: Request) => {
       // (which never re-checks foreign ownership), so it can't be re-pointed
       // to an unowned obligation via a later PATCH.
       complianceObligationId: body.complianceObligationId,
+      // Set once at creation only — same reasoning as complianceObligationId
+      // above (aexa-server#244).
+      auditEngagementId: body.auditEngagementId,
       actionTitle: body.actionTitle,
       actionDisc: body.actionDisc,
+      // aexa-server#244: IIA's Five Cs (minus Corrective Action, already
+      // covered by actionTitle/actionDisc/priority/dueDate). All optional —
+      // unlike complianceObligationId/auditEngagementId these ARE writable
+      // on update (see update_action_into_db below), since they describe
+      // the finding itself rather than a foreign-ownership-checked link.
+      criteria: body.criteria,
+      condition: body.condition,
+      cause: body.cause,
+      effect: body.effect,
       priority: body.priority,
       dueDate: body.dueDate,
       status: body.status,
@@ -318,6 +342,17 @@ const update_action_into_db = async (req: Request) => {
     data: {
       ...(req.body.actionTitle !== undefined && { actionTitle: req.body.actionTitle }),
       ...(req.body.actionDisc !== undefined && { actionDisc: req.body.actionDisc }),
+      // aexa-server#244: Five Cs fields ARE writable on update (unlike
+      // complianceObligationId/auditEngagementId, which stay set-once) —
+      // internal (ADMIN/LEAD_AUDITOR/sub-assigned LIGHT_USER) path only; the
+      // external-member update path below deliberately does NOT accept
+      // these, same reasoning as line_of_defense being restricted to the
+      // stricter internal gate — an external Light User works the
+      // remediation, not the formal finding characterization.
+      ...(req.body.criteria !== undefined && { criteria: req.body.criteria }),
+      ...(req.body.condition !== undefined && { condition: req.body.condition }),
+      ...(req.body.cause !== undefined && { cause: req.body.cause }),
+      ...(req.body.effect !== undefined && { effect: req.body.effect }),
       ...(req.body.priority !== undefined && { priority: req.body.priority }),
       ...(req.body.dueDate !== undefined && { dueDate: req.body.dueDate }),
       ...(req.body.status !== undefined && { status: req.body.status }),

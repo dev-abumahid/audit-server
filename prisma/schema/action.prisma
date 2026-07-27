@@ -48,6 +48,19 @@ model Action {
     // SetNull orphans nothing meaningful here (aexa-frontend#166).
     complianceObligationId String?
 
+    // aexa-server#244: formal engagement<->finding link. Findings previously
+    // hung off Inspections only, with no way to query "which findings belong
+    // to this AuditEngagement" — AuditEngagement.findings_count was a plain
+    // number an admin manually typed into the engagement form, never derived
+    // from any real query. Same shape/rationale as complianceObligationId
+    // above: a sparse, informational, set-once-at-creation link (see
+    // action.service.ts's create_action_into_db/update_action_into_db —
+    // deliberately not part of the update-writable field set, same as
+    // complianceObligationId), onDelete: SetNull for the same reason (an
+    // Action fully owns its own remediation record; losing the engagement it
+    // once pointed at must not destroy that work).
+    auditEngagementId String?
+
     // Main body
     actionTitle String
     // Nullable -- matches templateDisc's String?/optional() convention, the
@@ -59,6 +72,33 @@ model Action {
     dueDate     DateTime
     status      STATUS   @default(TO_DO)
     attachments String[] @default([])
+
+    // aexa-server#244: IIA's "Five Cs" (Criteria, Condition, Cause,
+    // Consequence/Effect, Corrective Action) for a defensible finding record
+    // — actionTitle/actionDisc/priority/dueDate above already serve as the
+    // Corrective Action; these four were previously entirely absent, so
+    // Action was a task tracker (title + free-text description + priority)
+    // rather than a structured finding. All nullable/optional: this is a
+    // live table with existing rows, and the ticket's own framing left
+    // "required vs optional" an open product decision — optional is the only
+    // choice that doesn't force every existing Action through a migration or
+    // block a PATCH that doesn't touch these fields (same reasoning as
+    // line_of_defense's DB-nullable/app-required-on-create split above,
+    // except these aren't even required on create — see action.validation.ts
+    // for why: unlike line_of_defense, there's no clean "must classify
+    // every new finding" argument here, since plenty of legitimate Actions
+    // are still plain remediation tasks, not formal audit findings).
+    //
+    // Deliberately NOT unified with RecommendationResult's
+    // observation/standard/recommendation (condition/criteria/corrective-
+    // action) or IntelligenceItem.root_cause in this change — reconciling
+    // those partial precedents into one model is a real migration decision
+    // (which table wins, how to backfill), scoped out as a separate,
+    // dedicated follow-up rather than bundled in silently here.
+    criteria  String?
+    condition String?
+    cause     String?
+    effect    String?
 
     // #97 (Three Lines of Defense): deliberately nullable with NO default,
     // unlike the other 4 models this classification was added to (Risk,
@@ -102,6 +142,7 @@ model Action {
     inspection Inspection?     @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
     orgAccount Account?        @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
     complianceObligation ComplianceObligation? @relation(fields: [complianceObligationId], references: [id], onDelete: SetNull)
+    auditEngagement AuditEngagement? @relation(fields: [auditEngagementId], references: [id], onDelete: SetNull)
 
     // Date time
     createdAt DateTime @default(now())
@@ -121,6 +162,11 @@ model Action {
     responsibleAssignees ActionResponsible[]
 
     @@index([orgAccountId])
+    // aexa-server#244: audit.service.ts's attachFindingsCounts groupBys/
+    // filters on this column (unlike complianceObligationId, which has no
+    // analogous counting query yet) — a real, newly-added query pattern
+    // this index directly serves.
+    @@index([auditEngagementId])
 }
 
 model ActionMessage {

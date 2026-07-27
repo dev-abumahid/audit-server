@@ -15,7 +15,9 @@ export const auditSwaggerDocs = {
               status: 'in_progress',
               lead_auditor: 'John Doe',
               priority_score: 85,
-              findings_count: 3,
+              // aexa-server#244: findings_count is server-derived from real
+              // Action<->engagement links (never accepted from the client)
+              // — omitted here, not settable.
               started_at: '2026-03-01T09:00:00Z',
               closed_at: null,
               riskIds: ['b1e6f0a2-0000-0000-0000-000000000001'],
@@ -97,7 +99,6 @@ export const auditSwaggerDocs = {
             example: JSON.stringify({
               title: 'Supply Chain Risk Audit (revised)',
               status: 'completed',
-              findings_count: 4,
             }),
           },
         },

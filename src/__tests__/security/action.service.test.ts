@@ -26,6 +26,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
     complianceObligation: {
       findFirst: vi.fn(),
     },
+    // aexa-server#244: formal engagement<->finding link, ownership-checked
+    // the same way as complianceObligationId above.
+    auditEngagement: {
+      findFirst: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -65,6 +70,10 @@ const db = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbInspection = prisma.inspection as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbQuestion = prisma.question as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const dbCompliance = prisma.complianceObligation as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const dbAuditEngagement = prisma.auditEngagement as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -529,6 +538,124 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(db.create).not.toHaveBeenCalled();
     });
 
+    // aexa-server#244: formal engagement<->finding link, same IDOR-guard
+    // shape as complianceObligationId above.
+    it('allows creating an action with no auditEngagementId at all (it is optional)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'No engagement' } }),
+      );
+
+      expect(dbAuditEngagement.findFirst).not.toHaveBeenCalled();
+      expect(db.create).toHaveBeenCalled();
+    });
+
+    it('verifies auditEngagementId belongs to the caller org and persists the link', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      dbAuditEngagement.findFirst.mockResolvedValue({ id: 'eng-1' });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({
+          body: {
+            inspectionId: 'insp-1',
+            title: 'Finding for Q3 audit',
+            auditEngagementId: 'eng-1',
+          },
+        }),
+      );
+
+      expect(dbAuditEngagement.findFirst).toHaveBeenCalledWith({
+        where: { id: 'eng-1', org_account_id: ORG_A },
+      });
+      expect(db.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ auditEngagementId: 'eng-1' }) }),
+      );
+    });
+
+    it('throws 404 and does NOT create when auditEngagementId belongs to another org', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      dbAuditEngagement.findFirst.mockResolvedValue(null);
+
+      await expect(
+        action_service.create_action_into_db(
+          makeReq({
+            body: {
+              inspectionId: 'insp-1',
+              title: 'IDOR attempt',
+              auditEngagementId: 'org-b-engagement',
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    // aexa-server#244: IIA's Five Cs — persisted on create when supplied,
+    // all genuinely optional (no 400 when omitted).
+    it('persists criteria/condition/cause/effect when provided', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({
+          body: {
+            inspectionId: 'insp-1',
+            title: 'Access review not performed',
+            criteria: 'SOX ITGC access review policy, section 4.2',
+            condition: 'No quarterly access review was performed for Q2',
+            cause: 'Review owner left the org and the task was never reassigned',
+            effect: 'Unauthorized access could go undetected for a full quarter',
+          },
+        }),
+      );
+
+      expect(db.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            criteria: 'SOX ITGC access review policy, section 4.2',
+            condition: 'No quarterly access review was performed for Q2',
+            cause: 'Review owner left the org and the task was never reassigned',
+            effect: 'Unauthorized access could go undetected for a full quarter',
+          }),
+        }),
+      );
+    });
+
+    it('allows creating an action with none of the Five Cs fields (all optional)', async () => {
+      dbInspection.findFirst.mockResolvedValue({
+        id: 'insp-1',
+        siteId: 'site-1',
+        orgAccountId: ORG_A,
+      });
+      db.create.mockResolvedValue({});
+
+      await action_service.create_action_into_db(
+        makeReq({ body: { inspectionId: 'insp-1', title: 'Plain remediation task' } }),
+      );
+
+      expect(db.create).toHaveBeenCalled();
+    });
+
     it('persists attachments when provided', async () => {
       dbInspection.findFirst.mockResolvedValue({
         id: 'insp-1',
@@ -762,6 +889,63 @@ describe('action service — org scoping (ticket #6)', () => {
 
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data).not.toHaveProperty('attachments');
+    });
+
+    // aexa-server#244: IIA's Five Cs ARE writable on update.
+    it('updates criteria/condition/cause/effect when provided', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({
+          params: { id: 'a1' },
+          body: {
+            criteria: 'Updated criteria',
+            condition: 'Updated condition',
+            cause: 'Updated cause',
+            effect: 'Updated effect',
+          },
+        }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({
+        criteria: 'Updated criteria',
+        condition: 'Updated condition',
+        cause: 'Updated cause',
+        effect: 'Updated effect',
+      });
+    });
+
+    it('leaves criteria/condition/cause/effect untouched when not provided', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { actionTitle: 'Renamed' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('criteria');
+      expect(callArg.data).not.toHaveProperty('condition');
+      expect(callArg.data).not.toHaveProperty('cause');
+      expect(callArg.data).not.toHaveProperty('effect');
+    });
+
+    // aexa-server#244: unlike the Five Cs, auditEngagementId is set-once at
+    // creation only — same as complianceObligationId's existing precedent
+    // (not re-checked/re-pointable via a later PATCH).
+    it('ignores an auditEngagementId supplied on update — not part of the writable field set', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_into_db(
+        makeReq({ params: { id: 'a1' }, body: { auditEngagementId: 'org-b-or-any-engagement' } }),
+      );
+
+      expect(dbAuditEngagement.findFirst).not.toHaveBeenCalled();
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('auditEngagementId');
     });
 
     it('leaves actionDisc untouched when not provided on update (matches attachments/other optional-field convention)', async () => {
@@ -2518,6 +2702,38 @@ describe('action service — external Light User sub-assignment (issue #55 slice
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    // aexa-server#244: an external Light User works the remediation, not
+    // the formal finding characterization — criteria/condition/cause/effect
+    // (and auditEngagementId, which is set-once-at-creation-only anyway) are
+    // silently dropped, not persisted, even if supplied in the body.
+    it('ignores criteria/condition/cause/effect and auditEngagementId supplied in the body', async () => {
+      db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      db.update.mockResolvedValue({ id: 'action-1', status: 'IN_PROGRESS' });
+
+      await action_service.update_action_for_external_member(
+        makeReq({
+          params: { id: 'action-1' },
+          body: {
+            status: 'IN_PROGRESS',
+            criteria: 'Attempted criteria override',
+            condition: 'Attempted condition override',
+            cause: 'Attempted cause override',
+            effect: 'Attempted effect override',
+            auditEngagementId: 'attempted-engagement-repoint',
+          },
+          externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+        } as never),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('criteria');
+      expect(callArg.data).not.toHaveProperty('condition');
+      expect(callArg.data).not.toHaveProperty('cause');
+      expect(callArg.data).not.toHaveProperty('effect');
+      expect(callArg.data).not.toHaveProperty('auditEngagementId');
     });
   });
 });
