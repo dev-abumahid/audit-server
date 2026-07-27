@@ -31,5 +31,16 @@ router.patch(
   compliance_controller.update_compliance,
 );
 router.delete('/:id', auth('ORGANIZATION'), compliance_controller.delete_compliance);
+router.post(
+  '/:id/attest',
+  auth('ORGANIZATION'),
+  RequestValidator(compliance_validations.attest_compliance),
+  compliance_controller.attest_compliance,
+);
+router.get(
+  '/:id/attestations',
+  auth('ORGANIZATION'),
+  compliance_controller.get_compliance_attestations,
+);
 
 export default router;

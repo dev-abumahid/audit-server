@@ -12,6 +12,13 @@ vi.mock('../../app/lib/prisma.js', () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    // aexa-server#250: re-attestation history, and next_review_date
+    // advancement, wrapped in a $transaction.
+    complianceAttestation: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      count: vi.fn(),
+    },
     site: {
       findFirst: vi.fn(),
     },
@@ -21,6 +28,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     organization: {
       findUnique: vi.fn(),
     },
+    $transaction: vi.fn(),
   },
 }));
 
@@ -38,10 +46,15 @@ import { compliance_validations } from '../../app/modules/compliance/compliance.
 import uploadCloud from '../../app/utils/cloudinary.js';
 
 const db = prisma.complianceObligation as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const attestationDb = prisma.complianceAttestation as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const uploadCloudMock = uploadCloud as unknown as ReturnType<typeof vi.fn>;
+const txFn = (prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }).$transaction;
 
 const ANCHOR = ORG_A;
 const ORG_ID = 'org-00000000-0000-0000-0000-000000000093';
@@ -90,6 +103,33 @@ describe('compute_obligation_overdue', () => {
   it('is false for a not_applicable obligation even with a past due_date', () => {
     expect(compute_obligation_overdue(daysAgo(365), 'not_applicable', NOW)).toBe(false);
   });
+
+  // aexa-server#250: next_review_date (not the original one-time due_date)
+  // is what actually matters for a recurring obligation's staleness.
+  describe('next_review_date (aexa-server#250)', () => {
+    it('uses next_review_date instead of due_date when both are present', () => {
+      // due_date is long past, but next_review_date (the latest re-attestation
+      // cycle) is still in the future -> not overdue.
+      expect(compute_obligation_overdue(daysAgo(400), 'compliant', NOW, daysFromNow(10))).toBe(
+        false,
+      );
+    });
+
+    it('is overdue once next_review_date itself has passed, even with a future-looking due_date', () => {
+      expect(compute_obligation_overdue(daysFromNow(400), 'compliant', NOW, daysAgo(1))).toBe(true);
+    });
+
+    it('falls back to due_date when next_review_date is unset (non-recurring obligation)', () => {
+      expect(compute_obligation_overdue(daysAgo(1), 'in_progress', NOW, null)).toBe(true);
+      expect(compute_obligation_overdue(daysFromNow(1), 'in_progress', NOW, undefined)).toBe(false);
+    });
+
+    it('still excludes not_applicable even when next_review_date has passed', () => {
+      expect(compute_obligation_overdue(daysAgo(400), 'not_applicable', NOW, daysAgo(1))).toBe(
+        false,
+      );
+    });
+  });
 });
 
 describe('compliance service — org scoping (issue #93)', () => {
@@ -99,6 +139,11 @@ describe('compliance service — org scoping (issue #93)', () => {
     // caller's own accountId), same convention every service test in this
     // suite uses.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // aexa-server#250: attest_compliance_into_db wraps the attestation
+    // insert and the next_review_date update in a $transaction. The mock
+    // runs the interactive callback with the same mocked prisma as the tx
+    // client.
+    txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
   });
 
   describe('write-path role scoping (issue #55 slice 3)', () => {
@@ -368,6 +413,94 @@ describe('compliance service — org scoping (issue #93)', () => {
         expect(db.create).toHaveBeenCalled();
       });
     });
+
+    describe('next_review_date seeding (aexa-server#250)', () => {
+      it('seeds next_review_date from due_date when a recurrence is declared', async () => {
+        db.create.mockResolvedValue({});
+        const dueDate = new Date('2027-01-01T00:00:00.000Z');
+
+        await compliance_service.create_compliance_into_db(
+          makeReq({
+            body: {
+              title: 'Annual filing',
+              domain: 'Financial',
+              status: 'pending',
+              recurrence: 'annual',
+              due_date: dueDate,
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.next_review_date).toEqual(dueDate);
+      });
+
+      it('leaves next_review_date null when no recurrence is declared', async () => {
+        db.create.mockResolvedValue({});
+
+        await compliance_service.create_compliance_into_db(
+          makeReq({
+            body: {
+              title: 'One-time filing',
+              domain: 'Financial',
+              status: 'pending',
+              due_date: new Date('2027-01-01T00:00:00.000Z'),
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.next_review_date).toBeNull();
+      });
+
+      it('discards a client-supplied next_review_date and computes its own', async () => {
+        db.create.mockResolvedValue({});
+
+        await compliance_service.create_compliance_into_db(
+          makeReq({
+            body: {
+              title: 'Annual filing',
+              domain: 'Financial',
+              status: 'pending',
+              recurrence: 'annual',
+              due_date: new Date('2027-01-01T00:00:00.000Z'),
+              next_review_date: new Date('2099-01-01T00:00:00.000Z'), // attempted override
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.next_review_date).toEqual(new Date('2027-01-01T00:00:00.000Z'));
+      });
+
+      // Regression: a recurring obligation created with no due_date at all
+      // previously seeded next_review_date: null, reading as permanently
+      // non-overdue until its first attestation — defeating the whole
+      // "continuous oversight" point for exactly the obligations that had
+      // no due_date to fall back on.
+      it('falls back to now + the cadence interval when a recurrence is declared with no due_date', async () => {
+        db.create.mockResolvedValue({});
+        const before = Date.now();
+
+        await compliance_service.create_compliance_into_db(
+          makeReq({
+            body: {
+              title: 'Annual filing',
+              domain: 'Financial',
+              status: 'pending',
+              recurrence: 'annual',
+            },
+          }),
+        );
+
+        const after = Date.now();
+        const callArg = db.create.mock.calls[0][0];
+        const nextReviewMs = (callArg.data.next_review_date as Date).getTime();
+        const yearMs = 365 * 24 * 60 * 60 * 1000;
+        expect(nextReviewMs).toBeGreaterThanOrEqual(before + yearMs);
+        expect(nextReviewMs).toBeLessThanOrEqual(after + yearMs);
+      });
+    });
   });
 
   describe('update_compliance_into_db', () => {
@@ -391,6 +524,23 @@ describe('compliance service — org scoping (issue #93)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    // aexa-server#250: next_review_date is derived (via attest_compliance_into_db
+    // or seeded on create), never client-settable through a direct PATCH.
+    it('discards a client-supplied next_review_date on update', async () => {
+      db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({});
+
+      await compliance_service.update_compliance_into_db(
+        makeReq({
+          params: { id: 'c1' },
+          body: { title: 'Revised', next_review_date: new Date('2099-01-01T00:00:00.000Z') },
+        }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('next_review_date');
     });
 
     describe('evidence gating for status: compliant (#243)', () => {
@@ -609,6 +759,212 @@ describe('compliance service — org scoping (issue #93)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('attest_compliance_into_db (aexa-server#250)', () => {
+    it('throws 404 for another org obligation', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.attest_compliance_into_db(
+          makeReq({ params: { id: 'org-b-c1' }, body: {} }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(attestationDb.create).not.toHaveBeenCalled();
+    });
+
+    it('VIEWER cannot attest', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        compliance_service.attest_compliance_into_db(makeReq({ params: { id: 'c1' }, body: {} })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(attestationDb.create).not.toHaveBeenCalled();
+    });
+
+    it('creates an attestation snapshotting the obligation status, the caller, and an optional note', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'c1',
+        org_account_id: ORG_A,
+        status: 'compliant',
+        recurrence: null,
+      });
+      attestationDb.create.mockResolvedValue({ id: 'att-1' });
+      db.update.mockResolvedValue({ id: 'c1', status: 'compliant' });
+
+      await compliance_service.attest_compliance_into_db(
+        makeReq({ params: { id: 'c1' }, body: { note: 'Confirmed with legal counsel' } }),
+      );
+
+      const callArg = attestationDb.create.mock.calls[0][0];
+      expect(callArg.data).toMatchObject({
+        org_account_id: ORG_A,
+        obligation_id: 'c1',
+        attested_by: ORG_A,
+        status_at_attestation: 'compliant',
+        note: 'Confirmed with legal counsel',
+      });
+      expect(callArg.data.attested_at).toBeInstanceOf(Date);
+    });
+
+    it('leaves next_review_date null (untouched) for a non-recurring obligation', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'c1',
+        org_account_id: ORG_A,
+        status: 'compliant',
+        recurrence: null,
+      });
+      attestationDb.create.mockResolvedValue({ id: 'att-1' });
+      db.update.mockResolvedValue({ id: 'c1' });
+
+      await compliance_service.attest_compliance_into_db(
+        makeReq({ params: { id: 'c1' }, body: {} }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.next_review_date).toBeNull();
+    });
+
+    it.each([
+      ['monthly', 30],
+      ['quarterly', 90],
+      ['annual', 365],
+    ])(
+      'advances next_review_date by the %s cadence interval from attested_at',
+      async (recurrence, days) => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          status: 'compliant',
+          recurrence,
+        });
+        attestationDb.create.mockResolvedValue({ id: 'att-1' });
+        db.update.mockResolvedValue({ id: 'c1' });
+
+        const before = Date.now();
+        await compliance_service.attest_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: {} }),
+        );
+        const after = Date.now();
+
+        const callArg = db.update.mock.calls[0][0];
+        const nextReviewMs = (callArg.data.next_review_date as Date).getTime();
+        const expectedIntervalMs = days * 24 * 60 * 60 * 1000;
+        // Bracket rather than exact-match, since attested_at is `new Date()`
+        // captured inside the service call, not controlled by this test.
+        expect(nextReviewMs).toBeGreaterThanOrEqual(before + expectedIntervalMs);
+        expect(nextReviewMs).toBeLessThanOrEqual(after + expectedIntervalMs);
+      },
+    );
+
+    it('wraps the attestation insert and the next_review_date update in a single $transaction', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'c1',
+        org_account_id: ORG_A,
+        status: 'compliant',
+        recurrence: 'monthly',
+      });
+      attestationDb.create.mockResolvedValue({ id: 'att-1' });
+      db.update.mockResolvedValue({ id: 'c1' });
+
+      await compliance_service.attest_compliance_into_db(
+        makeReq({ params: { id: 'c1' }, body: {} }),
+      );
+
+      expect(txFn).toHaveBeenCalledTimes(1);
+      expect(attestationDb.create).toHaveBeenCalled();
+      expect(db.update).toHaveBeenCalled();
+    });
+
+    // aexa-server#250: recurrence/status are re-read INSIDE the transaction
+    // (via tx.complianceObligation.findFirst) rather than reusing the
+    // pre-transaction snapshot — otherwise a concurrent update changing
+    // `recurrence` between the initial ownership check and this
+    // transaction could have its change silently clobbered by a
+    // next_review_date computed from a stale cadence. Same TOCTOU fix as
+    // #241's residual-score resolution and #242's KRI submission.
+    it('re-reads the row inside the transaction rather than reusing the pre-transaction snapshot', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'c1',
+        org_account_id: ORG_A,
+        status: 'compliant',
+        recurrence: 'monthly',
+      });
+      attestationDb.create.mockResolvedValue({ id: 'att-1' });
+      db.update.mockResolvedValue({ id: 'c1' });
+
+      await compliance_service.attest_compliance_into_db(
+        makeReq({ params: { id: 'c1' }, body: {} }),
+      );
+
+      // Called once for the outer ownership/404 check, once inside the
+      // transaction for the fresh recurrence/status read.
+      expect(db.findFirst).toHaveBeenCalledTimes(2);
+      expect(db.findFirst.mock.calls[1][0]).toEqual({ where: { id: 'c1' } });
+    });
+
+    // Confirms a fresh attestation's next_review_date genuinely REPLACES an
+    // already-set one from a prior cycle, rather than stacking onto it or
+    // being ignored.
+    it('replaces an existing non-null next_review_date with a freshly computed one', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'c1',
+        org_account_id: ORG_A,
+        status: 'compliant',
+        recurrence: 'monthly',
+        next_review_date: new Date('2020-01-01T00:00:00.000Z'), // long-stale prior cycle
+      });
+      attestationDb.create.mockResolvedValue({ id: 'att-2' });
+      db.update.mockResolvedValue({ id: 'c1' });
+
+      const before = Date.now();
+      await compliance_service.attest_compliance_into_db(
+        makeReq({ params: { id: 'c1' }, body: {} }),
+      );
+      const after = Date.now();
+
+      const callArg = db.update.mock.calls[0][0];
+      const nextReviewMs = (callArg.data.next_review_date as Date).getTime();
+      const monthMs = 30 * 24 * 60 * 60 * 1000;
+      expect(nextReviewMs).toBeGreaterThanOrEqual(before + monthMs);
+      expect(nextReviewMs).toBeLessThanOrEqual(after + monthMs);
+    });
+  });
+
+  describe('get_compliance_attestations_from_db (aexa-server#250)', () => {
+    it('throws 404 for another org obligation', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.get_compliance_attestations_from_db(
+          makeReq({ params: { id: 'org-b-c1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(attestationDb.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns the attestation history for the obligation, newest first, org-scoped via the obligation ownership check', async () => {
+      db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A });
+      attestationDb.findMany.mockResolvedValue([
+        { id: 'att-2', attested_at: new Date('2026-02-01') },
+        { id: 'att-1', attested_at: new Date('2026-01-01') },
+      ]);
+      attestationDb.count.mockResolvedValue(2);
+
+      const result = await compliance_service.get_compliance_attestations_from_db(
+        makeReq({ params: { id: 'c1' } }),
+      );
+
+      expect(db.findFirst).toHaveBeenCalledWith({ where: { id: 'c1', org_account_id: ORG_A } });
+      const [callArg] = attestationDb.findMany.mock.calls[0];
+      expect(callArg.where).toEqual({ obligation_id: 'c1' });
+      expect(callArg.orderBy).toEqual({ attested_at: 'desc' });
+      expect(result.data).toHaveLength(2);
+      expect(result.meta.total).toBe(2);
     });
   });
 
@@ -1095,6 +1451,47 @@ describe('compliance validation schemas', () => {
         status: 'pending',
       });
       expect('regulation_reference' in parsed).toBe(false);
+    });
+  });
+
+  describe('recurrence (aexa-server#250)', () => {
+    it('accepts a recognized cadence value', async () => {
+      const parsed = await compliance_validations.create_compliance.parseAsync({
+        title: 'x',
+        domain: 'Financial',
+        status: 'pending',
+        recurrence: 'annual',
+      });
+      expect(parsed.recurrence).toBe('annual');
+    });
+
+    it('is optional', async () => {
+      const parsed = await compliance_validations.create_compliance.parseAsync({
+        title: 'x',
+        domain: 'Financial',
+        status: 'pending',
+      });
+      expect('recurrence' in parsed).toBe(false);
+    });
+  });
+
+  describe('attest_compliance (aexa-server#250)', () => {
+    it('accepts an optional note', async () => {
+      const parsed = await compliance_validations.attest_compliance.parseAsync({
+        note: 'Confirmed with legal counsel',
+      });
+      expect(parsed.note).toBe('Confirmed with legal counsel');
+    });
+
+    it('allows an empty body (note is optional)', async () => {
+      const parsed = await compliance_validations.attest_compliance.parseAsync({});
+      expect('note' in parsed).toBe(false);
+    });
+
+    it('rejects a note over 2000 characters', async () => {
+      await expect(
+        compliance_validations.attest_compliance.parseAsync({ note: 'x'.repeat(2001) }),
+      ).rejects.toBeTruthy();
     });
   });
 });

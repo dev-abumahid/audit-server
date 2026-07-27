@@ -64,6 +64,13 @@ const create_compliance = z.object({
   // derives from (ISO 37301 obligations-register basis). Free text, same
   // reasoning as `domain` staying a free string.
   regulation_reference: z.string().optional(),
+  // aexa-server#250: declared re-attestation cadence — 'monthly' |
+  // 'quarterly' | 'annual', or omitted/null for a non-recurring obligation.
+  // Free text (not a zod enum), matching kri.validation.ts's `frequency`
+  // precedent — see compliance.service.ts's RECURRENCE_INTERVAL_DAYS for
+  // the recognized values. next_review_date is deliberately NOT accepted
+  // here: it's derived (see compliance.service.ts), never client-settable.
+  recurrence: z.string().optional(),
   ai_generated: z.boolean().optional(),
   is_edited: z.boolean().optional(),
   line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
@@ -85,7 +92,15 @@ const update_compliance = create_compliance.partial().extend({
   site_id: z.preprocess((v) => (v === '' ? null : v), z.string().nullable().optional()),
 });
 
+// aexa-server#250: re-attestation submission — just an optional note, since
+// attested_by/attested_at/status_at_attestation are all derived server-side
+// from the caller and the obligation's current state, not client input.
+const attest_compliance = z.object({
+  note: z.string().max(2000).optional(),
+});
+
 export const compliance_validations = {
   create_compliance,
   update_compliance,
+  attest_compliance,
 };

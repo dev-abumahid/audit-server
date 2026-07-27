@@ -46,6 +46,27 @@ model ComplianceObligation {
     // insufficient in practice.
     regulation_reference String?
 
+    // aexa-server#250: modern compliance practice is "continuous oversight,
+    // not point-in-time" — an annual filing obligation was previously
+    // indistinguishable from a one-time one, with no cadence and no way to
+    // know if a periodic obligation had gone stale since it was last
+    // confirmed. Free string (not a DB enum), same convention as domain/
+    // status/frequency (kri.prisma) — one of 'monthly' | 'quarterly' |
+    // 'annual', or null/'one_time' for a non-recurring obligation. See
+    // compliance.service.ts's RECURRENCE_INTERVAL_DAYS for the exact
+    // cadence->days mapping.
+    recurrence String?
+    // Derived, NOT independently client-settable (see
+    // compliance.service.ts's attest_compliance_into_db and the stripping in
+    // create/update_compliance_into_db) — seeded from due_date at creation
+    // when a recurrence is set (the first cycle's due date doubles as the
+    // first review date), then recomputed from attested_at + the cadence's
+    // interval on every new ComplianceAttestation. compute_obligation_overdue
+    // reads this (falling back to due_date when unset) so a recurring
+    // obligation that's gone stale since its last confirmation is flagged
+    // overdue even though its original one-time due_date already passed.
+    next_review_date DateTime?
+
     ai_generated Boolean @default(false)
     is_edited    Boolean @default(false)
 
@@ -63,9 +84,51 @@ model ComplianceObligation {
     // rationale (and why no extra delete-guard is warranted).
     actions Action[]
 
+    // aexa-server#250: append-only re-attestation history — see
+    // ComplianceAttestation below.
+    attestations ComplianceAttestation[]
+
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 
     @@index([org_account_id])
     @@index([site_id])
+}
+
+// aexa-server#250: a permanent record of "this obligation was reconfirmed
+// on this date, by this person, with this status" — never updated or
+// deleted once written, same append-only-history precedent as
+// kri.prisma's KriReading. Deliberately NOT a maker-checker
+// submit/approve/reject cycle like RiskApproval — that level of
+// independent-verification machinery is reserved for #252 (finding closure
+// verification), which is a separate, larger decision about who signs off
+// on CLOSING something. Re-attestation here answers a narrower question
+// ("has someone recently reconfirmed this periodic obligation still
+// holds") and doesn't gate anything by itself — it's a log entry, not an
+// approval state.
+model ComplianceAttestation {
+    id             String   @id @default(uuid())
+    org_account_id String
+    account        Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+
+    obligation_id String
+    obligation    ComplianceObligation @relation(fields: [obligation_id], references: [id], onDelete: Cascade)
+
+    // Plain accountId string, not an Account FK — same "who did this"
+    // precedent as AuditEngagement.lead_auditor/FindingAssignment.assignedById
+    // (a lightweight actor reference, not a relation requiring a join to
+    // read a name off it).
+    attested_by String
+    attested_at DateTime @default(now())
+    // Snapshot of the obligation's status AT THE MOMENT of attestation —
+    // "confirmed compliant as of this date" is a fact about that point in
+    // time, not something that should silently reinterpret itself if the
+    // obligation's live status later changes.
+    status_at_attestation String
+    note                  String?
+
+    createdAt DateTime @default(now())
+
+    @@index([org_account_id])
+    @@index([obligation_id])
 }

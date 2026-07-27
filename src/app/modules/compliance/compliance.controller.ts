@@ -79,6 +79,28 @@ const get_compliance_scorecard = catchAsync(async (req, res) => {
   });
 });
 
+const attest_compliance = catchAsync(async (req, res) => {
+  const result = await compliance_service.attest_compliance_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Compliance obligation re-attested successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const get_compliance_attestations = catchAsync(async (req, res) => {
+  const result = await compliance_service.get_compliance_attestations_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Compliance attestation history fetched successfully.',
+    data: result.data,
+    meta: result.meta,
+  });
+});
+
 export const compliance_controller = {
   get_all_compliance,
   get_single_compliance,
@@ -87,4 +109,6 @@ export const compliance_controller = {
   delete_compliance,
   upload_compliance_attachment,
   get_compliance_scorecard,
+  attest_compliance,
+  get_compliance_attestations,
 };

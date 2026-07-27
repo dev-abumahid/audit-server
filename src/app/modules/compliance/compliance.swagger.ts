@@ -18,6 +18,11 @@ export const complianceSwaggerDocs = {
               due_date: '2026-12-31T00:00:00Z',
               attachments: [],
               regulation_reference: 'GDPR Art. 30(1)',
+              // aexa-server#250: declared re-attestation cadence. Omitted =
+              // non-recurring. next_review_date is derived (seeded from
+              // due_date here, then advanced by POST /:id/attest) — never
+              // client-settable.
+              recurrence: 'annual',
             }),
           },
         },
@@ -79,6 +84,47 @@ export const complianceSwaggerDocs = {
         200: { description: 'attachment uploaded successfully' },
         400: { description: 'file is required or file type not allowed' },
         401: { description: 'unauthorized' },
+      },
+    },
+  },
+
+  '/api/compliance/{id}/attest': {
+    post: {
+      tags: ['compliance'],
+      summary: 'Re-attest a compliance obligation',
+      description:
+        'Records a permanent re-attestation entry (who, when, the status at that moment, an optional note) and, if the obligation has a declared recurrence, advances next_review_date by that cadence.',
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      requestBody: {
+        required: false,
+        content: {
+          'application/json': {
+            example: JSON.stringify({ note: 'Confirmed with legal counsel' }),
+          },
+        },
+      },
+      responses: {
+        200: { description: 'compliance obligation re-attested successfully' },
+        401: { description: 'unauthorized' },
+        404: { description: 'compliance obligation not found' },
+      },
+    },
+  },
+
+  '/api/compliance/{id}/attestations': {
+    get: {
+      tags: ['compliance'],
+      summary: "Get a compliance obligation's re-attestation history",
+      description: 'Returns every recorded attestation for this obligation, newest first.',
+      parameters: [
+        { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+        { name: 'page', in: 'query', required: false, schema: { type: 'number' } },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'number' } },
+      ],
+      responses: {
+        200: { description: 'compliance attestation history fetched successfully' },
+        401: { description: 'unauthorized' },
+        404: { description: 'compliance obligation not found' },
       },
     },
   },

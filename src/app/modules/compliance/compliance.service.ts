@@ -31,22 +31,58 @@ import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHel
 // Every other status (including 'compliant') is eligible: a "compliant"
 // obligation still sitting past its due_date with no re-attestation is
 // exactly the stale-data gap this ticket describes.
+//
+// aexa-server#250: for a recurring obligation, `next_review_date` (not the
+// original one-time `due_date`) is the date that actually matters for
+// staleness — a recurring obligation whose first due_date has long since
+// passed but which has been re-attested on schedule should NOT read as
+// overdue forever; conversely one that's fallen behind its cadence should.
+// Falls back to due_date when next_review_date is unset (a non-recurring
+// obligation, or a recurring one that hasn't had its first cycle seeded
+// yet), preserving #243's original behavior exactly for that case.
 export const compute_obligation_overdue = (
   due_date: Date | null | undefined,
   status: string,
   now: Date = new Date(),
+  next_review_date?: Date | null,
 ): boolean => {
-  if (!due_date) return false;
+  const effectiveDate = next_review_date ?? due_date;
+  if (!effectiveDate) return false;
   if (status === 'not_applicable') return false;
-  return due_date.getTime() < now.getTime();
+  return effectiveDate.getTime() < now.getTime();
 };
 
-const with_overdue = <T extends { due_date: Date | null; status: string }>(
+const with_overdue = <
+  T extends { due_date: Date | null; status: string; next_review_date?: Date | null },
+>(
   obligation: T,
 ): T & { overdue: boolean } => ({
   ...obligation,
-  overdue: compute_obligation_overdue(obligation.due_date, obligation.status),
+  overdue: compute_obligation_overdue(
+    obligation.due_date,
+    obligation.status,
+    new Date(),
+    obligation.next_review_date,
+  ),
 });
+
+// aexa-server#250: maps a declared recurrence cadence to the number of days
+// until the next review is due, mirroring kri.service.ts's
+// FREQUENCY_INTERVAL_DAYS (case-insensitive lookup, free string rather than
+// a DB enum). 'one_time'/null/unrecognized means no recurrence — no interval
+// to compute a next_review_date from.
+const RECURRENCE_INTERVAL_DAYS: Record<string, number> = {
+  monthly: 30,
+  quarterly: 90,
+  annual: 365,
+};
+
+const computeNextReviewDate = (recurrence: string | null | undefined, from: Date): Date | null => {
+  if (!recurrence) return null;
+  const intervalDays = RECURRENCE_INTERVAL_DAYS[recurrence.trim().toLowerCase()];
+  if (!intervalDays) return null;
+  return new Date(from.getTime() + intervalDays * 24 * 60 * 60 * 1000);
+};
 
 // aexa-server#243: evidence was decorative — attachments were validated as
 // HTTPS URLs but never inspected by any business logic, so nothing required
@@ -158,10 +194,24 @@ const create_compliance_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   assertCanWriteOrgResource(ctx);
-  const payload = req.body;
+  // aexa-server#250: next_review_date is derived, never client-settable —
+  // discard whatever's supplied and seed it ourselves below.
+  const { next_review_date: _ignoredReviewDate, ...payload } = req.body;
   await assertSiteBelongsToOrg(payload.site_id, ctx.organizationId);
   assertCompliantHasEvidence(payload.status, payload.attachments);
   payload.org_account_id = ctx.organizationId;
+  // aexa-server#250: the first cycle's due date doubles as the first review
+  // date when a recurrence is declared — there's no prior attestation yet
+  // to compute one from. Falls back to now + the cadence's interval when no
+  // due_date is supplied at all: without this, a recurring obligation
+  // created without a due_date would seed next_review_date: null and read
+  // as permanently non-overdue until its first attestation, defeating the
+  // whole "continuous oversight" point for exactly the obligations that
+  // didn't have a due_date to fall back on. Non-recurring obligations get
+  // no review date either way.
+  payload.next_review_date = payload.recurrence
+    ? (payload.due_date ?? computeNextReviewDate(payload.recurrence, new Date()))
+    : null;
   const result = await prisma.complianceObligation.create({ data: payload });
   return with_overdue(result);
 };
@@ -189,7 +239,10 @@ const update_compliance_into_db = async (req: Request) => {
   // obligation to a different org's anchor account id, a cross-tenant
   // integrity issue even though ownership of the *existing* row was verified
   // above. Same guard audit.service.ts / site.service.ts apply.
-  const { org_account_id: _ignored, ...safeBody } = req.body;
+  // aexa-server#250: next_review_date is derived, never client-settable via
+  // a direct PATCH — it only ever changes through attest_compliance_into_db
+  // below (or implicitly, when create seeds it).
+  const { org_account_id: _ignored, next_review_date: _ignoredReviewDate, ...safeBody } = req.body;
   // aexa-server#243: check the EFFECTIVE (merged) status/attachments, not
   // just whichever of the two fields this particular PATCH happens to
   // include — see assertCompliantHasEvidence's own comment for why.
@@ -202,6 +255,102 @@ const update_compliance_into_db = async (req: Request) => {
     data: { ...safeBody, org_account_id: ctx.organizationId },
   });
   return with_overdue(result);
+};
+
+/**
+ * aexa-server#250: records a permanent re-attestation entry ("this
+ * obligation was reconfirmed on this date, by this person, with this
+ * status") and, if the obligation has a declared recurrence, advances
+ * next_review_date to attested_at + the cadence's interval — so a
+ * recurring obligation that's actually being kept current on schedule
+ * stops reading as overdue, without anyone touching due_date or status
+ * directly. A non-recurring obligation can still be attested (the history
+ * entry itself is a legitimate audit-trail fact — "someone re-checked
+ * this" — independent of whether there's a cadence to advance), it just
+ * leaves next_review_date untouched (null stays null).
+ *
+ * Deliberately NOT a maker-checker approve/reject cycle — see
+ * ComplianceAttestation's own schema comment for why that's out of scope
+ * here (reserved for #252). The obligation write and the attestation
+ * insert run in one $transaction so a crash between them can't leave a
+ * recorded re-attestation with no corresponding next_review_date update
+ * (or vice versa).
+ */
+const attest_compliance_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const id = req.params.id as string;
+  const existing = await prisma.complianceObligation.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Compliance obligation not found', 404);
+
+  const { note } = req.body as { note?: string };
+  const attestedAt = new Date();
+
+  // aexa-server#250: re-read the row's recurrence/status INSIDE the
+  // transaction, immediately before computing what to write, rather than
+  // reusing `existing` (fetched before the transaction even opened) — same
+  // TOCTOU fix as #241's residual-score resolution and #242's KRI
+  // submission. Without this, a concurrent update_compliance_into_db that
+  // changes `recurrence` (or `status`) between the check above and this
+  // transaction could have its change silently clobbered by a
+  // next_review_date computed from a stale cadence, or an attestation
+  // snapshotting a status that was never actually live.
+  const result = await prisma.$transaction(async (tx) => {
+    const current = await tx.complianceObligation.findFirst({ where: { id } });
+    if (!current) throw new AppError('Compliance obligation not found', 404);
+    const nextReviewDate = computeNextReviewDate(current.recurrence, attestedAt);
+
+    const attestation = await tx.complianceAttestation.create({
+      data: {
+        org_account_id: ctx.organizationId,
+        obligation_id: id,
+        attested_by: user.accountId,
+        attested_at: attestedAt,
+        status_at_attestation: current.status,
+        note,
+      },
+    });
+    const obligation = await tx.complianceObligation.update({
+      where: { id },
+      data: { next_review_date: nextReviewDate },
+    });
+    return { attestation, obligation };
+  });
+
+  return { attestation: result.attestation, obligation: with_overdue(result.obligation) };
+};
+
+const get_compliance_attestations_from_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const id = req.params.id as string;
+  const { page, limit } = req.query as Record<string, string>;
+
+  const obligation = await prisma.complianceObligation.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!obligation) throw new AppError('Compliance obligation not found', 404);
+
+  const pagination = paginationHelper({ page, limit });
+  const { skip, limit: limitNumber } = pagination;
+
+  const [data, total] = await Promise.all([
+    prisma.complianceAttestation.findMany({
+      where: { obligation_id: id },
+      skip,
+      take: limitNumber,
+      orderBy: { attested_at: 'desc' },
+    }),
+    prisma.complianceAttestation.count({ where: { obligation_id: id } }),
+  ]);
+
+  return {
+    data,
+    meta: buildPaginationMeta(pagination, total),
+  };
 };
 
 const delete_compliance_from_db = async (req: Request) => {
@@ -303,6 +452,7 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
       site_id: true,
       site: { select: { name: true } },
       due_date: true,
+      next_review_date: true,
     },
   });
 
@@ -318,7 +468,7 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
   // statusCounts below (must stay correct once the obligation list is
   // server-side paginated, can't be derived from a single page of rows).
   const overdueCount = obligations.filter((o) =>
-    compute_obligation_overdue(o.due_date, o.status),
+    compute_obligation_overdue(o.due_date, o.status, new Date(), o.next_review_date),
   ).length;
 
   // Org-wide tally per status. The frontend summary cards (compliant /
@@ -416,4 +566,6 @@ export const compliance_service = {
   delete_compliance_from_db,
   upload_compliance_attachment_into_aws,
   get_compliance_scorecard_from_db,
+  attest_compliance_into_db,
+  get_compliance_attestations_from_db,
 };
