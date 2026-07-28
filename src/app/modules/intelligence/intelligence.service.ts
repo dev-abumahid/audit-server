@@ -104,6 +104,19 @@ const callAexaAiIntelligence = async <T>(
 // proxy's default happens to be.
 export const SCRAPE_ROUTE_TIMEOUT_MS = 60_000;
 
+// #298 round-1 review: the advisory-lock transaction below runs the create
+// pass sequentially (one connection, see the comment at the call site) and
+// this module's own worst case is ~750 new items in one scrape -- Prisma's
+// interactive $transaction defaults to a 5s `timeout` (and 2s `maxWait`) when
+// no options are passed, which a batch that size can easily exceed, throwing
+// P2028 and rolling back every item in the batch, not just the slow tail.
+// `timeout` is set generously above that worst case (accounting for a
+// realistic per-create round-trip plus whatever time this call might spend
+// blocked on the advisory lock behind an in-flight scrape for the same org,
+// itself bounded by this same constant) rather than relying on the 5s
+// default meant for typical short interactive transactions.
+const SCRAPE_TRANSACTION_OPTIONS = { timeout: 180_000, maxWait: 10_000 };
+
 const toDate = (value: string | undefined): Date | null => {
   if (!value) return null;
   const parsed = new Date(value);
@@ -203,7 +216,7 @@ const scrape_sources_into_db = async (req: Request) => {
         );
       }
       return rows;
-    });
+    }, SCRAPE_TRANSACTION_OPTIONS);
 
     return {
       items: created,

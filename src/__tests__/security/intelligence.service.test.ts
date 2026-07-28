@@ -244,6 +244,26 @@ describe('intelligence service', () => {
       expect(result.itemsNew).toBe(0);
     });
 
+    // #298 round-1 review: Prisma's interactive $transaction defaults to a
+    // 5s timeout (2s maxWait) when no options are passed -- easily exceeded
+    // by this module's own worst case (~750 sequential creates in one
+    // scrape), which would abort the whole batch with P2028 instead of just
+    // the slow tail. Locks in that an explicit, larger timeout is actually
+    // passed at the call site, not just present in a comment.
+    it("passes an explicit timeout well above Prisma's 5s default to the advisory-lock transaction", async () => {
+      vi.stubGlobal(
+        'fetch',
+        onlyCisaHasAnItem('Timeout-safe story', 'https://example.com/timeout'),
+      );
+      itemDb.findMany.mockResolvedValue([]);
+      itemDb.create.mockResolvedValue({ id: 'new-item' });
+
+      await intelligence_service.scrape_sources_into_db(makeReq());
+
+      const [, options] = txFn.mock.calls[0];
+      expect(options?.timeout).toBeGreaterThanOrEqual(60_000);
+    });
+
     it('persists a new item not already in the store', async () => {
       vi.stubGlobal('fetch', onlyCisaHasAnItem('Brand new incident', 'https://example.com/2'));
       itemDb.findMany.mockResolvedValue([]);
