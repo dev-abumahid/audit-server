@@ -20,7 +20,7 @@ const create_risk = z.object({
   pagerank_score: z.number().int().optional(),
   financial_impact_min: z.number().int().optional(),
   financial_impact_max: z.number().int().optional(),
-  probability: z.number().int().optional(),
+  probability: z.number().int().min(0).max(100).optional(),
   // aexa-server#241: real, independent impact axis for the risk matrix
   // (previously faked from inherent_score — see #202).
   impact: z.number().int().min(0).max(100).optional(),
@@ -32,8 +32,8 @@ const create_risk = z.object({
   site_id: z.string(),
   source_info: z.string().optional(),
 
-  control_design_eff: z.number().int().optional(),
-  control_operating_eff: z.number().int().optional(),
+  control_design_eff: z.number().int().min(0).max(100).optional(),
+  control_operating_eff: z.number().int().min(0).max(100).optional(),
   line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
 
   // aexa-server#241: residual_score is derived by default (risk_scoring.ts).
