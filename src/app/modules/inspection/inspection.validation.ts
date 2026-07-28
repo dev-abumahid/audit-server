@@ -23,6 +23,14 @@ export const QuestionAnswerSchema = z.object({
 const create_inspection = z.object({
   templateId: z.string().uuid(),
   siteId: z.string().uuid(),
+  // Optional metadata (who performed the inspection), matching
+  // Inspection.inspectorProfileId's nullable/optional Prisma column
+  // (prisma/schema/inspection.prisma) — not every inspection has an
+  // inspector assigned at creation time. Was missing entirely from this
+  // schema, so Zod's default unknown-key stripping (request_validator.ts)
+  // silently dropped whatever the client sent and the service always wrote
+  // `undefined` regardless of the request body (issue #279).
+  inspectorProfileId: z.string().uuid().optional(),
   questionAnswers: z.array(QuestionAnswerSchema),
 });
 const update_inspection = z.object({

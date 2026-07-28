@@ -674,6 +674,51 @@ export const assertCanReassignLineOfDefense = (
 };
 
 /**
+ * Verifies a Profile.id belongs to the same org as the caller. Profile has
+ * no orgAccountId of its own — "same org" is checked by resolving the
+ * target Profile's own account's org anchor and comparing it to the
+ * caller's, via resolveAccountOrgAnchor.
+ *
+ * Originally private to template.service.ts (added for TemplateAccess's
+ * body.userId — issue #58, cross-tenant grant/revoke target). Promoted here
+ * once inspection.service.ts needed the identical check for
+ * create_inspection_into_db's body.inspectorProfileId (issue #279:
+ * inspectorProfileId wasn't even in the Zod schema, so it always wrote
+ * `undefined`; once added, it needs the same org-ownership guard every other
+ * client-supplied foreign id in that function already has), rather than let
+ * a second copy of the same Profile-org check start drifting.
+ *
+ * requireActive is opt-in, not baked into the same-org check itself — an
+ * earlier version of this function resolved the target through
+ * resolveCallerOrgContext (the caller-facing helper), which throws a 403 for
+ * a merely-inactive (suspended/expired) target instead of the uniform 404
+ * every other invalid id here produces, AND made it impossible to ever
+ * revoke a suspended member's leftover access (the revoke path can't allow
+ * that to fail). resolveAccountOrgAnchor resolves the same-org fact without
+ * that throw, so the two independent facts — "same org" and "currently
+ * active" — can be checked separately per call site. Found by independent
+ * review (issue #58).
+ */
+export const requireTargetProfileInCallerOrg = async (
+  profileId: string,
+  callerOrganizationId: string,
+  { requireActive = false }: { requireActive?: boolean } = {},
+) => {
+  const targetProfile = await prisma.profile.findUnique({
+    where: { id: profileId },
+    select: { accountId: true },
+  });
+  if (!targetProfile) throw new AppError('User not found', 404);
+  const target = await resolveAccountOrgAnchor(targetProfile.accountId);
+  if (target.organizationId !== callerOrganizationId) {
+    throw new AppError('User not found', 404);
+  }
+  if (requireActive && !target.isActive) {
+    throw new AppError("This member's access to the organization is not active.", 400);
+  }
+};
+
+/**
  * Admin-only gate for privileged organization-wide actions that aren't
  * "write to a resource" so much as "change who can access something" —
  * currently just Template access grant/revoke. Found by independent review:

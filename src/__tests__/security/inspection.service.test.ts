@@ -40,6 +40,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
     organization: {
       findUnique: vi.fn(),
     },
+    profile: {
+      findUnique: vi.fn(),
+    },
     inspectionAssignment: {
       findMany: vi.fn(),
       findFirst: vi.fn(),
@@ -68,6 +71,7 @@ const assignmentDb = prisma.inspectionAssignment as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
+const profileDb = prisma.profile as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('inspection service — org scoping (ticket #6)', () => {
   beforeEach(() => {
@@ -77,6 +81,12 @@ describe('inspection service — org scoping (ticket #6)', () => {
     // ADMIN-of-self fallback (org anchor === caller's own accountId, same
     // as the pre-slice-3 behavior).
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Default: every pre-existing test in this file passes a plain
+    // `inspectorProfileId: 'p1'` fixture without caring about the profile
+    // org-ownership check added for issue #279 — resolve it to the caller's
+    // own org (ORG_A) so those tests are unaffected. Tests that specifically
+    // exercise the ownership check override this per case below.
+    profileDb.findUnique.mockResolvedValue({ accountId: ORG_A });
   });
 
   describe('get_all_inspection_from_db', () => {
@@ -312,6 +322,103 @@ describe('inspection service — org scoping (ticket #6)', () => {
         where: { id: { in: ['q1'] }, page: { template: { orgAccountId: ORG_A } } },
       });
       expect(inspectionDb.create).toHaveBeenCalled();
+    });
+
+    // Issue #279: inspectorProfileId was missing from the create_inspection
+    // Zod schema entirely, so Zod's default unknown-key stripping
+    // (request_validator.ts) silently dropped whatever the client sent and
+    // the service always wrote `undefined` regardless of the request body.
+    // These cover the service-level org-ownership guard added alongside the
+    // schema fix.
+    describe('inspectorProfileId org-ownership guard (issue #279)', () => {
+      it('accepts a valid org-scoped inspectorProfileId and writes it to the created record', async () => {
+        templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+        siteDb.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
+        profileDb.findUnique.mockResolvedValue({ accountId: ORG_A });
+        inspectionDb.create.mockResolvedValue({});
+
+        await inspection_service.create_inspection_into_db(
+          makeReq({
+            body: {
+              templateId: 't1',
+              siteId: 's1',
+              inspectorProfileId: 'profile-in-org-a',
+              questionAnswers: [],
+            },
+          }),
+        );
+
+        expect(profileDb.findUnique).toHaveBeenCalledWith({
+          where: { id: 'profile-in-org-a' },
+          select: { accountId: true },
+        });
+        const callArg = inspectionDb.create.mock.calls[0][0];
+        expect(callArg.data.inspectorProfileId).toBe('profile-in-org-a');
+      });
+
+      it('throws 404 and does NOT create when inspectorProfileId belongs to another org', async () => {
+        templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+        siteDb.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
+        // Target profile's own account resolves to a different org anchor.
+        profileDb.findUnique.mockResolvedValue({ accountId: 'org-b-account' });
+
+        await expect(
+          inspection_service.create_inspection_into_db(
+            makeReq({
+              body: {
+                templateId: 't1',
+                siteId: 's1',
+                inspectorProfileId: 'org-b-profile',
+                questionAnswers: [],
+              },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 404 });
+
+        expect(inspectionDb.create).not.toHaveBeenCalled();
+      });
+
+      it('throws 404 and does NOT create when inspectorProfileId does not exist at all', async () => {
+        templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+        siteDb.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
+        profileDb.findUnique.mockResolvedValue(null);
+
+        await expect(
+          inspection_service.create_inspection_into_db(
+            makeReq({
+              body: {
+                templateId: 't1',
+                siteId: 's1',
+                inspectorProfileId: 'nonexistent-profile',
+                questionAnswers: [],
+              },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 404 });
+
+        expect(inspectionDb.create).not.toHaveBeenCalled();
+      });
+
+      it('omitting inspectorProfileId entirely still succeeds, without querying Profile at all', async () => {
+        templateDb.findFirst.mockResolvedValue({ id: 't1', orgAccountId: ORG_A });
+        siteDb.findFirst.mockResolvedValue({ id: 's1', org_account_id: ORG_A });
+        inspectionDb.create.mockResolvedValue({});
+
+        await inspection_service.create_inspection_into_db(
+          makeReq({
+            body: {
+              templateId: 't1',
+              siteId: 's1',
+              questionAnswers: [],
+            },
+          }),
+        );
+
+        expect(profileDb.findUnique).not.toHaveBeenCalled();
+        const callArg = inspectionDb.create.mock.calls[0][0];
+        expect(callArg.data.inspectorProfileId).toBeUndefined();
+        expect(inspectionDb.create).toHaveBeenCalled();
+      });
     });
   });
 

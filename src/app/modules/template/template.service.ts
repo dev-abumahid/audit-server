@@ -8,7 +8,7 @@ import { JwtPayloadType } from '../../utils/JWT.js';
 import {
   assertCanWriteOrgResource,
   assertIsOrgAdmin,
-  resolveAccountOrgAnchor,
+  requireTargetProfileInCallerOrg,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
@@ -333,46 +333,10 @@ const delete_page_question_by_id_from_db = async (req: Request) => {
   return await prisma.question.delete({ where: { id } });
 };
 
-/**
- * Verifies a TemplateAccess target (Profile.id, via body.userId) belongs to
- * the same org as the caller — PR #56 fixed the templateId ownership check
- * on these two functions (issue #31), but neither verified the *target*
- * user, so an Admin who legitimately owns a template could still grant/
- * revoke access for a Profile.id belonging to an entirely different org, a
- * second, distinct cross-tenant vector. TemplateAccess.userId is a
- * Profile.id, not an Account.id or OrgMember.id, so "same org" is checked by
- * resolving the target Profile's own account's org anchor and comparing it
- * to the caller's.
- *
- * requireActive is opt-in, not baked into the same-org check itself — an
- * earlier version of this function resolved the target through
- * resolveCallerOrgContext (the caller-facing helper), which throws a 403 for
- * a merely-inactive (suspended/expired) target instead of the uniform 404
- * every other invalid userId here produces, AND made it impossible to ever
- * revoke a suspended member's leftover access (the revoke path can't allow
- * that to fail). resolveAccountOrgAnchor (org_scope.ts) resolves the same-org
- * fact without that throw, so the two independent facts — "same org" and
- * "currently active" — can be checked separately per call site. Found by
- * independent review (issue #58).
- */
-const requireTargetProfileInCallerOrg = async (
-  userId: string,
-  callerOrganizationId: string,
-  { requireActive = false }: { requireActive?: boolean } = {},
-) => {
-  const targetProfile = await prisma.profile.findUnique({
-    where: { id: userId },
-    select: { accountId: true },
-  });
-  if (!targetProfile) throw new AppError('User not found', 404);
-  const target = await resolveAccountOrgAnchor(targetProfile.accountId);
-  if (target.organizationId !== callerOrganizationId) {
-    throw new AppError('User not found', 404);
-  }
-  if (requireActive && !target.isActive) {
-    throw new AppError("This member's access to the organization is not active.", 400);
-  }
-};
+// requireTargetProfileInCallerOrg (verifies a TemplateAccess target's
+// Profile.id belongs to the caller's org — issue #58) moved to org_scope.ts
+// (imported above) once inspection.service.ts needed the identical check
+// for create_inspection_into_db's body.inspectorProfileId (issue #279).
 
 const add_template_access_member_into_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;

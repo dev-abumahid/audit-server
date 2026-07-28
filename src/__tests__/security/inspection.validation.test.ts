@@ -51,3 +51,42 @@ describe('inspection_validations.update_inspection — attachments', () => {
     expect(result.success).toBe(true);
   });
 });
+
+// Issue #279: inspectorProfileId was entirely absent from this schema, so
+// Zod's default unknown-key stripping (request_validator.ts's
+// `schema.parseAsync`) silently dropped whatever the client sent — the
+// service always wrote `undefined` regardless of the request body.
+describe('inspection_validations.create_inspection — inspectorProfileId', () => {
+  const BASE = {
+    templateId: '11111111-1111-4111-8111-111111111111',
+    siteId: '22222222-2222-4222-8222-222222222222',
+    questionAnswers: [],
+  };
+
+  it('accepts and preserves a valid uuid inspectorProfileId', () => {
+    const result = inspection_validations.create_inspection.safeParse({
+      ...BASE,
+      inspectorProfileId: '33333333-3333-4333-8333-333333333333',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.inspectorProfileId).toBe('33333333-3333-4333-8333-333333333333');
+    }
+  });
+
+  it('allows omitting inspectorProfileId entirely (optional field)', () => {
+    const result = inspection_validations.create_inspection.safeParse(BASE);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.inspectorProfileId).toBeUndefined();
+    }
+  });
+
+  it('rejects a non-uuid inspectorProfileId', () => {
+    const result = inspection_validations.create_inspection.safeParse({
+      ...BASE,
+      inspectorProfileId: 'not-a-uuid',
+    });
+    expect(result.success).toBe(false);
+  });
+});

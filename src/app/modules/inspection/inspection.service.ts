@@ -12,6 +12,7 @@ import {
   assertIsOrgAdmin,
   recordOrgAuditEvent,
   requireCallerOrganizationId,
+  requireTargetProfileInCallerOrg,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
@@ -192,6 +193,17 @@ const create_inspection_into_db = async (req: Request) => {
     where: { id: body.siteId, org_account_id: ctx.organizationId },
   });
   if (!template || !site) throw new AppError('Template or Site not found', 404);
+
+  // inspectorProfileId is optional client-supplied metadata (issue #279 —
+  // it was missing from the Zod schema entirely, so it always wrote
+  // `undefined` regardless of what the client sent; now that it's a real
+  // field, it needs the same org-ownership guard templateId/siteId already
+  // have above). Profile has no orgAccountId of its own, so "same org" is
+  // resolved via the target Profile's account, same pattern already used
+  // for TemplateAccess's body.userId (template.service.ts, issue #58).
+  if (body.inspectorProfileId) {
+    await requireTargetProfileInCallerOrg(body.inspectorProfileId, ctx.organizationId);
+  }
 
   // Every questionAnswers[].questionId is client-supplied and was stored
   // with no check that it belongs to a Question under the caller's own org
