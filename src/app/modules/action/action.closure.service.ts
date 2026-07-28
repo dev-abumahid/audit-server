@@ -312,11 +312,18 @@ const get_action_closure_state = async (req: Request) => {
 
 /**
  * Edit hook, called from update_action_into_db AND
- * update_action_for_external_member. Invalidates any live (PENDING_APPROVAL,
- * non-invalidated) closure cycle for a finding that's being edited: the
- * content being closed has changed, so the prior request no longer reflects
- * reality and a fresh submission is required. No-op (and no audit write)
- * when there's no live cycle.
+ * update_action_for_external_member. Invalidates any live (PENDING_APPROVAL
+ * or APPROVED, non-invalidated) closure cycle for a finding that's being
+ * edited: the content being closed has changed, so the prior cycle no
+ * longer reflects reality and a fresh submission is required. No-op (and no
+ * audit write) when there's no live cycle.
+ *
+ * Covers APPROVED (not just PENDING_APPROVAL) so that editing a
+ * finding's evidence/Five Cs *after* its closure was signed off invalidates
+ * that sign-off instead of leaving it standing against content nobody
+ * actually reviewed (aexa-server#258) — mirrors risk.approval.service.ts's
+ * invalidateLiveApprovalsOnEdit, which invalidates both statuses for the
+ * same reason.
  *
  * Takes a lazy Organization.id resolver rather than a resolved string or a
  * CallerOrgContext, for two reasons: (1) both caller shapes can supply one
@@ -337,18 +344,58 @@ const invalidateLiveClosureApprovalsOnEdit = async (
   // together, same rationale as risk.approval.service.ts's
   // invalidateLiveApprovalsOnEdit (aexa-server#203's precedent).
   client: Prisma.TransactionClient = prisma,
+  // aexa-server#258 review: if the SAME edit already set Action.status
+  // explicitly (only ever to a non-terminal value — isClosureTerminalStatus
+  // blocks a direct PATCH to COMPLETE/CANT_DO at both call sites), that
+  // explicit choice must win. Without this, an admin who PATCHes
+  // {status: 'TO_DO', ...} on a COMPLETE finding with a live APPROVED cycle
+  // would have their explicit TO_DO silently overwritten with IN_PROGRESS by
+  // this hook running after the edit in the same transaction — breaking the
+  // documented "reverting away from a terminal status" case in
+  // action.service.ts's update_action_into_db.
+  callerExplicitlySetStatus = false,
 ): Promise<void> => {
   const live = await client.actionClosureApproval.findMany({
-    where: { actionId, invalidatedAt: null, status: 'PENDING_APPROVAL' },
-    select: { id: true },
+    where: {
+      actionId,
+      invalidatedAt: null,
+      status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+    },
+    select: { id: true, status: true },
   });
   if (live.length === 0) return;
 
   const now = new Date();
   await client.actionClosureApproval.updateMany({
-    where: { actionId, invalidatedAt: null, status: 'PENDING_APPROVAL' },
+    where: {
+      actionId,
+      invalidatedAt: null,
+      status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+    },
     data: { invalidatedAt: now, invalidatedById: actorAccountId },
   });
+
+  // Action.status only ever reaches COMPLETE/CANT_DO via an APPROVED cycle
+  // (approve_action_closure sets it atomically with the approval). If the
+  // cycle being invalidated here was APPROVED, the finding's terminal status
+  // was set by that now-invalidated sign-off and must revert with it —
+  // otherwise the finding keeps showing COMPLETE/CANT_DO against content
+  // nobody actually re-reviewed, which is the exact hole aexa-server#258
+  // reported. IN_PROGRESS (not TO_DO) since the finding was actively being
+  // worked, not reset to square one.
+  //
+  // Skipped when the caller's own PATCH already set status explicitly
+  // (callerExplicitlySetStatus) — that can only be a non-terminal value
+  // (isClosureTerminalStatus blocks a direct PATCH to COMPLETE/CANT_DO), so
+  // it's the caller intentionally reverting away from the terminal status
+  // themselves, e.g. {status: 'TO_DO'}. Forcing IN_PROGRESS over that
+  // explicit choice would silently overwrite it.
+  if (!callerExplicitlySetStatus && live.some((row) => row.status === 'APPROVED')) {
+    await client.action.update({
+      where: { id: actionId },
+      data: { status: 'IN_PROGRESS' },
+    });
+  }
 
   const organizationId = await resolveOrganizationId();
   for (const row of live) {

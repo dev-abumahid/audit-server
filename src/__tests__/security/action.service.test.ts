@@ -973,7 +973,7 @@ describe('action service — org scoping (ticket #6)', () => {
         mockRealOrgMembership();
         db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A });
         db.update.mockResolvedValue({ id: 'a1' });
-        closureDb.findMany.mockResolvedValue([{ id: 'ca-1' }]);
+        closureDb.findMany.mockResolvedValue([{ id: 'ca-1', status: 'PENDING_APPROVAL' }]);
         closureDb.updateMany.mockResolvedValue({ count: 1 });
 
         await action_service.update_action_into_db(
@@ -981,8 +981,76 @@ describe('action service — org scoping (ticket #6)', () => {
         );
 
         expect(closureDb.updateMany).toHaveBeenCalledWith({
-          where: { actionId: 'a1', invalidatedAt: null, status: 'PENDING_APPROVAL' },
+          where: {
+            actionId: 'a1',
+            invalidatedAt: null,
+            status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+          },
           data: { invalidatedAt: expect.any(Date), invalidatedById: ORG_A },
+        });
+        // Only ever one Action.update call here: the field edit itself. A
+        // merely-pending cycle never advanced Action.status, so invalidating
+        // it must not trigger a second, status-reverting update.
+        expect(db.update).toHaveBeenCalledTimes(1);
+      });
+
+      // aexa-server#258: editing a finding's content (e.g. swapping out
+      // attachments) after its closure was already APPROVED must invalidate
+      // that sign-off AND revert Action.status away from the terminal value
+      // it set — otherwise the finding keeps reading COMPLETE/CANT_DO with a
+      // certified sign-off on record against content nobody re-reviewed.
+      it('aexa-server#258: editing a finding with a live APPROVED closure invalidates it and reverts Action.status to IN_PROGRESS', async () => {
+        mockRealOrgMembership();
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, status: 'COMPLETE' });
+        db.update.mockResolvedValue({ id: 'a1' });
+        closureDb.findMany.mockResolvedValue([{ id: 'ca-1', status: 'APPROVED' }]);
+        closureDb.updateMany.mockResolvedValue({ count: 1 });
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { attachments: [] } }),
+        );
+
+        expect(closureDb.updateMany).toHaveBeenCalledWith({
+          where: {
+            actionId: 'a1',
+            invalidatedAt: null,
+            status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+          },
+          data: { invalidatedAt: expect.any(Date), invalidatedById: ORG_A },
+        });
+        // Two Action.update calls: the field edit itself, then the
+        // status-reverting one from invalidateLiveClosureApprovalsOnEdit.
+        expect(db.update).toHaveBeenCalledTimes(2);
+        expect(db.update).toHaveBeenNthCalledWith(2, {
+          where: { id: 'a1' },
+          data: { status: 'IN_PROGRESS' },
+        });
+      });
+
+      // aexa-server#258 review round 1: the first version of this fix forced
+      // Action.status to IN_PROGRESS unconditionally whenever a live APPROVED
+      // cycle existed, even if the SAME PATCH already set status explicitly
+      // (e.g. an admin reverting a COMPLETE finding straight to TO_DO) --
+      // silently clobbering that explicit choice with IN_PROGRESS. The
+      // caller's own explicit status must win.
+      it('aexa-server#258 review: does not override an explicit status in the same PATCH that invalidates a live APPROVED closure', async () => {
+        mockRealOrgMembership();
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, status: 'COMPLETE' });
+        db.update.mockResolvedValue({ id: 'a1' });
+        closureDb.findMany.mockResolvedValue([{ id: 'ca-1', status: 'APPROVED' }]);
+        closureDb.updateMany.mockResolvedValue({ count: 1 });
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { status: 'TO_DO' } }),
+        );
+
+        // Only ONE Action.update call: the field edit that sets status:
+        // 'TO_DO' directly. No second call forcing it to IN_PROGRESS.
+        expect(db.update).toHaveBeenCalledTimes(1);
+        expect(db.update).toHaveBeenCalledWith({
+          where: { id: 'a1' },
+          data: { status: 'TO_DO' },
+          include: expect.anything(),
         });
       });
 
@@ -2867,7 +2935,7 @@ describe('action service — external Light User sub-assignment (issue #55 slice
       db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
       findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
       db.update.mockResolvedValue({ id: 'action-1' });
-      closureDb.findMany.mockResolvedValue([{ id: 'ca-1' }]);
+      closureDb.findMany.mockResolvedValue([{ id: 'ca-1', status: 'PENDING_APPROVAL' }]);
       closureDb.updateMany.mockResolvedValue({ count: 1 });
 
       await action_service.update_action_for_external_member(
@@ -2883,7 +2951,11 @@ describe('action service — external Light User sub-assignment (issue #55 slice
       );
 
       expect(closureDb.updateMany).toHaveBeenCalledWith({
-        where: { actionId: 'action-1', invalidatedAt: null, status: 'PENDING_APPROVAL' },
+        where: {
+          actionId: 'action-1',
+          invalidatedAt: null,
+          status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+        },
         data: { invalidatedAt: expect.any(Date), invalidatedById: EXTERNAL_MEMBER_ID },
       });
       // The crux of the fix: the audit write must use orgId (the real

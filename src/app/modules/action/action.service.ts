@@ -413,6 +413,7 @@ const update_action_into_db = async (req: Request) => {
       () => requireCallerOrganizationId(ctx),
       user.accountId,
       tx,
+      req.body.status !== undefined,
     );
     return updated;
   });
@@ -1021,6 +1022,7 @@ const update_action_for_external_member = async (req: Request) => {
       () => Promise.resolve(externalMember.orgId),
       externalMember.externalOrgMemberId,
       tx,
+      req.body.status !== undefined,
     );
     return updated;
   });

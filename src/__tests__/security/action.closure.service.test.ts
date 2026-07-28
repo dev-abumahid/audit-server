@@ -631,18 +631,88 @@ describe('action closure service — finding closure maker-checker (aexa-server#
     // throw just because eagerly resolving one would fail for them.
     const resolveOrgId = () => Promise.resolve(ORG_ID);
 
-    it('invalidates a live PENDING_APPROVAL cycle and writes an audit event', async () => {
+    it('invalidates a live PENDING_APPROVAL cycle, writes an audit event, and leaves Action.status untouched', async () => {
       mockMembership('ADMIN');
-      closureDb.findMany.mockResolvedValue([{ id: 'ca-1' }]);
+      closureDb.findMany.mockResolvedValue([{ id: 'ca-1', status: 'PENDING_APPROVAL' }]);
       closureDb.updateMany.mockResolvedValue({ count: 1 });
 
       await action_closure_service.invalidateLiveClosureApprovalsOnEdit('a1', resolveOrgId, ORG_A);
 
       expect(closureDb.updateMany).toHaveBeenCalledWith({
-        where: { actionId: 'a1', invalidatedAt: null, status: 'PENDING_APPROVAL' },
+        where: {
+          actionId: 'a1',
+          invalidatedAt: null,
+          status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+        },
         data: { invalidatedAt: expect.any(Date), invalidatedById: ORG_A },
       });
       expect(auditDb.create).toHaveBeenCalledTimes(1);
+      // Action.status was never advanced by a merely-pending cycle, so
+      // invalidating it must not touch Action.status at all.
+      expect(actionDb.update).not.toHaveBeenCalled();
+    });
+
+    it('aexa-server#258: invalidating a live APPROVED cycle also reverts Action.status to IN_PROGRESS', async () => {
+      mockMembership('ADMIN');
+      closureDb.findMany.mockResolvedValue([{ id: 'ca-1', status: 'APPROVED' }]);
+      closureDb.updateMany.mockResolvedValue({ count: 1 });
+      actionDb.update.mockResolvedValue({ id: 'a1', status: 'IN_PROGRESS' });
+
+      await action_closure_service.invalidateLiveClosureApprovalsOnEdit('a1', resolveOrgId, ORG_A);
+
+      expect(closureDb.updateMany).toHaveBeenCalledWith({
+        where: {
+          actionId: 'a1',
+          invalidatedAt: null,
+          status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+        },
+        data: { invalidatedAt: expect.any(Date), invalidatedById: ORG_A },
+      });
+      expect(actionDb.update).toHaveBeenCalledWith({
+        where: { id: 'a1' },
+        data: { status: 'IN_PROGRESS' },
+      });
+      expect(auditDb.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('detects an APPROVED cycle mixed in among other live rows and still reverts Action.status', async () => {
+      mockMembership('ADMIN');
+      closureDb.findMany.mockResolvedValue([
+        { id: 'ca-pending', status: 'PENDING_APPROVAL' },
+        { id: 'ca-approved', status: 'APPROVED' },
+      ]);
+      closureDb.updateMany.mockResolvedValue({ count: 2 });
+      actionDb.update.mockResolvedValue({ id: 'a1', status: 'IN_PROGRESS' });
+
+      await action_closure_service.invalidateLiveClosureApprovalsOnEdit('a1', resolveOrgId, ORG_A);
+
+      expect(actionDb.update).toHaveBeenCalledWith({
+        where: { id: 'a1' },
+        data: { status: 'IN_PROGRESS' },
+      });
+      // Both live rows get invalidated and audited, not just the APPROVED one.
+      expect(auditDb.create).toHaveBeenCalledTimes(2);
+    });
+
+    it('aexa-server#258 review: does NOT override Action.status when the caller already set it explicitly in the same edit', async () => {
+      mockMembership('ADMIN');
+      closureDb.findMany.mockResolvedValue([{ id: 'ca-1', status: 'APPROVED' }]);
+      closureDb.updateMany.mockResolvedValue({ count: 1 });
+
+      await action_closure_service.invalidateLiveClosureApprovalsOnEdit(
+        'a1',
+        resolveOrgId,
+        ORG_A,
+        undefined,
+        true, // callerExplicitlySetStatus
+      );
+
+      // The invalidation and audit still happen -- only the forced
+      // Action.status revert is skipped, deferring to the caller's own
+      // explicit choice (e.g. {status: 'TO_DO'}).
+      expect(closureDb.updateMany).toHaveBeenCalledTimes(1);
+      expect(auditDb.create).toHaveBeenCalledTimes(1);
+      expect(actionDb.update).not.toHaveBeenCalled();
     });
 
     it('is a no-op (no updateMany, no audit, no organizationId resolution) when there is no live cycle', async () => {
