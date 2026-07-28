@@ -1142,5 +1142,46 @@ describe('inspection service — org scoping (ticket #6)', () => {
         expect(assignmentDb.findMany).not.toHaveBeenCalled();
       });
     });
+
+    // aexa-frontend#270: self-scoped counterpart to get_inspection_assignments
+    // (admin-only) -- lets a LEAD_AUDITOR (or any member) see their OWN
+    // InspectionAssignment rows, so the frontend can narrow write affordances
+    // by real assignment state instead of role alone.
+    describe('get_my_inspection_assignments (aexa-frontend#270)', () => {
+      it("returns the caller's own assignment rows (active and revoked), scoped by orgMemberId", async () => {
+        mockMembership('LEAD_AUDITOR');
+        const rows = [
+          { id: 'a1', inspectionId: 'insp-1', revokedAt: null, createdAt: new Date() },
+          { id: 'a2', inspectionId: 'insp-2', revokedAt: new Date(), createdAt: new Date() },
+        ];
+        assignmentDb.findMany.mockResolvedValue(rows);
+
+        const result = await inspection_service.get_my_inspection_assignments(makeReq({}));
+
+        expect(assignmentDb.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { orgMemberId: MEMBER_ID } }),
+        );
+        expect(result).toEqual(rows);
+      });
+
+      it('returns an empty array (not an error) for a caller with no OrgMember row, without querying the DB', async () => {
+        // Backward-compat ADMIN-of-self fallback -- orgMemberId is null.
+        orgMemberDb.findUnique.mockResolvedValue(null);
+
+        const result = await inspection_service.get_my_inspection_assignments(makeReq({}));
+
+        expect(result).toEqual([]);
+        expect(assignmentDb.findMany).not.toHaveBeenCalled();
+      });
+
+      it('every role can call this -- it is self-scoped, not role-gated', async () => {
+        mockMembership('VIEWER');
+        assignmentDb.findMany.mockResolvedValue([]);
+
+        await expect(
+          inspection_service.get_my_inspection_assignments(makeReq({})),
+        ).resolves.toEqual([]);
+      });
+    });
   });
 });

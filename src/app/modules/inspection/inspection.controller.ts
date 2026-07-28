@@ -120,6 +120,17 @@ const get_inspection_assignments = catchAsync(async (req, res) => {
   });
 });
 
+const get_my_inspection_assignments = catchAsync(async (req, res) => {
+  const result = await inspection_service.get_my_inspection_assignments(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Your inspection assignments fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const inspection_controller = {
   get_all_inspection,
   get_single_inspection,
@@ -132,4 +143,5 @@ export const inspection_controller = {
   assign_inspection_member,
   unassign_inspection_member,
   get_inspection_assignments,
+  get_my_inspection_assignments,
 };

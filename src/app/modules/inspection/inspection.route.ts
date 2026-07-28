@@ -59,4 +59,15 @@ router.delete(
   inspection_controller.unassign_inspection_member,
 );
 
+// aexa-frontend#270: self-scoped — any member can see their own inspection
+// assignments (active and revoked), mirroring action.route.ts's
+// `/assignments/mine`. Not nested under `/:id` since it's not about one
+// inspection. Declared as a distinct two-segment path, so it can never
+// collide with the single-segment `/:id` route above regardless of order.
+router.get(
+  '/assignments/mine',
+  auth('ORGANIZATION'),
+  inspection_controller.get_my_inspection_assignments,
+);
+
 export default router;

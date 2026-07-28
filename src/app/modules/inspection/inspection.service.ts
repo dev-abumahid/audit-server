@@ -642,6 +642,35 @@ const get_inspection_assignments = async (req: Request) => {
   });
 };
 
+/**
+ * aexa-frontend#270: self-scoped counterpart to get_inspection_assignments
+ * (which is admin-only), mirroring action.service.ts's
+ * get_my_finding_assignments. The frontend's client-side write gating for
+ * LEAD_AUDITOR (and the optional Viewer scope) was role-only — it had no way
+ * to know "am I assigned to this inspection" without either the admin-only
+ * per-inspection endpoint (wrong caller, wrong authority check) or a new
+ * per-inspection flag added to every list/detail response (larger surface
+ * change). This is the minimal read of the caller's own
+ * InspectionAssignment rows, keyed the same way applyInspectionScope /
+ * getAssignedInspectionIds already resolve real access server-side, so the
+ * frontend can mirror the real rule instead of guessing. Returns every row
+ * (active and revoked), not just active ones, so the frontend can also
+ * distinguish "never assigned" from "assignment revoked" the same way
+ * org_scope.ts's getInspectionAssignmentState does for Viewer's fallback
+ * rule.
+ */
+const get_my_inspection_assignments = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  if (!ctx.orgMemberId) return [];
+
+  return prisma.inspectionAssignment.findMany({
+    where: { orgMemberId: ctx.orgMemberId },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, inspectionId: true, revokedAt: true, createdAt: true },
+  });
+};
+
 export const inspection_service = {
   get_all_inspection_from_db,
   get_single_inspection_from_db,
@@ -654,4 +683,5 @@ export const inspection_service = {
   assign_member_to_inspection,
   unassign_member_from_inspection,
   get_inspection_assignments,
+  get_my_inspection_assignments,
 };
