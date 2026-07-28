@@ -117,6 +117,72 @@ describe('intelligence service', () => {
       expect(callArg.where).toMatchObject({ org_account_id: ANCHOR });
     });
 
+    it('get_all_items_from_db with no filters returns all items for the org, paginated (regression)', async () => {
+      mockMembership('LEAD_AUDITOR');
+      itemDb.findMany.mockResolvedValue([{ id: 'item-1' }, { id: 'item-2' }]);
+      itemDb.count.mockResolvedValue(2);
+
+      const result = await intelligence_service.get_all_items_from_db(makeReq());
+
+      const [callArg] = itemDb.findMany.mock.calls[0];
+      expect(callArg.where).toEqual({ org_account_id: ANCHOR });
+      expect(result.data).toHaveLength(2);
+      expect(result.meta.total).toBe(2);
+    });
+
+    it('get_all_items_from_db filters by searchTerm across title/description, case-insensitive', async () => {
+      mockMembership('LEAD_AUDITOR');
+      itemDb.findMany.mockResolvedValue([]);
+      itemDb.count.mockResolvedValue(0);
+
+      await intelligence_service.get_all_items_from_db(
+        makeReq({ query: { searchTerm: 'ransomware' } }),
+      );
+
+      const [callArg] = itemDb.findMany.mock.calls[0];
+      expect(callArg.where).toMatchObject({
+        org_account_id: ANCHOR,
+        OR: [
+          { title: { contains: 'ransomware', mode: 'insensitive' } },
+          { description: { contains: 'ransomware', mode: 'insensitive' } },
+        ],
+      });
+    });
+
+    it('get_all_items_from_db filters by severity (exact match)', async () => {
+      mockMembership('LEAD_AUDITOR');
+      itemDb.findMany.mockResolvedValue([]);
+      itemDb.count.mockResolvedValue(0);
+
+      await intelligence_service.get_all_items_from_db(
+        makeReq({ query: { severity: 'critical' } }),
+      );
+
+      const [callArg] = itemDb.findMany.mock.calls[0];
+      expect(callArg.where).toMatchObject({ org_account_id: ANCHOR, severity: 'critical' });
+    });
+
+    it('get_all_items_from_db combines searchTerm and severity with the existing org scope', async () => {
+      mockMembership('LEAD_AUDITOR');
+      itemDb.findMany.mockResolvedValue([]);
+      itemDb.count.mockResolvedValue(0);
+
+      await intelligence_service.get_all_items_from_db(
+        makeReq({ query: { searchTerm: 'supplier', severity: 'high', analyzed: 'true' } }),
+      );
+
+      const [callArg] = itemDb.findMany.mock.calls[0];
+      expect(callArg.where).toMatchObject({
+        org_account_id: ANCHOR,
+        analyzed_at: { not: null },
+        severity: 'high',
+        OR: [
+          { title: { contains: 'supplier', mode: 'insensitive' } },
+          { description: { contains: 'supplier', mode: 'insensitive' } },
+        ],
+      });
+    });
+
     it('get_all_runs_from_db scopes by the caller org anchor', async () => {
       mockMembership('LEAD_AUDITOR');
       runDb.findMany.mockResolvedValue([]);

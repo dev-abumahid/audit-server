@@ -344,7 +344,7 @@ const resilience_scan_into_db = (req: Request) =>
 const get_all_items_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
-  const { analyzed } = req.query as Record<string, string>;
+  const { analyzed, searchTerm, severity } = req.query as Record<string, string>;
 
   const pagination = paginationHelper({
     page: req.query.page as string,
@@ -356,6 +356,28 @@ const get_all_items_from_db = async (req: Request) => {
     whereCondition.analyzed_at = { not: null };
   } else if (analyzed === 'false') {
     whereCondition.analyzed_at = null;
+  }
+
+  // aexa-frontend#253: search across the two free-text fields a scraped item
+  // actually carries (title always populated, description often is) --
+  // same case-insensitive `contains` OR convention as risk.service.ts's
+  // get_all_risk_from_db, just spread across two fields instead of one since
+  // an IntelligenceItem has no single canonical name field.
+  if (searchTerm) {
+    whereCondition.OR = [
+      { title: { contains: searchTerm, mode: 'insensitive' } },
+      { description: { contains: searchTerm, mode: 'insensitive' } },
+    ];
+  }
+
+  // severity (critical|high|medium|low, set by analyze_items_into_db) --
+  // exact match, same convention as this function's own `category` filter on
+  // risk.service.ts. IntelligencePage's filter buttons are single-select
+  // (one SeverityFilter value at a time, see IntelligencePage.tsx), so this
+  // stays a plain equality filter rather than an `in` — no multi-select UI
+  // exists on the frontend to justify accepting an array here.
+  if (severity) {
+    whereCondition.severity = severity;
   }
 
   const [data, total] = await Promise.all([
