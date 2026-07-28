@@ -4,7 +4,11 @@ import { configs } from '../../configs/index.js';
 import { logger } from '../../lib/logger.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
-import { AI_INTERNAL_SECRET_HEADER } from '../ai/ai.service.js';
+import {
+  AI_INTERNAL_SECRET_HEADER,
+  fetchWithTimeout,
+  LLM_CALL_TIMEOUT_MS,
+} from '../ai/ai.service.js';
 import {
   assertEmailAvailable,
   assertOrganizationNameAvailable,
@@ -38,14 +42,20 @@ const wrapError = (error: unknown, fallbackMessage: string): never => {
 // on the pre-#56 fallback path (aexa-ai's limiter falls through to remote
 // IP, same as before this issue) rather than sending a fabricated id.
 async function callAi(path: string, body: unknown): Promise<any> {
-  const response = await fetch(`${configs.ai_server_end_point}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...AI_INTERNAL_SECRET_HEADER,
+  const response = await fetchWithTimeout(
+    `${configs.ai_server_end_point}${path}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...AI_INTERNAL_SECRET_HEADER,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    // Analysis call, not PDF processing — same tier as ai.service.ts's own
+    // non-PDF calls (issue #275 follow-up to #233).
+    LLM_CALL_TIMEOUT_MS,
+  );
   if (!response.ok) {
     throw new AppError(`AI service error: ${response.status}`, 502);
   }

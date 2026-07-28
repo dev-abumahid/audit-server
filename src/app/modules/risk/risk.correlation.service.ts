@@ -8,7 +8,12 @@ import {
   assertCanWriteOrgResource,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
-import { buildAiHeaders, wrapAiServiceError } from '../ai/ai.service.js';
+import {
+  buildAiHeaders,
+  fetchWithTimeout,
+  LLM_CALL_TIMEOUT_MS,
+  wrapAiServiceError,
+} from '../ai/ai.service.js';
 
 /**
  * aexa-frontend#142 — GET /risk/correlation-matrix
@@ -215,14 +220,20 @@ const run_root_cause_bucketing = async (req: Request) => {
       })),
     };
 
-    const aiResponse = await fetch(`${configs.ai_server_end_point}/risk/rootcause-bucketing`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildAiHeaders(ctx.organizationId),
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/risk/rootcause-bucketing`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAiHeaders(ctx.organizationId),
+        },
+        body: JSON.stringify(requestBody),
       },
-      body: JSON.stringify(requestBody),
-    });
+      // Analysis call, not PDF processing — same tier as ai.service.ts's own
+      // non-PDF calls (issue #275 follow-up to #233).
+      LLM_CALL_TIMEOUT_MS,
+    );
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }

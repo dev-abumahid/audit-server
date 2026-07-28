@@ -12,7 +12,7 @@ import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
 import { logger } from '../../lib/logger.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
-import { buildAiHeaders } from '../ai/ai.service.js';
+import { buildAiHeaders, fetchWithTimeout, PDF_PROCESSING_TIMEOUT_MS } from '../ai/ai.service.js';
 import { note_validations } from './note.validation.js';
 
 const get_all_note_from_db = async (req: Request) => {
@@ -148,11 +148,17 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
 
     formData.append('file', blob, file.originalname);
 
-    const aiResponse = await fetch(`${configs.ai_server_end_point}/extract-text`, {
-      method: 'POST',
-      headers: buildAiHeaders(ctx.organizationId),
-      body: formData,
-    });
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/extract-text`,
+      {
+        method: 'POST',
+        headers: buildAiHeaders(ctx.organizationId),
+        body: formData,
+      },
+      // PDF processing (OCR/text extraction), same tier as ai.service.ts's
+      // own PDF calls (issue #275 follow-up to #233).
+      PDF_PROCESSING_TIMEOUT_MS,
+    );
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }

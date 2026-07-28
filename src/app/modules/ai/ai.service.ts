@@ -85,8 +85,13 @@ export const wrapAiServiceError = (error: unknown, fallbackMessage: string): nev
 // IP-based keying for that one call (fails safe, per #232's design). So
 // these timeouts are sized for realistic operation duration, not artificially
 // capped at 60s to "match" the token TTL — the two are unrelated constraints.
-const LLM_CALL_TIMEOUT_MS = 45_000;
-const PDF_PROCESSING_TIMEOUT_MS = 90_000;
+// Exported (issue #275) — 5 outbound aexa-ai call sites in OTHER modules
+// (note, intelligence, inspection, risk.correlation, onboarding) were never
+// wired into #233's fix and were still using bare `fetch` with no timeout at
+// all. Rather than duplicating this helper/these constants in five more
+// files, those call sites import them from here directly.
+export const LLM_CALL_TIMEOUT_MS = 45_000;
+export const PDF_PROCESSING_TIMEOUT_MS = 90_000;
 const LIGHTWEIGHT_CALL_TIMEOUT_MS = 15_000;
 
 // Shared by all 8 call sites below instead of each one hand-rolling its own
@@ -94,7 +99,7 @@ const LIGHTWEIGHT_CALL_TIMEOUT_MS = 15_000;
 // 8 times by independent review). Centralizes the abort-and-cleanup logic
 // in one place so a 9th call site added later gets it for free by using this
 // instead of raw `fetch`.
-async function fetchWithTimeout(
+export async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,

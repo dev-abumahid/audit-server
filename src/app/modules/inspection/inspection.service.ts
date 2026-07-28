@@ -15,7 +15,7 @@ import {
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
-import { buildAiHeaders } from '../ai/ai.service.js';
+import { buildAiHeaders, fetchWithTimeout, LLM_CALL_TIMEOUT_MS } from '../ai/ai.service.js';
 
 // aexa-frontend#191 review note: risk.correlation.service.ts's
 // create_action_from_bucket lazily creates a synthetic per-org "AI-Generated
@@ -381,14 +381,20 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
   };
 
   // call ai api
-  const aiResponse = await fetch(`${configs.ai_server_end_point}/extract-survey-answers`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...buildAiHeaders(ctx.organizationId),
+  const aiResponse = await fetchWithTimeout(
+    `${configs.ai_server_end_point}/extract-survey-answers`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAiHeaders(ctx.organizationId),
+      },
+      body: JSON.stringify(aiPayload),
     },
-    body: JSON.stringify(aiPayload),
-  });
+    // Analysis call, not PDF processing — same tier as ai.service.ts's own
+    // non-PDF calls (issue #275 follow-up to #233).
+    LLM_CALL_TIMEOUT_MS,
+  );
   if (!aiResponse.ok) {
     throw new AppError(`AI service error: ${aiResponse.status}`, 502);
   }

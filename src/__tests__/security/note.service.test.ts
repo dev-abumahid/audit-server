@@ -467,6 +467,46 @@ describe('note service — org scoping', () => {
       expect(callArg.data.attachments).toEqual([]);
       expect(callArg.data.extracted_text).toBe('X');
     });
+
+    // Issue #275 — this call site (POST /extract-text, PDF processing) went
+    // straight to `fetch` with no timeout at all, unlike the 8 call sites in
+    // ai.service.ts that #233 already covers. It's now wired through the
+    // same fetchWithTimeout(url, init, PDF_PROCESSING_TIMEOUT_MS) helper.
+    // Mirrors ai.service.test.ts's own "fetch timeout on hung aexa-ai calls"
+    // coverage: a fetch mock that only ever settles via the AbortSignal
+    // (simulating a genuinely hung aexa-ai), advanced deterministically with
+    // fake timers instead of waiting on a real 90s timer.
+    it('aborts and surfaces an error instead of hanging forever when aexa-ai never responds (issue #275)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((_url: string, init?: RequestInit) => {
+          return new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('The operation was aborted.', 'AbortError'));
+            });
+          });
+        }),
+      );
+
+      const rejection = note_service
+        .extract_note_from_any_file_or_image_and_save_into_db(
+          makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+        )
+        .catch((error) => error);
+
+      // 90s (PDF_PROCESSING_TIMEOUT_MS, same tier as ai.service.ts's own PDF
+      // calls) -- fires the AbortController's setTimeout.
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      const error = await rejection;
+      expect(error).toBeTruthy();
+      expect(db.create).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
+    });
   });
 
   describe('update_note_into_db', () => {

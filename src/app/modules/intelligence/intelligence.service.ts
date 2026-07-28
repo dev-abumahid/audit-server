@@ -1,6 +1,11 @@
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
-import { buildAiHeaders, wrapAiServiceError } from '../ai/ai.service.js';
+import {
+  buildAiHeaders,
+  fetchWithTimeout,
+  LLM_CALL_TIMEOUT_MS,
+  wrapAiServiceError,
+} from '../ai/ai.service.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
@@ -61,14 +66,20 @@ const callAexaAiIntelligence = async <T>(
   body: unknown,
   orgAccountId: string,
 ): Promise<T> => {
-  const aiResponse = await fetch(`${configs.ai_server_end_point}/intelligence${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...buildAiHeaders(orgAccountId),
+  const aiResponse = await fetchWithTimeout(
+    `${configs.ai_server_end_point}/intelligence${path}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAiHeaders(orgAccountId),
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    // Analysis/generation calls, not PDF processing — same tier as
+    // ai.service.ts's own non-PDF calls (issue #275 follow-up to #233).
+    LLM_CALL_TIMEOUT_MS,
+  );
   if (!aiResponse.ok) {
     throw new AppError(`AI service error: ${aiResponse.status}`, 502);
   }

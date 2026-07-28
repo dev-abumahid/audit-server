@@ -2,6 +2,7 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { Request, Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
+import helmet from 'helmet';
 import session from 'express-session';
 import { RedisStore, type RedisReply } from 'rate-limit-redis';
 import swaggerJSDoc from 'swagger-jsdoc';
@@ -72,6 +73,15 @@ app.use(
 app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
+
+// helmet: standard Express security-headers middleware (X-Content-Type-Options,
+// X-Frame-Options, Strict-Transport-Security, etc.), default config. Placed
+// after the /docs mount above (swagger UI serves real HTML with an inline
+// bootstrap script — default helmet CSP would break it) so /docs keeps
+// rendering unaffected; every other route in this API-only, JSON-only
+// backend gets the defaults with no conflicting response shape to worry
+// about. Flagged as a minor gap in the same audit pass as issue #275.
+app.use(helmet());
 
 // express session
 app.use(
