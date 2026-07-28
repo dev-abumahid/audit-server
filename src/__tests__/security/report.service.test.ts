@@ -29,6 +29,8 @@ vi.mock('../../app/lib/prisma.js', () => ({
     action: { findMany: vi.fn() },
     orgMember: { findUnique: vi.fn() },
     organization: { findUnique: vi.fn() },
+    inspectionAssignment: { findMany: vi.fn() },
+    findingAssignment: { findMany: vi.fn() },
   },
 }));
 
@@ -57,6 +59,10 @@ const riskApprovalDb = prisma.riskApproval as unknown as Record<string, ReturnTy
 const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const actionDb = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const inspectionAssignmentDb = prisma.inspectionAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const mockRender = renderReportPdf as unknown as ReturnType<typeof vi.fn>;
 const mockUpload = uploadCloud as unknown as ReturnType<typeof vi.fn>;
 const mockSignedUrl = getSignedDownloadUrl as unknown as ReturnType<typeof vi.fn>;
@@ -410,6 +416,74 @@ describe('report service — org scoping (issue #94)', () => {
 
       expect(reportDb.update.mock.calls[0][0].data.status).toBe('FAILED');
       expect(result).toMatchObject({ status: 'FAILED' });
+    });
+  });
+
+  // Issue #289: fetchOrgData's Action query used to filter by a bare
+  // orgAccountId, bypassing applyActionScope entirely — every other Action
+  // aggregate in the codebase (governance.service.ts's Three Lines board,
+  // action.service.ts's list/detail reads, risk.correlation.service.ts)
+  // routes through that helper. Only ADMIN and LEAD_AUDITOR can reach
+  // generate_report_into_db at all (assertCanWriteOrgResource), so LEAD_AUDITOR
+  // is the one non-ADMIN role that can actually exercise the scoped branch here.
+  describe('generate_report_into_db — Action query is org-scoped via applyActionScope (#289)', () => {
+    beforeEach(() => {
+      primeOrgDataMocks();
+    });
+
+    it('LEAD_AUDITOR only pulls actions from their assigned inspections, not org-wide', async () => {
+      mockMembership('LEAD_AUDITOR');
+      inspectionAssignmentDb.findMany.mockResolvedValue([
+        { inspectionId: 'assigned-inspection-1' },
+      ]);
+      primeSuccessfulPipeline(AI_CONTENT);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const actionWhere = actionDb.findMany.mock.calls[0][0].where;
+      expect(actionWhere.inspectionId).toEqual({ in: ['assigned-inspection-1'] });
+      // The base org/status filter is still applied alongside the scope.
+      expect(actionWhere.orgAccountId).toBe(ANCHOR);
+      expect(actionWhere.status).toEqual({ in: ['TO_DO', 'IN_PROGRESS'] });
+    });
+
+    it('LEAD_AUDITOR with no assigned inspections gets zero actions, not org-wide (deny by default)', async () => {
+      mockMembership('LEAD_AUDITOR');
+      inspectionAssignmentDb.findMany.mockResolvedValue([]);
+      primeSuccessfulPipeline(AI_CONTENT);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const actionWhere = actionDb.findMany.mock.calls[0][0].where;
+      expect(actionWhere.inspectionId).toEqual({ in: [] });
+    });
+
+    it('ADMIN still gets full org-wide action data, unscoped (regression check)', async () => {
+      // Default beforeEach has no OrgMember row -> ADMIN-of-self fallback.
+      primeSuccessfulPipeline(AI_CONTENT);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const actionWhere = actionDb.findMany.mock.calls[0][0].where;
+      // ADMIN's where-condition is returned unmodified by applyActionScope —
+      // no inspectionId/id restriction, just the original org + status filter.
+      expect(actionWhere).toEqual({
+        orgAccountId: ORG_A,
+        status: { in: ['TO_DO', 'IN_PROGRESS'] },
+      });
+    });
+
+    it('explicit ADMIN membership (not just the no-membership fallback) also gets org-wide action data', async () => {
+      mockMembership('ADMIN');
+      primeSuccessfulPipeline(AI_CONTENT);
+
+      await report_service.generate_report_into_db(makeReq({ body: {} }));
+
+      const actionWhere = actionDb.findMany.mock.calls[0][0].where;
+      expect(actionWhere).toEqual({
+        orgAccountId: ANCHOR,
+        status: { in: ['TO_DO', 'IN_PROGRESS'] },
+      });
     });
   });
 
