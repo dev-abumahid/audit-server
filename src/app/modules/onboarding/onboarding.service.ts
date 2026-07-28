@@ -17,6 +17,7 @@ import {
 } from '../organization/organization.create.service.js';
 import { onboarding_validations, type OnboardingCommitInput } from './onboarding.validation.js';
 import { computeNextRiskRef } from '../risk/risk_ref.js';
+import { clampPercent } from '../risk/risk_scoring.js';
 
 // Same posture as ai.service.ts's wrapAiServiceError: our own crafted
 // AppErrors (validation 400s, upstream-status 502s) are client-safe and
@@ -97,7 +98,8 @@ function normalizeProbability(rawProbability: unknown): number | null {
 // language rather than the LLM's ad-hoc field casing.
 function mapAiRiskToDraft(raw: any) {
   const probability = normalizeProbability(raw?.Probability);
-  const score = typeof raw?.score === 'number' ? raw.score : null;
+  const score =
+    typeof raw?.score === 'number' && Number.isFinite(raw.score) ? clampPercent(raw.score) : null;
   return {
     name: String(raw?.title ?? '').trim(),
     description: String(raw?.description ?? '').trim() || null,

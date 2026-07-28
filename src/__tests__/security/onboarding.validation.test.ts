@@ -52,6 +52,49 @@ describe('onboarding commit — probability range safety net (#211)', () => {
   });
 });
 
+// Issue #296 — inherent_score (and, mirroring it, residual_score) lacked the
+// same 0-100 safety net that probability already has above, unlike
+// risk.validation.ts's equivalent fields which have always had it.
+describe('onboarding commit — inherent_score / residual_score range safety net (#296)', () => {
+  it('accepts an in-range integer inherent_score and residual_score', () => {
+    const site = makeSite(1, 0);
+    (site.risks[0] as Record<string, unknown>).inherent_score = 75;
+    (site.risks[0] as Record<string, unknown>).residual_score = 40;
+    const result = commit.safeParse(baseBody([site]));
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an out-of-range inherent_score like 140', () => {
+    const site = makeSite(1, 0);
+    (site.risks[0] as Record<string, unknown>).inherent_score = 140;
+    const result = commit.safeParse(baseBody([site]));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some((i) => i.message.includes('Inherent score must be between')),
+      ).toBe(true);
+    }
+  });
+
+  it('rejects a negative inherent_score', () => {
+    const site = makeSite(1, 0);
+    (site.risks[0] as Record<string, unknown>).inherent_score = -5;
+    expect(commit.safeParse(baseBody([site])).success).toBe(false);
+  });
+
+  it('rejects an out-of-range residual_score like 140', () => {
+    const site = makeSite(1, 0);
+    (site.risks[0] as Record<string, unknown>).residual_score = 140;
+    const result = commit.safeParse(baseBody([site]));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some((i) => i.message.includes('Residual score must be between')),
+      ).toBe(true);
+    }
+  });
+});
+
 describe('onboarding commit — payload size caps vs transaction timeout (#210)', () => {
   it('accepts a realistically-sized payload (well under the caps)', () => {
     // 3 sites, ~5 risks each, ~2 KRIs each — a normal onboarding.

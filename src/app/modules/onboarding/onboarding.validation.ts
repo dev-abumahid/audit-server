@@ -47,8 +47,24 @@ const commit_risk = z.object({
   name: z.string('Risk name is required.').min(1).max(500),
   description: z.string().max(5000).nullish(),
   category: z.string('Risk category is required.').min(1).max(255),
-  inherent_score: z.coerce.number().int().nullish(),
-  residual_score: z.coerce.number().int().nullish(),
+  // Range-checked as a safety net so a malformed/out-of-scale AI-derived
+  // score can't be persisted even if it bypasses the clampPercent applied in
+  // the service layer's mapAiRiskToDraft (mirrors risk.validation.ts's
+  // inherent_score bound, and the probability bound just below).
+  inherent_score: z.coerce
+    .number()
+    .int()
+    .min(0, 'Inherent score must be between 0 and 100.')
+    .max(100, 'Inherent score must be between 0 and 100.')
+    .nullish(),
+  // Same safety-net rationale as inherent_score above; mirrors
+  // risk.validation.ts's residual_score bound.
+  residual_score: z.coerce
+    .number()
+    .int()
+    .min(0, 'Residual score must be between 0 and 100.')
+    .max(100, 'Residual score must be between 0 and 100.')
+    .nullish(),
   // Probability is an integer percentage (0-100). Range-checked here as a
   // safety net so a malformed/out-of-scale value (e.g. a 0-1 fraction that
   // slipped through unmultiplied, or a runaway 6000) can't be persisted even

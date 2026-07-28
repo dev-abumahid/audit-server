@@ -146,6 +146,55 @@ describe('onboarding service — generate (Stage 3, not persisted)', () => {
     expect(db.kri.create).not.toHaveBeenCalled();
   });
 
+  // Issue #296 — raw.score comes straight from aexa-ai's /risk_analysis
+  // response with no guaranteed bound, unlike Probability two lines above
+  // which already runs through normalizeProbability. Same bug class as #292
+  // (PR #294, intelligence.service.ts's relevance_score); mapAiRiskToDraft
+  // must clamp inherent_score through risk_scoring.ts's clampPercent too.
+  it('clamps an out-of-range AI-derived score to a valid 0-100 inherent_score', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.endsWith('/risk_analysis')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ risks: [aiRisk({ score: 140 })] }),
+        });
+      }
+      if (url.endsWith('/kri-baseline')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ kri_baselines: [] }) });
+      }
+      return Promise.reject(new Error(`unexpected url ${url}`));
+    });
+
+    const result = await onboarding_service.generate_baseline(
+      makeReq({ user: ADMIN, body: { sites: [{ site_name: 'Lyon Plant' }] } }),
+    );
+
+    const risk = (result as any).sites[0].risks[0];
+    expect(risk.inherent_score).toBe(100);
+  });
+
+  it('clamps a negative AI-derived score to 0', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.endsWith('/risk_analysis')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ risks: [aiRisk({ score: -5 })] }),
+        });
+      }
+      if (url.endsWith('/kri-baseline')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ kri_baselines: [] }) });
+      }
+      return Promise.reject(new Error(`unexpected url ${url}`));
+    });
+
+    const result = await onboarding_service.generate_baseline(
+      makeReq({ user: ADMIN, body: { sites: [{ site_name: 'Lyon Plant' }] } }),
+    );
+
+    const risk = (result as any).sites[0].risks[0];
+    expect(risk.inherent_score).toBe(0);
+  });
+
   it('throws 502 when a per-site /risk_analysis call fails', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 500 });
     await expect(
