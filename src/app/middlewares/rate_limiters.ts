@@ -112,6 +112,35 @@ export const reportGenerateLimiter = rateLimit({
   },
 });
 
+// Threat intelligence module (#298): all 6 POST endpoints share one budget.
+// /scrape is the heaviest single call in the app after report-generate --
+// up to 55 concurrent external RSS fetches, then a serialized (advisory-lock
+// protected, see intelligence.service.ts) create pass over every new item --
+// while the other 5 (analyze/predict/mitigations/rcsa/resilience-scan) are a
+// single ~45s LLM_CALL_TIMEOUT_MS call each, the same cost tier as
+// onboardingLimiter's Tavily+LLM fan-out. Sized below onboardingLimiter's 20
+// (this module's per-call cost is higher: scrape's fan-out alone dwarfs
+// onboarding's, and all 6 routes drawing from one shared budget means the
+// effective request volume against the org is broader than onboarding's
+// single action) but above reportGenerateLimiter's 5 (no local Chromium
+// render, no S3 upload -- the single most expensive thing this module does
+// is still cheaper per-call than a full report generation). Admin-only
+// (auth('ORGANIZATION')), keyed by the caller's accountId like the other
+// per-org limiters above so an admin on multiple IPs still shares one budget.
+export const intelligenceLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: makeRedisStore('rl:intelligence:'),
+  keyGenerator: (req) =>
+    (req.user as JwtPayloadType | undefined)?.accountId ?? ipKeyGenerator(req.ip ?? ''),
+  message: {
+    success: false,
+    message: 'Too many threat intelligence requests. Please try again later.',
+  },
+});
+
 // Slice 5 (#55): public, unauthenticated endpoint that triggers an outbound
 // email — same abuse shape as orgInviteSendLimiter (spam/queue-exhaustion)
 // but reachable by anyone, not just an authenticated admin, so it needs its

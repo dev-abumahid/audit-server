@@ -220,3 +220,102 @@ describe('rate limiter config shape (mirrors app.ts + account.route.ts)', () => 
     expect(res.headers['ratelimit-remaining']).toBeDefined();
   });
 });
+
+/**
+ * #298: intelligence.route.ts's 6 POST endpoints (/scrape, /analyze,
+ * /predict, /mitigations, /rcsa, /resilience-scan) had no rate limiter at
+ * all, unlike onboardingLimiter (20/15min) and reportGenerateLimiter
+ * (5/15min) for a comparable "fans out to Tavily+LLM calls" cost profile.
+ * The fix, intelligenceLimiter in rate_limiters.ts, is a single shared
+ * budget (max 10/15min, real production value — small enough to test
+ * directly) across all 6 routes, keyed by accountId same as
+ * onboardingLimiter/reportGenerateLimiter, with an in-memory store standing
+ * in for the real Redis-backed one (same convention as the suite above).
+ */
+function buildIntelligenceApp({ max = 10 }: { max?: number } = {}) {
+  const app = express();
+  app.use(express.json());
+
+  // Stand-in for auth() — populates req.user from a header instead of a real
+  // JWT, so the accountId-keyed limiter has something to key on.
+  app.use((req, _res, next) => {
+    const accountId = req.header('x-account-id');
+    if (accountId) (req as unknown as { user: { accountId: string } }).user = { accountId };
+    next();
+  });
+
+  const intelligenceLimiter = rateLimit({
+    windowMs: 60_000,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) =>
+      (req as unknown as { user?: { accountId: string } }).user?.accountId ?? req.ip ?? 'anon',
+    message: {
+      success: false,
+      message: 'Too many threat intelligence requests. Please try again later.',
+    },
+  });
+
+  for (const path of ['scrape', 'analyze', 'predict', 'mitigations', 'rcsa', 'resilience-scan']) {
+    app.post(`/api/intelligence/${path}`, intelligenceLimiter, (_req, res) =>
+      res.status(200).json({ ok: true }),
+    );
+  }
+
+  return app;
+}
+
+describe('intelligenceLimiter config shape (mirrors intelligence.route.ts)', () => {
+  it('allows up to the limit (10) on /scrape, then 429s', async () => {
+    const app = buildIntelligenceApp();
+
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).post('/api/intelligence/scrape').set('x-account-id', 'org-1');
+      expect(res.status).toBe(200);
+    }
+    const eleventh = await request(app)
+      .post('/api/intelligence/scrape')
+      .set('x-account-id', 'org-1');
+    expect(eleventh.status).toBe(429);
+    expect(eleventh.body.message).toMatch(/too many threat intelligence requests/i);
+  });
+
+  it('shares one budget across all 6 intelligence routes for the same org', async () => {
+    // Each of the 6 routes mounts its OWN middleware call but the SAME
+    // intelligenceLimiter instance (intelligence.route.ts declares it once
+    // and reuses it) -- so calls to different routes for the same caller
+    // draw down one shared counter, same convention as sensitiveAuthLimiter
+    // sharing across sign-in/OTP/etc above.
+    const app = buildIntelligenceApp({ max: 6 });
+
+    const routes = ['scrape', 'analyze', 'predict', 'mitigations', 'rcsa', 'resilience-scan'];
+    for (const path of routes) {
+      const res = await request(app).post(`/api/intelligence/${path}`).set('x-account-id', 'org-1');
+      expect(res.status).toBe(200);
+    }
+    // Budget of 6 now exhausted across all 6 routes combined.
+    const blocked = await request(app)
+      .post('/api/intelligence/scrape')
+      .set('x-account-id', 'org-1');
+    expect(blocked.status).toBe(429);
+  });
+
+  it('keys by accountId, not IP — unrelated orgs behind the same NAT do not collide', async () => {
+    const app = buildIntelligenceApp({ max: 2 });
+
+    await request(app).post('/api/intelligence/scrape').set('x-account-id', 'org-1');
+    await request(app).post('/api/intelligence/scrape').set('x-account-id', 'org-1');
+    const orgOneBlocked = await request(app)
+      .post('/api/intelligence/scrape')
+      .set('x-account-id', 'org-1');
+    expect(orgOneBlocked.status).toBe(429);
+
+    // A different org, same simulated source IP (supertest reuses one
+    // in-process connection), has its own untouched budget.
+    const orgTwoOk = await request(app)
+      .post('/api/intelligence/scrape')
+      .set('x-account-id', 'org-2');
+    expect(orgTwoOk.status).toBe(200);
+  });
+});

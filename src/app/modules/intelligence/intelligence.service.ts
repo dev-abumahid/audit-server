@@ -91,6 +91,19 @@ const callAexaAiIntelligence = async <T>(
 // POST /intelligence/scrape
 // --------------------------------------------------------------------------
 
+// #298: same "make the Express route's own deadline deterministic" reasoning
+// as REPORT_ROUTE_TIMEOUT_MS (report.service.ts, #220) -- /scrape was the
+// only other endpoint in the app with a comparably heavy fan-out (55
+// concurrent RSS fetches, each individually bounded at 10s by
+// rss_scraper.ts's per-feed AbortController, followed by a serialized,
+// advisory-lock-protected create pass over every new item) but no route-level
+// timeout at all. Sized smaller than report's 120s: no headless Chromium/S3
+// step here, just network fetch (bounded ~10-15s by the per-feed timeouts
+// running concurrently) plus DB writes, so 60s gives generous headroom over
+// the expected case without leaving a hung request to whatever a fronting
+// proxy's default happens to be.
+export const SCRAPE_ROUTE_TIMEOUT_MS = 60_000;
+
 const toDate = (value: string | undefined): Date | null => {
   if (!value) return null;
   const parsed = new Date(value);
@@ -105,57 +118,92 @@ const scrape_sources_into_db = async (req: Request) => {
     const { items, sourcesTotal, sourcesSucceeded } = await scrapeAllSources(ALL_RSS_SOURCES);
     const deduped = dedupeScrapedItems(items);
 
-    // Skip items already persisted for this org, so re-running scrape never
-    // duplicates rows. Matched by link (when the feed provided one) or by
-    // source_name + title (case-insensitive), the same key the in-batch
-    // dedupe above uses. The existence lookup is bounded to rows whose title
-    // or link actually appears in this batch, rather than pulling every
-    // IntelligenceItem the org has ever scraped.
-    const titles = deduped.map((item) => item.title);
-    const links = deduped.map((item) => item.link).filter((link): link is string => !!link);
-    const existing =
-      titles.length > 0 || links.length > 0
-        ? await prisma.intelligenceItem.findMany({
-            where: {
+    // #298: the existence-check-then-create sequence below is read-then-write
+    // with no unique constraint backing it, so two concurrent scrapes for the
+    // same org (e.g. a double-click, or an org's onboarding + manual "scrape
+    // now" landing in the same second) could both read "not present yet" for
+    // the same item and both insert it, duplicating every row in the overlap.
+    // A clean unique constraint isn't available here: the dedup key is two
+    // different comparisons depending on the row (link when the feed
+    // provided one, else a case-insensitive source_name+title pair) --
+    // Postgres unique constraints can't express "OR one of two different
+    // key shapes, one of them case-insensitive" in a single index. Instead,
+    // the whole read+write sequence runs inside one DB transaction holding a
+    // Postgres advisory lock keyed on this org's id (auto-released at
+    // commit/rollback) -- same fix already established in this codebase for
+    // the identical class of problem (risk.correlation.service.ts's
+    // findOrCreateSyntheticInspection). Two concurrent scrapes for the SAME
+    // org fully serialize (the second waits for the first to commit, then
+    // re-reads and sees what the first just created, so it correctly treats
+    // those items as already-existing); scrapes for DIFFERENT orgs never
+    // block each other at all (the lock key is per-org). The external
+    // network fetch above deliberately stays OUTSIDE the lock/transaction --
+    // only the DB read+write is serialized, so a slow RSS fetch never holds
+    // a DB transaction (or blocks a concurrent scrape for the same org) for
+    // longer than the writes themselves take.
+    const created = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${ctx.organizationId})::bigint)`;
+
+      // Skip items already persisted for this org, so re-running scrape never
+      // duplicates rows. Matched by link (when the feed provided one) or by
+      // source_name + title (case-insensitive), the same key the in-batch
+      // dedupe above uses. The existence lookup is bounded to rows whose title
+      // or link actually appears in this batch, rather than pulling every
+      // IntelligenceItem the org has ever scraped.
+      const titles = deduped.map((item) => item.title);
+      const links = deduped.map((item) => item.link).filter((link): link is string => !!link);
+      const existing =
+        titles.length > 0 || links.length > 0
+          ? await tx.intelligenceItem.findMany({
+              where: {
+                org_account_id: ctx.organizationId,
+                OR: [
+                  ...(links.length > 0 ? [{ link: { in: links } }] : []),
+                  ...(titles.length > 0 ? [{ title: { in: titles } }] : []),
+                ],
+              },
+              select: { title: true, source_name: true, link: true },
+            })
+          : [];
+      const existingKeys = new Set(
+        existing.map((row) => `${row.source_name.toLowerCase()}::${row.title.toLowerCase()}`),
+      );
+      const existingLinks = new Set(
+        existing.filter((row) => row.link).map((row) => row.link as string),
+      );
+
+      const toPersist: ScrapedFeedItem[] = deduped.filter((item) => {
+        if (item.link && existingLinks.has(item.link)) return false;
+        const key = `${item.source_name.toLowerCase()}::${item.title.toLowerCase()}`;
+        return !existingKeys.has(key);
+      });
+
+      // Sequential, not Promise.all: this now runs inside the single
+      // connection an interactive $transaction holds, so concurrent awaits
+      // here would just queue on that one connection anyway (and some
+      // Prisma/driver combinations reject overlapping queries on the same
+      // transaction outright) -- awaiting one at a time is both correct and
+      // no slower in practice than the previous Promise.all was.
+      const rows = [];
+      for (const item of toPersist) {
+        rows.push(
+          await tx.intelligenceItem.create({
+            data: {
               org_account_id: ctx.organizationId,
-              OR: [
-                ...(links.length > 0 ? [{ link: { in: links } }] : []),
-                ...(titles.length > 0 ? [{ title: { in: titles } }] : []),
-              ],
+              title: item.title,
+              description: item.description || null,
+              link: item.link || null,
+              source_name: item.source_name,
+              source_category: item.source_category,
+              source_credibility: item.source_credibility,
+              source_language: item.source_language,
+              published_at: toDate(item.published_at),
             },
-            select: { title: true, source_name: true, link: true },
-          })
-        : [];
-    const existingKeys = new Set(
-      existing.map((row) => `${row.source_name.toLowerCase()}::${row.title.toLowerCase()}`),
-    );
-    const existingLinks = new Set(
-      existing.filter((row) => row.link).map((row) => row.link as string),
-    );
-
-    const toPersist: ScrapedFeedItem[] = deduped.filter((item) => {
-      if (item.link && existingLinks.has(item.link)) return false;
-      const key = `${item.source_name.toLowerCase()}::${item.title.toLowerCase()}`;
-      return !existingKeys.has(key);
+          }),
+        );
+      }
+      return rows;
     });
-
-    const created = await Promise.all(
-      toPersist.map((item) =>
-        prisma.intelligenceItem.create({
-          data: {
-            org_account_id: ctx.organizationId,
-            title: item.title,
-            description: item.description || null,
-            link: item.link || null,
-            source_name: item.source_name,
-            source_category: item.source_category,
-            source_credibility: item.source_credibility,
-            source_language: item.source_language,
-            published_at: toDate(item.published_at),
-          },
-        }),
-      ),
-    );
 
     return {
       items: created,

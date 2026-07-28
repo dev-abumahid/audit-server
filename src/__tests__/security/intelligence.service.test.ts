@@ -39,6 +39,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     orgMember: { findUnique: vi.fn() },
     organization: { findUnique: vi.fn() },
+    $executeRaw: vi.fn(),
     $transaction: vi.fn(),
   },
 }));
@@ -103,6 +104,11 @@ describe('intelligence service', () => {
     riskDb.findMany.mockResolvedValue([]);
     siteDb.findMany.mockResolvedValue([]);
     txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
+    // scrape_sources_into_db now runs its read+write sequence inside
+    // prisma.$transaction holding an advisory lock (#298) -- the mock just
+    // invokes the callback with the same mocked `prisma` object as `tx`, so
+    // every existing itemDb mock above keeps working unchanged.
+    (prisma.$executeRaw as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
   });
 
   describe('org scoping', () => {
@@ -253,6 +259,64 @@ describe('intelligence service', () => {
       const [createCall] = itemDb.create.mock.calls[0];
       expect(createCall.data.org_account_id).toBe(ORG_A);
       expect(createCall.data.title).toBe('Brand new incident');
+    });
+
+    // #298: previously the existence-check-then-create sequence ran directly
+    // against the top-level `prisma` client with no locking, so two
+    // concurrent scrape calls for the same org could both read "not present
+    // yet" for the same item and both insert it. The fix wraps that sequence
+    // in prisma.$transaction holding a Postgres advisory lock keyed on the
+    // org id, which serializes concurrent calls for the SAME org against
+    // each other. This test simulates that serialization at the mock level
+    // (a real Postgres advisory lock isn't available in a unit test) by
+    // making $transaction itself queue concurrent invocations one at a time
+    // -- exactly what pg_advisory_xact_lock does for two transactions
+    // contending on the same key -- against a shared in-memory "table" so a
+    // real race would show up as a duplicate row.
+    it('does not duplicate a row when two concurrent scrapes race for the same org', async () => {
+      vi.stubGlobal('fetch', onlyCisaHasAnItem('Race condition story', 'https://example.com/race'));
+
+      const fakeTable: Array<{ title: string; source_name: string; link: string | null }> = [];
+      let lockTail: Promise<unknown> = Promise.resolve();
+      // Queues each $transaction callback behind the previous one, exactly
+      // like two Postgres transactions blocking on the same
+      // pg_advisory_xact_lock key -- the second callback only starts once
+      // the first has fully resolved (committed).
+      txFn.mockImplementation((cb: (tx: typeof prisma) => unknown) => {
+        const run = lockTail.then(() => cb(prisma));
+        lockTail = run.catch(() => undefined);
+        return run;
+      });
+      itemDb.findMany.mockImplementation(
+        async ({ where }: { where: { OR: Array<Record<string, unknown>> } }) => {
+          const links = (where.OR.find((c) => 'link' in c)?.link as { in: string[] } | undefined)
+            ?.in;
+          const titles = (where.OR.find((c) => 'title' in c)?.title as { in: string[] } | undefined)
+            ?.in;
+          return fakeTable.filter(
+            (row) =>
+              (row.link && links?.includes(row.link)) || (titles?.includes(row.title) ?? false),
+          );
+        },
+      );
+      itemDb.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
+        const row = {
+          title: data.title as string,
+          source_name: data.source_name as string,
+          link: (data.link as string | null) ?? null,
+        };
+        fakeTable.push(row);
+        return { id: `item-${fakeTable.length}`, ...data };
+      });
+
+      const [first, second] = await Promise.all([
+        intelligence_service.scrape_sources_into_db(makeReq()),
+        intelligence_service.scrape_sources_into_db(makeReq()),
+      ]);
+
+      expect(fakeTable).toHaveLength(1);
+      expect(itemDb.create).toHaveBeenCalledTimes(1);
+      expect(first.itemsNew + second.itemsNew).toBe(1);
     });
 
     it('tolerates an individual feed failure without failing the whole scrape', async () => {
