@@ -2434,6 +2434,54 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
 
       expect(findingAssignmentDb.update).not.toHaveBeenCalled();
     });
+
+    // aexa-server#266: maker-checker separation -- the admin who CREATED the
+    // sub-assignment (assignedById) can never be the one who approves it,
+    // mirroring risk.approval.service.ts's approve_risk and action.closure.
+    // service.ts's approve_action_closure. This is distinct from the
+    // "LIGHT_USER cannot approve" test above, which blocks on role
+    // (assertIsOrgAdmin) before ever reaching the assignment -- this one is
+    // an ADMIN who is correctly authorized by role but is also the creator.
+    it('BLOCKS self-approval: the ADMIN who created the assignment cannot approve their own submission (403)', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        assignedById: ORG_A,
+        status: 'PENDING_APPROVAL',
+        revokedAt: null,
+      });
+
+      await expect(
+        action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    it('a DIFFERENT admin may approve an assignment they did not create', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        assignedById: 'some-other-admin-account-id',
+        status: 'PENDING_APPROVAL',
+        revokedAt: null,
+      });
+      findingAssignmentDb.update.mockResolvedValue({
+        id: 'fa-1',
+        status: 'ACTIVE',
+        approvedById: ORG_A,
+      });
+
+      const result = await action_service.approve_finding_assignment(
+        makeReq({ params: { id: 'fa-1' } }),
+      );
+
+      expect(result.status).toBe('ACTIVE');
+    });
   });
 
   describe('reject_finding_assignment', () => {
@@ -2506,6 +2554,28 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
       await expect(
         action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+    });
+
+    // aexa-server#266: same maker-checker reasoning as approve_finding_
+    // assignment above -- distinct from the "LIGHT_USER cannot reject" test
+    // (which blocks on role), this is an ADMIN correctly authorized by role
+    // who is also the assignment's creator.
+    it('BLOCKS self-rejection: the ADMIN who created the assignment cannot reject their own submission (403)', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        assignedById: ORG_A,
+        status: 'PENDING_APPROVAL',
+        revokedAt: null,
+      });
+
+      await expect(
+        action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
 
       expect(findingAssignmentDb.update).not.toHaveBeenCalled();
     });

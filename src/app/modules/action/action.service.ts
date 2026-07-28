@@ -775,6 +775,22 @@ const approve_finding_assignment = async (req: Request) => {
   const organizationId = await requireCallerOrganizationId(ctx);
 
   const assignment = await requireOrgScopedFindingAssignment(id, ctx);
+  // Maker-checker separation (aexa-server#266, mirroring risk.approval.
+  // service.ts's approve_risk and action.closure.service.ts's
+  // approve_action_closure): the admin who created the sub-assignment can
+  // never be the one who approves it, or the whole two-person control is
+  // theatre. Checked before the state checks so a self-assigner gets a
+  // clear 403 rather than leaking the cycle's status. Known, accepted
+  // consequence: an org with exactly one admin has no one who can approve
+  // an assignment that admin created — that is the correct behavior of a
+  // real maker-checker gate (it requires two distinct people by design),
+  // not a bug, so there is deliberately no solo-admin workaround here.
+  if (assignment.assignedById === user.accountId) {
+    throw new AppError(
+      'You cannot approve your own assignment — ask another admin to review it.',
+      403,
+    );
+  }
   if (assignment.status !== 'PENDING_APPROVAL') {
     throw new AppError('Only a pending assignment can be approved.', 400);
   }
@@ -820,6 +836,15 @@ const reject_finding_assignment = async (req: Request) => {
   const organizationId = await requireCallerOrganizationId(ctx);
 
   const assignment = await requireOrgScopedFindingAssignment(id, ctx);
+  // Same maker-checker reasoning as approve_finding_assignment (#266): the
+  // admin who created the sub-assignment can't also be the one who rejects
+  // it.
+  if (assignment.assignedById === user.accountId) {
+    throw new AppError(
+      'You cannot reject your own assignment — ask another admin to review it.',
+      403,
+    );
+  }
   if (assignment.status !== 'PENDING_APPROVAL') {
     throw new AppError('Only a pending assignment can be rejected.', 400);
   }
