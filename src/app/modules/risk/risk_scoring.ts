@@ -26,7 +26,7 @@
 const MAX_CONTROL_EFFECTIVENESS = 0.9;
 
 /** Clamps a raw 0-100 percentage input to the valid [0, 100] range. */
-function clampPercent(value: number): number {
+export function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
 }
 

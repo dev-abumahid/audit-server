@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
+
+vi.mock('../../app/lib/logger.js', () => ({
+  logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+}));
+
+import { logger } from '../../app/lib/logger.js';
 import globalErrorHandler from '../../app/middlewares/global_error_handler.js';
 import { AppError } from '../../app/utils/app_error.js';
 
@@ -62,6 +68,54 @@ describe('global error handler (ticket #9)', () => {
     it('returns 500 for unhandled Error', () => {
       const { statusCode } = runHandler(new Error('Unknown'));
       expect(statusCode).toBe(500);
+    });
+
+    // Issue #291 — an unrecognized Error (raw Prisma/driver error, etc.) used
+    // to have its .message forwarded verbatim to the client on this branch,
+    // regardless of environment. That message can carry file paths,
+    // model/column/constraint names, or DB hostnames, so it must now be
+    // replaced with the same fixed, safe message the handler already uses
+    // everywhere else -- matching wrapAiServiceError's convention
+    // (ai.service.ts) of logging full detail internally and only ever
+    // exposing a generic message for errors the app didn't craft itself.
+    it('does not leak a raw Prisma-style error message to the client (issue #291)', () => {
+      const dbFailure = new Error(
+        'Invalid `prisma.risk.create()` invocation: Unique constraint failed on fields: (`org_account_id`,`ref`) at postgres://user:hunter2@internal-db.prod:5432/aexa',
+      );
+
+      const { statusCode, body } = runHandler(dbFailure);
+
+      expect(statusCode).toBe(500);
+      expect(body.message).toBe('Something went wrong!');
+      expect(JSON.stringify(body)).not.toContain('postgres://');
+      expect(JSON.stringify(body)).not.toContain('hunter2');
+    });
+
+    it('still logs the real error server-side for a generic Error (issue #291)', () => {
+      const dbFailure = new Error('ECONNREFUSED 10.0.0.5:5432');
+
+      runHandler(dbFailure);
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: dbFailure }),
+        dbFailure.message,
+      );
+    });
+
+    it('does not mask an AppError message with the generic fallback (issue #291 regression guard)', () => {
+      const { statusCode, body } = runHandler(new AppError('Site not found', 404));
+
+      expect(statusCode).toBe(404);
+      expect(body.message).toBe('Site not found');
+    });
+
+    it('does not mask a ZodError-derived message with the generic fallback (issue #291 regression guard)', () => {
+      const zodErr = new ZodError([{ code: 'custom', path: ['email'], message: 'Invalid email' }]);
+
+      const { statusCode, body } = runHandler(zodErr);
+
+      expect(statusCode).toBe(400);
+      expect(body.message).toBe('Validation Error');
     });
 
     it('includes a human-readable message', () => {

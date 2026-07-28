@@ -14,6 +14,7 @@ import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHel
 import { ALL_RSS_SOURCES } from './rss_sources.js';
 import { dedupeScrapedItems, ScrapedFeedItem, scrapeAllSources } from './rss_scraper.js';
 import { computeNextRiskRef, retryTransactionOnRefConflict } from '../risk/risk_ref.js';
+import { clampPercent } from '../risk/risk_scoring.js';
 
 type OrgContext = { name: string; sector?: string | null; country?: string | null };
 type ExistingRisk = { id: string; name: string; category: string; description?: string | null };
@@ -490,7 +491,10 @@ const create_risk_from_item_into_db = async (req: Request) => {
           category,
           inherent_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
           residual_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
-          probability: item.relevance_score != null ? Math.round(item.relevance_score * 100) : null,
+          probability:
+            item.relevance_score != null
+              ? clampPercent(Math.round(item.relevance_score * 100))
+              : null,
           status: 'open',
           ai_generated: true,
           is_edited: false,

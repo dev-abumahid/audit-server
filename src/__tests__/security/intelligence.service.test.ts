@@ -554,6 +554,40 @@ describe('intelligence service', () => {
       expect(result.id).toBe('risk-1');
     });
 
+    // Issue #292 — relevance_score is AI-derived and not guaranteed to be
+    // within [0, 1] (a bad/unbounded model output could send this above 1),
+    // so `Math.round(item.relevance_score * 100)` could write a probability
+    // above 100 straight into a documented 0-100 column. Every other
+    // probability-writing path in the codebase runs through
+    // risk_scoring.ts's clampPercent; this path must too.
+    it('clamps an out-of-range relevance_score to a valid 0-100 probability', async () => {
+      itemDb.findFirst.mockResolvedValue({
+        id: 'item-1',
+        org_account_id: ORG_A,
+        analyzed_at: new Date(),
+        created_risk_id: null,
+        title: 'Ransomware hits supplier',
+        description: 'desc',
+        category: 'cyber',
+        severity: 'high',
+        relevance_score: 1.4,
+        risk_summary: 'A supplier was hit by ransomware',
+        source_evidence: 'Krebs article',
+        link: null,
+      });
+      siteDb.findFirst.mockResolvedValue({ id: 'site-1' });
+      riskDb.create.mockResolvedValue({ id: 'risk-1', name: 'Ransomware hits supplier' });
+      itemDb.updateMany.mockResolvedValue({ count: 1 });
+
+      await intelligence_service.create_risk_from_item_into_db(
+        makeReq({ params: { id: 'item-1' } }),
+      );
+
+      expect(riskDb.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ probability: 100 }),
+      });
+    });
+
     // Two concurrent create-risk calls on the same item both pass the
     // pre-check (item.created_risk_id was null when each read it), but only
     // one can win the conditional claim below -- proves the TOCTOU window is
