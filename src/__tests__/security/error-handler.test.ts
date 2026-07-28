@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 
@@ -9,9 +12,10 @@ vi.mock('../../app/lib/logger.js', () => ({
 import { logger } from '../../app/lib/logger.js';
 import globalErrorHandler from '../../app/middlewares/global_error_handler.js';
 import { AppError } from '../../app/utils/app_error.js';
+import { markFileHandled } from '../../app/utils/upload_cleanup.js';
 
 // Helper that captures the response correctly
-function runHandler(err: Error) {
+function runHandler(err: Error, req: Partial<Request> = {}) {
   let capturedStatus: number = 0;
   let capturedBody: Record<string, unknown> = {};
   const res = {
@@ -25,7 +29,7 @@ function runHandler(err: Error) {
     },
   } as unknown as Response;
 
-  globalErrorHandler(err, {} as Request, res, vi.fn() as unknown as NextFunction);
+  globalErrorHandler(err, req as Request, res, vi.fn() as unknown as NextFunction);
   return { statusCode: capturedStatus, body: capturedBody };
 }
 
@@ -139,6 +143,91 @@ describe('global error handler (ticket #9)', () => {
       expect(statusCode).toBe(400);
       expect(body.message).toMatch(/10 MB/i);
       expect(body).not.toHaveProperty('err');
+    });
+  });
+
+  // aexa-server#305 — uploader.ts writes multipart uploads to local disk
+  // before any downstream middleware/service runs. Previously the only
+  // cleanup was inside uploadCloud (cloudinary.ts), reached only after a
+  // *successful* hand-off, so any request that threw after multer but before
+  // uploadCloud (a role-check throw in audit.service.ts/compliance.service.ts,
+  // a JSON-parse failure in template.route.ts/profile.route.ts, a failed
+  // validation, ...) leaked the local temp file forever.
+  describe('temp file cleanup on error (aexa-server#305)', () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'error-handler-cleanup-test-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    // fire-and-forget cleanup inside the handler is async (fs.promises.unlink);
+    // give its microtask/I-O callback a turn before asserting on disk state.
+    async function flush() {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    function writeTempFile(name: string) {
+      const filePath = path.join(tmpDir, name);
+      fs.writeFileSync(filePath, 'fake upload bytes');
+      return { path: filePath };
+    }
+
+    it('deletes req.file.path when a role-check-style AppError reaches the handler', async () => {
+      const file = writeTempFile('role-check-throw.pdf');
+
+      // Simulates audit.service.ts/compliance.service.ts throwing from
+      // assertCanWriteOrgResource after multer already wrote the file to disk.
+      runHandler(new AppError('Forbidden', 403), { file } as Partial<Request>);
+      await flush();
+
+      expect(fs.existsSync(file.path)).toBe(false);
+    });
+
+    it('deletes req.file.path for a generic/unrecognized error too', async () => {
+      const file = writeTempFile('json-parse-throw.pdf');
+
+      // Simulates template.route.ts/profile.route.ts's JSON.parse catch
+      // forwarding an AppError('Invalid JSON in request body', 400).
+      runHandler(new AppError('Invalid JSON in request body', 400), {
+        file,
+      } as Partial<Request>);
+      await flush();
+
+      expect(fs.existsSync(file.path)).toBe(false);
+    });
+
+    it('deletes every file in req.files (array/fields multer modes)', async () => {
+      const first = writeTempFile('multi-1.pdf');
+      const second = writeTempFile('multi-2.pdf');
+
+      runHandler(new AppError('Bad request', 400), {
+        files: [first, second],
+      } as unknown as Partial<Request>);
+      await flush();
+
+      expect(fs.existsSync(first.path)).toBe(false);
+      expect(fs.existsSync(second.path)).toBe(false);
+    });
+
+    it('does not touch a file already marked handled (uploadCloud in flight/complete)', async () => {
+      const file = writeTempFile('already-handled.pdf');
+      markFileHandled(file);
+
+      runHandler(new AppError('Unrelated downstream failure', 500), {
+        file,
+      } as Partial<Request>);
+      await flush();
+
+      expect(fs.existsSync(file.path)).toBe(true);
+    });
+
+    it('does not crash when no file was ever attached to the request', async () => {
+      expect(() => runHandler(new AppError('Not found', 404), {})).not.toThrow();
+      await flush();
     });
   });
 });

@@ -5,6 +5,7 @@ import fs from 'fs';
 import mime from 'mime-types';
 import path from 'path';
 import { configs } from '../configs/index.js';
+import { cleanupUploadedFile, markFileHandled } from './upload_cleanup.js';
 
 type IFile = {
   fieldname: string;
@@ -25,6 +26,16 @@ const s3 = new S3({
 });
 
 const uploadCloud = async (file: IFile): Promise<{ secure_url: string; key: string }> => {
+  // Marked *before* the S3 upload starts, not after: this call is the point
+  // where the file's disk lifecycle becomes uploadCloud's responsibility.
+  // Some callers (e.g. note.service.ts's best-effort attachment upload) don't
+  // await this on the response's critical path, so the request can finish
+  // while this is still in flight — the res.on('finish') safety net
+  // (upload_cleanup.ts) must see this file as already owned, or it would
+  // delete it out from under this still-running upload. Marking after the
+  // fact would leave that exact window unprotected.
+  markFileHandled(file);
+
   const fileContent = fs.readFileSync(file.path);
   const ext = path.extname(file.path);
   const baseName = path.basename(file.path, ext);
@@ -43,13 +54,13 @@ const uploadCloud = async (file: IFile): Promise<{ secure_url: string; key: stri
 
   try {
     const result = await upload.done();
-    fs.unlinkSync(file?.path); // Delete file after upload
+    await cleanupUploadedFile(file); // Delete file after upload
     return {
       secure_url: result.Location as string,
       key: fileName,
     };
   } catch (err) {
-    fs.unlinkSync(file?.path); // Still delete on error
+    await cleanupUploadedFile(file); // Still delete on error
     throw err;
   }
 };

@@ -6,8 +6,21 @@ import handleZodError from '../errors/zodError.js';
 import { logger } from '../lib/logger.js';
 import { TErrorSources } from '../types/error.js';
 import { AppError } from '../utils/app_error.js';
+import { cleanupUnhandledRequestFiles } from '../utils/upload_cleanup.js';
 
-const globalErrorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+const globalErrorHandler: ErrorRequestHandler = (err, req, res, _next) => {
+  // uploader.ts writes multipart uploads to local disk before any downstream
+  // middleware/service runs. The only cleanup that existed was inside
+  // uploadCloud (cloudinary.ts), reached only on a *successful* hand-off — so
+  // any request that throws after multer but before uploadCloud is called
+  // (a role-check throw in audit.service.ts/compliance.service.ts, a
+  // JSON-parse failure in template.route.ts/profile.route.ts, failed
+  // validation, etc.) leaked the local file forever. Fire-and-forget here:
+  // cleanupUnhandledRequestFiles never rejects (cleanupUploadedFile swallows
+  // its own errors), and cleanup must not delay or alter the error response
+  // already being sent below. See aexa-server#305.
+  void cleanupUnhandledRequestFiles(req);
+
   let statusCode = 500;
   let message = 'Something went wrong!';
   let errorSources: TErrorSources = [

@@ -1,10 +1,13 @@
 import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import request from 'supertest';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import globalErrorHandler from '../../app/middlewares/global_error_handler.js';
 import uploader from '../../app/middlewares/uploader.js';
+import { AppError } from '../../app/utils/app_error.js';
+import { cleanupUnhandledRequestFiles, markFileHandled } from '../../app/utils/upload_cleanup.js';
 
 // uploader.ts writes to `${process.cwd()}/uploads` via multer.diskStorage — that
 // directory only exists inside the Docker image (created in the Dockerfile), not
@@ -173,4 +176,143 @@ describe('uploader middleware (file upload validation)', () => {
 
     expect(res.status).toBe(200);
   }, 15000);
+
+  // aexa-server#305 — uploader.ts writes multipart uploads to local disk
+  // before any downstream middleware/service runs. Previously the only
+  // cleanup was inside uploadCloud (cloudinary.ts), reached only after a
+  // *successful* hand-off, so any request that threw after multer but before
+  // uploadCloud (a role-check throw in audit.service.ts/compliance.service.ts,
+  // a JSON-parse failure in template.route.ts/profile.route.ts, a failed
+  // validation, ...) leaked the local temp file forever. These build a real
+  // Express app around the real uploader middleware and a real
+  // global_error_handler/safety-net hook, kept in this file (not a separate
+  // one) so they share this suite's single beforeAll/afterEach/afterAll
+  // ownership of UPLOAD_DIR rather than racing another test file that also
+  // creates/tears down the same real, hardcoded directory.
+  describe('temp file cleanup (aexa-server#305)', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    async function flush() {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    it('cleans up the local file when a role-check throw (AppError) happens after multer, before uploadCloud', async () => {
+      const app = express();
+      app.post(
+        '/upload',
+        uploader.single('file'),
+        (_req: Request, _res: Response, next: NextFunction) => {
+          // Simulates assertCanWriteOrgResource throwing inside
+          // audit.service.ts's upload_audit_report_into_storage /
+          // compliance.service.ts's upload_compliance_attachment_into_aws —
+          // uploadCloud is never reached.
+          next(new AppError('Forbidden: write role required', 403));
+        },
+        globalErrorHandler,
+      );
+
+      const res = await request(app)
+        .post('/upload')
+        .attach('file', Buffer.from('%PDF-1.4 fake pdf content'), {
+          filename: 'report.pdf',
+          contentType: 'application/pdf',
+        });
+
+      expect(res.status).toBe(403);
+      await flush();
+
+      expect(fs.readdirSync(UPLOAD_DIR)).toHaveLength(0);
+    });
+
+    it('cleans up the local file on a JSON-parse failure (template.route.ts/profile.route.ts shape)', async () => {
+      const app = express();
+      app.post(
+        '/upload',
+        uploader.single('file'),
+        (req: Request, _res: Response, next: NextFunction) => {
+          try {
+            JSON.parse((req.body?.data as string) ?? '');
+            next();
+          } catch {
+            next(new AppError('Invalid JSON in request body', 400));
+          }
+        },
+        globalErrorHandler,
+      );
+
+      const res = await request(app)
+        .post('/upload')
+        .field('data', '{not valid json')
+        .attach('file', Buffer.from('fake jpeg bytes'), {
+          filename: 'photo.jpg',
+          contentType: 'image/jpeg',
+        });
+
+      expect(res.status).toBe(400);
+      await flush();
+
+      expect(fs.readdirSync(UPLOAD_DIR)).toHaveLength(0);
+    });
+
+    it('the res.on("finish") safety net cleans up a file left unhandled on a successful (non-error) response', async () => {
+      const app = express();
+      app.use((req: Request, res: Response, next: NextFunction) => {
+        res.on('finish', () => {
+          void cleanupUnhandledRequestFiles(req);
+        });
+        next();
+      });
+      app.post('/upload', uploader.single('file'), (_req: Request, res: Response) => {
+        // Simulates a route that, for whatever reason (a bug, a code path
+        // that forgot to call uploadCloud), returns 200 without ever handing
+        // the file off — the safety net is the last line of defense here.
+        res.status(200).json({ success: true });
+      });
+      app.use(globalErrorHandler);
+
+      const res = await request(app)
+        .post('/upload')
+        .attach('file', Buffer.from('%PDF-1.4 fake pdf content'), {
+          filename: 'never-handled.pdf',
+          contentType: 'application/pdf',
+        });
+
+      expect(res.status).toBe(200);
+      await flush();
+
+      expect(fs.readdirSync(UPLOAD_DIR)).toHaveLength(0);
+    });
+
+    it('the res.on("finish") safety net does NOT delete a file that was marked handled', async () => {
+      const app = express();
+      app.use((req: Request, res: Response, next: NextFunction) => {
+        res.on('finish', () => {
+          void cleanupUnhandledRequestFiles(req);
+        });
+        next();
+      });
+      app.post('/upload', uploader.single('file'), (req: Request, res: Response) => {
+        // Simulates uploadCloud having taken ownership of the file (marked
+        // right before it starts its own upload+cleanup — see cloudinary.ts).
+        markFileHandled(req.file);
+        res.status(200).json({ success: true });
+      });
+      app.use(globalErrorHandler);
+
+      const res = await request(app)
+        .post('/upload')
+        .attach('file', Buffer.from('fake jpeg bytes'), {
+          filename: 'handled.jpg',
+          contentType: 'image/jpeg',
+        });
+
+      expect(res.status).toBe(200);
+      await flush();
+
+      // Exactly one file should remain: the one marked handled above.
+      expect(fs.readdirSync(UPLOAD_DIR)).toHaveLength(1);
+    });
+  });
 });
