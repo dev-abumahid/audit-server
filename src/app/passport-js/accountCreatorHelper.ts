@@ -40,6 +40,16 @@ export const accountCreatorHelper = async (profile: any, done: any, provider: PR
       select: SAFE_ACCOUNT_SELECT,
     });
 
+    // #286: the upsert's `update: {}` branch matches a pre-existing Account
+    // by email and hands it straight to done() -- unlike login_user_into_db
+    // (account.service.ts) and org-invite acceptance (organization.service.ts),
+    // which both hard-reject isDeleted accounts before authenticating them.
+    // Mirror that guard here so a deleted account can't regain a session via
+    // social login.
+    if (user.isDeleted) {
+      throw new AppError('Account is deleted', 401);
+    }
+
     return done(null, user);
   } catch (err) {
     return done(err as any);

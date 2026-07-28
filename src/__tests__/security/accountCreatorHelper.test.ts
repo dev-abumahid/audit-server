@@ -90,4 +90,59 @@ describe('accountCreatorHelper (#167)', () => {
     expect(err).toBeInstanceOf(Error);
     expect(user).toBeUndefined();
   });
+
+  it('#286: rejects via done(err) when the matched account is soft-deleted, instead of authenticating it', async () => {
+    // The upsert's `update: {}` branch matches a pre-existing Account by
+    // email. If that account was soft-deleted, it must not be handed to
+    // done() as a valid req.user -- mirrors login_user_into_db's isDeleted
+    // guard (account.service.ts).
+    (prisma.account.upsert as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'acc-2',
+      email: 'deleted@test.com',
+      role: 'ORGANIZATION',
+      provider: 'GOOGLE',
+      isAccountVerified: true,
+      isDeleted: true,
+    });
+
+    const done = vi.fn();
+    const profile = {
+      displayName: 'Deleted User',
+      emails: [{ value: 'deleted@test.com' }],
+      photos: [{ value: 'https://example.com/photo.jpg' }],
+    };
+
+    await accountCreatorHelper(profile, done, 'GOOGLE');
+
+    expect(done).toHaveBeenCalledTimes(1);
+    const [err, user] = done.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/deleted/i);
+    expect(user).toBeUndefined();
+  });
+
+  it('does not reject an active (non-deleted) matched account', async () => {
+    (prisma.account.upsert as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'acc-3',
+      email: 'active@test.com',
+      role: 'ORGANIZATION',
+      provider: 'GOOGLE',
+      isAccountVerified: true,
+      isDeleted: false,
+    });
+
+    const done = vi.fn();
+    const profile = {
+      displayName: 'Active User',
+      emails: [{ value: 'active@test.com' }],
+      photos: [{ value: 'https://example.com/photo.jpg' }],
+    };
+
+    await accountCreatorHelper(profile, done, 'GOOGLE');
+
+    expect(done).toHaveBeenCalledTimes(1);
+    const [err, user] = done.mock.calls[0];
+    expect(err).toBeNull();
+    expect(user).toMatchObject({ id: 'acc-3', email: 'active@test.com' });
+  });
 });
