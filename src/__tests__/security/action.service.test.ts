@@ -2351,7 +2351,8 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         status: 'PENDING_APPROVAL',
         revokedAt: null,
       });
-      findingAssignmentDb.update.mockResolvedValue({
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 1 });
+      findingAssignmentDb.findUniqueOrThrow.mockResolvedValue({
         id: 'fa-1',
         status: 'ACTIVE',
         approvedById: ORG_A,
@@ -2361,8 +2362,8 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         makeReq({ params: { id: 'fa-1' } }),
       );
 
-      expect(findingAssignmentDb.update).toHaveBeenCalledWith({
-        where: { id: 'fa-1' },
+      expect(findingAssignmentDb.updateMany).toHaveBeenCalledWith({
+        where: { id: 'fa-1', status: 'PENDING_APPROVAL', revokedAt: null },
         data: { status: 'ACTIVE', approvedById: ORG_A },
       });
       expect(result.status).toBe('ACTIVE');
@@ -2375,7 +2376,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 403 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('rejects approving an assignment that is not PENDING_APPROVAL', async () => {
@@ -2391,7 +2392,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 400 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('throws 404 and does NOT approve an assignment belonging to another org', async () => {
@@ -2402,7 +2403,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.approve_finding_assignment(makeReq({ params: { id: 'org-b-fa' } })),
       ).rejects.toMatchObject({ statusCode: 404 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('LIGHT_USER cannot approve their own pending finding assignment (self-approval)', async () => {
@@ -2415,7 +2416,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
       ).rejects.toMatchObject({ statusCode: 403 });
 
       expect(findingAssignmentDb.findFirst).not.toHaveBeenCalled();
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('rejects approving an assignment that was withdrawn (revoked) while still PENDING_APPROVAL', async () => {
@@ -2432,7 +2433,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 400 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     // aexa-server#266: maker-checker separation -- the admin who CREATED the
@@ -2457,7 +2458,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 403 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('a DIFFERENT admin may approve an assignment they did not create', async () => {
@@ -2470,7 +2471,8 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         status: 'PENDING_APPROVAL',
         revokedAt: null,
       });
-      findingAssignmentDb.update.mockResolvedValue({
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 1 });
+      findingAssignmentDb.findUniqueOrThrow.mockResolvedValue({
         id: 'fa-1',
         status: 'ACTIVE',
         approvedById: ORG_A,
@@ -2481,6 +2483,32 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
       );
 
       expect(result.status).toBe('ACTIVE');
+    });
+
+    // Concurrency race (aexa-server#267): two admins approve/reject the same
+    // pending assignment. The first flips it; the second's guarded
+    // updateMany matches 0 rows (status is no longer PENDING_APPROVAL) and
+    // must yield a clean 409, not a duplicate transition and not a raw 500.
+    it('returns a clean 409 (not 500) when the assignment was already decided concurrently', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'PENDING_APPROVAL', // read-time state; the concurrent write lands next
+        revokedAt: null,
+      });
+      // The guarded updateMany matched nothing -- a concurrent request
+      // already moved it out of the PENDING_APPROVAL/non-revoked state.
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        action_service.approve_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      // No re-read, no audit event for a transition this request didn't perform.
+      expect(findingAssignmentDb.findUniqueOrThrow).not.toHaveBeenCalled();
+      expect(prisma.orgAuditLog.create).not.toHaveBeenCalled();
     });
   });
 
@@ -2494,7 +2522,8 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         status: 'PENDING_APPROVAL',
         revokedAt: null,
       });
-      findingAssignmentDb.update.mockResolvedValue({
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 1 });
+      findingAssignmentDb.findUniqueOrThrow.mockResolvedValue({
         id: 'fa-1',
         status: 'REJECTED',
         approvedById: ORG_A,
@@ -2504,6 +2533,10 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         makeReq({ params: { id: 'fa-1' } }),
       );
 
+      expect(findingAssignmentDb.updateMany).toHaveBeenCalledWith({
+        where: { id: 'fa-1', status: 'PENDING_APPROVAL', revokedAt: null },
+        data: { status: 'REJECTED', approvedById: ORG_A },
+      });
       expect(result.status).toBe('REJECTED');
     });
 
@@ -2514,7 +2547,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 403 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('LIGHT_USER cannot reject their own pending finding assignment (self-rejection)', async () => {
@@ -2527,7 +2560,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
       ).rejects.toMatchObject({ statusCode: 403 });
 
       expect(findingAssignmentDb.findFirst).not.toHaveBeenCalled();
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('throws 404 and does NOT reject an assignment belonging to another org', async () => {
@@ -2538,7 +2571,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.reject_finding_assignment(makeReq({ params: { id: 'org-b-fa' } })),
       ).rejects.toMatchObject({ statusCode: 404 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('rejects rejecting an assignment that was already withdrawn (revoked) while still PENDING_APPROVAL', async () => {
@@ -2555,7 +2588,7 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 400 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
     });
 
     // aexa-server#266: same maker-checker reasoning as approve_finding_
@@ -2577,7 +2610,27 @@ describe('action service — finding sub-assignment (issue #55 slice 4)', () => 
         action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
       ).rejects.toMatchObject({ statusCode: 403 });
 
-      expect(findingAssignmentDb.update).not.toHaveBeenCalled();
+      expect(findingAssignmentDb.updateMany).not.toHaveBeenCalled();
+    });
+
+    // Concurrency race (aexa-server#267): mirrors the approve-side test.
+    it('returns a clean 409 (not 500) when the assignment was already decided concurrently', async () => {
+      mockMembership('ADMIN');
+      findingAssignmentDb.findFirst.mockResolvedValue({
+        id: 'fa-1',
+        actionId: 'action-1',
+        orgMemberId: LIGHT_USER_MEMBER_ID,
+        status: 'PENDING_APPROVAL',
+        revokedAt: null,
+      });
+      findingAssignmentDb.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        action_service.reject_finding_assignment(makeReq({ params: { id: 'fa-1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(findingAssignmentDb.findUniqueOrThrow).not.toHaveBeenCalled();
+      expect(prisma.orgAuditLog.create).not.toHaveBeenCalled();
     });
 
     it('a rejected assignment does not grant the assignee any access (getAssignedActionIds excludes it)', async () => {

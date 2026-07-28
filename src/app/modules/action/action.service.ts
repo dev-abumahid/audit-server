@@ -807,10 +807,22 @@ const approve_finding_assignment = async (req: Request) => {
     throw new AppError('This assignment was withdrawn and can no longer be approved.', 400);
   }
 
-  const updated = await prisma.findingAssignment.update({
-    where: { id },
+  // Concurrency guard (aexa-server#267, mirroring approve_risk/approve_
+  // action_closure): the findFirst above established the assignment was
+  // PENDING_APPROVAL and non-revoked at read time, but a second approve/
+  // reject could commit between that read and this write. Re-asserting the
+  // expected prior state in the updateMany where-clause means only the
+  // request that still finds a live pending row actually transitions it; a
+  // loser gets count === 0 and a clean 409 instead of a duplicate
+  // transition + duplicate/contradictory audit entry.
+  const { count } = await prisma.findingAssignment.updateMany({
+    where: { id, status: 'PENDING_APPROVAL', revokedAt: null },
     data: { status: 'ACTIVE', approvedById: user.accountId },
   });
+  if (count === 0) {
+    throw new AppError('This assignment was already decided or withdrawn by another request.', 409);
+  }
+  const updated = await prisma.findingAssignment.findUniqueOrThrow({ where: { id } });
 
   await recordOrgAuditEvent({
     organizationId,
@@ -855,10 +867,15 @@ const reject_finding_assignment = async (req: Request) => {
     throw new AppError('This assignment was withdrawn and can no longer be rejected.', 400);
   }
 
-  const updated = await prisma.findingAssignment.update({
-    where: { id },
+  // Same concurrency guard as approve_finding_assignment (#267).
+  const { count } = await prisma.findingAssignment.updateMany({
+    where: { id, status: 'PENDING_APPROVAL', revokedAt: null },
     data: { status: 'REJECTED', approvedById: user.accountId },
   });
+  if (count === 0) {
+    throw new AppError('This assignment was already decided or withdrawn by another request.', 409);
+  }
+  const updated = await prisma.findingAssignment.findUniqueOrThrow({ where: { id } });
 
   await recordOrgAuditEvent({
     organizationId,
