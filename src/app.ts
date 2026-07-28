@@ -1,3 +1,4 @@
+import connectRedis from 'connect-redis';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { Request, Response } from 'express';
@@ -83,9 +84,20 @@ app.use(express.urlencoded({ extended: true }));
 // about. Flagged as a minor gap in the same audit pass as issue #275.
 app.use(helmet());
 
-// express session
+// express session — Redis-backed, not the express-session default
+// (in-memory MemoryStore, which leaks memory and doesn't survive past one
+// process). Reuses the same ioredis connection already established for rate
+// limiting below (redisConnection) rather than opening a second connection.
+//
+// Pinned to connect-redis@6 (see src/app/types/connect-redis.d.ts for why):
+// its RedisStore talks to the client with array/callback-style calls that
+// are wire-compatible with ioredis. connect-redis@7+ switched to the
+// node-redis v4 client API (options-object `set()`, `scanIterator`), which
+// is not compatible with ioredis and would silently fail session writes.
+const SessionRedisStore = connectRedis(session);
 app.use(
   session({
+    store: new SessionRedisStore({ client: redisConnection, prefix: 'sess:' }),
     secret: configs.session_secret as string,
     resave: false,
     saveUninitialized: false,
