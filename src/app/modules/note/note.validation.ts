@@ -28,8 +28,23 @@ const update_note = z.object({
 const from_file = z.object({
   inspectionId: z.string(),
 });
+
+// Shape of aexa-ai's /extract-text response (app/schemas/ocr_schema.py
+// OCRResponse). Parsed before the AI's response is spread into a Prisma
+// create payload in note.service.ts's extract_note_from_any_file_or_image_
+// and_save_into_db — without this, any unexpected key the AI returns (a
+// renamed/added field, an `id`, a `createdAt`) would flow straight into
+// prisma.note.create, becoming either a client-influenced field or an
+// unhandled PrismaClientValidationError (#276). Same pattern as
+// ai_validations.risk_analysis_response.
+const extract_text_response = z.object({
+  title: z.string(),
+  extracted_text: z.string(),
+});
+
 export const note_validations = {
   create_note,
   update_note,
   from_file,
+  extract_text_response,
 };

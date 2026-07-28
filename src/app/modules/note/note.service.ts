@@ -13,6 +13,7 @@ import uploadCloud from '../../utils/cloudinary.js';
 import { logger } from '../../lib/logger.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { buildAiHeaders } from '../ai/ai.service.js';
+import { note_validations } from './note.validation.js';
 
 const get_all_note_from_db = async (req: Request) => {
   const user = req?.user as JwtPayloadType;
@@ -155,7 +156,13 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }
-    data = await aiResponse.json();
+    const rawData = await aiResponse.json();
+    // Validate the AI's response shape before it's ever spread into a Prisma
+    // payload below — an unexpected/renamed/extra key (an `id`, a
+    // `createdAt`, ...) must not flow into prisma.note.create untouched
+    // (#276). Treated the same as a JSON-parse failure for cleanup purposes:
+    // caught by this same block so the temp file is still unlinked.
+    data = await note_validations.extract_text_response.parseAsync(rawData);
   } catch (err) {
     if (file?.path) {
       fs.unlinkSync(file.path);
@@ -186,9 +193,14 @@ const extract_note_from_any_file_or_image_and_save_into_db = async (req: Request
     );
   }
 
-  // db payload
+  // db payload — only the fields note_validations.extract_text_response
+  // actually validated (title, extracted_text) are taken from the AI
+  // response; everything else is set by us, not spread from `data`, so an
+  // unexpected key in the AI's response can never reach prisma.note.create
+  // (#276).
   const payload = {
-    ...data,
+    title: data.title,
+    extracted_text: data.extracted_text,
     orgAccountId: ctx.organizationId,
     inspectionId: body.inspectionId,
     attachments,

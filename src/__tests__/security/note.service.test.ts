@@ -377,6 +377,78 @@ describe('note service — org scoping', () => {
       expect(mockUnlinkSync).toHaveBeenCalledWith(FILE.path);
     });
 
+    it('creates the note with exactly the expected fields from a normal AI response (#276 regression)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ title: 'T', extracted_text: 'X' }),
+      });
+      mockUploadCloud.mockResolvedValue({ secure_url: 'https://s3.example.com/a.pdf' } as never);
+      db.create.mockResolvedValue({});
+
+      await note_service.extract_note_from_any_file_or_image_and_save_into_db(
+        makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data).toEqual({
+        title: 'T',
+        extracted_text: 'X',
+        orgAccountId: ORG_A,
+        inspectionId: 'insp-1',
+        attachments: ['https://s3.example.com/a.pdf'],
+      });
+    });
+
+    it('does not pass an unexpected extra field from the AI response through to prisma.note.create (#276)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            title: 'T',
+            extracted_text: 'X',
+            id: 'attacker-supplied-id',
+            createdAt: '2000-01-01T00:00:00.000Z',
+            orgAccountId: 'attacker-org',
+          }),
+      });
+      mockUploadCloud.mockResolvedValue({ secure_url: 'https://s3.example.com/a.pdf' } as never);
+      db.create.mockResolvedValue({});
+
+      await note_service.extract_note_from_any_file_or_image_and_save_into_db(
+        makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(Object.keys(callArg.data).sort()).toEqual(
+        ['attachments', 'extracted_text', 'inspectionId', 'orgAccountId', 'title'].sort(),
+      );
+      expect(callArg.data.id).toBeUndefined();
+      expect(callArg.data.createdAt).toBeUndefined();
+      expect(callArg.data.orgAccountId).toBe(ORG_A);
+    });
+
+    it('rejects an AI response missing a required field instead of creating a malformed note (#276)', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
+      db.findFirst.mockResolvedValue(null);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ title: 'T' }),
+      });
+
+      await expect(
+        note_service.extract_note_from_any_file_or_image_and_save_into_db(
+          makeReq({ body: { inspectionId: 'insp-1' }, file: FILE } as never),
+        ),
+      ).rejects.toBeTruthy();
+
+      expect(db.create).not.toHaveBeenCalled();
+      expect(mockUnlinkSync).toHaveBeenCalledWith(FILE.path);
+    });
+
     it('still creates the note with empty attachments when the source-file upload fails (extraction already succeeded)', async () => {
       inspectionDb.findFirst.mockResolvedValue({ id: 'insp-1', orgAccountId: ORG_A });
       db.findFirst.mockResolvedValue(null);
