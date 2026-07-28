@@ -67,10 +67,33 @@ passed through; that's the failure mode to watch for when adding one.
   fired a request per keystroke, and on a deep page could momentarily query e.g. page 7 of a
   freshly narrowed result set — rendering a false "no results" state before the page reset
   landed. Both the query term and the page reset now move together, off one delayed effect.
-- **`InspectionAssignment`-based edit/view scoping — still absent.** The frontend's inspection
-  type has no assignment concept at all (only a single `inspector` display field on the summary),
-  so gating here is role-only: it hides write controls from `VIEWER`/`LIGHT_USER`, but never
-  narrows a `LEAD_AUDITOR` to the inspections they're actually assigned to. The run-inspection
-  page itself has no role guard either — it gates Save/Complete on the inspection's status alone,
-  so anyone who deep-links to it reaches a full editing surface. The server enforces the real
-  assignment rule in both cases. See [frontend-overview.md](frontend-overview.md).
+- **`InspectionAssignment`-based *write* scoping — wired (aexa-frontend#270).** A self-scoped
+  `GET /inspection/assignments/mine` (added server-side in aexa-server#313, mirroring the
+  existing `GET /action/assignments/mine`) returns the caller's own assignment rows, active and
+  revoked. `src/hooks/useMyAssignments.ts` derives the active-id set from it, and
+  `src/utils/assignmentScope.ts`'s `canWriteInspection` — a pure function mirroring
+  `assertCanWriteToInspection` — gates the per-row Edit/Delete affordances in
+  `InspectionTable.tsx`. A `LEAD_AUDITOR` now sees write controls only on inspections they're
+  actually assigned to, instead of on every row.
+  - **The hooks return `undefined` when assignment data is unavailable** (still loading, or the
+    fetch failed), which every consumer reads as "degrade to the pre-#270 role-only behavior,"
+    never as "known to have zero assignments." A failed fetch therefore can't newly lock a Lead
+    Auditor out of their own work — it just returns the gate to the coarser rule it had before.
+    An empty `Set` is the distinct "genuinely assigned to nothing" value.
+- **Viewer *read* scoping is still server-only.** `resolveViewerVisibleIds` exists in
+  `assignmentScope.ts` and correctly preserves the asymmetry (never-assigned Viewer → `null`,
+  meaning org-wide fallback; every-assignment-revoked Viewer → empty `Set`, meaning denied), but
+  nothing calls it — no list narrows a Viewer's visible rows client-side. #270 covered
+  write-gating only.
+- **Two write surfaces here are still open gaps.** `RunInspection.tsx` gates Save/Complete on the
+  inspection's status alone, with no role or assignment check in the page itself
+  (**aexa-frontend#275**). Its *route* is now guarded (see below), so a `VIEWER` no longer
+  reaches it — but an unassigned `LEAD_AUDITOR` passes that role-level guard and gets a fully
+  functional editing surface. Separately, the "Start New Inspection" button is still gated on the
+  role-only `canWriteOrgResource`, so a `LEAD_AUDITOR` is offered it despite creation being
+  ADMIN-only server-side (**aexa-frontend#276**).
+- **Route-level guards on create/edit/run (aexa-frontend#271).** `audit/inspection/create`,
+  `audit/inspection/update/:id` and `audit/inspections/:id` (run) are each wrapped in
+  `WriteGuardRoute`, so a deep-linked `VIEWER` is redirected to the inspections list rather than
+  reaching the form. The guard is role-only — it does not consult assignment state; that's the
+  #275 half. See [frontend-overview.md](frontend-overview.md).

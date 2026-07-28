@@ -10,7 +10,8 @@ one person holds in their head — this should describe **current behavior**, no
 module doc below has a "Frontend wiring" section for exactly this reason. Most of the
 methodology-driven backend features that once had no UI at all (KRI trend history, compliance
 recurrence/re-attestation, finding Five Cs, finding-closure maker-checker, `GOVERNING_BODY`
-classification, external light-user login) are now wired end-to-end. What's still backend-only,
+classification, external light-user login, risk score override/staleness, assignment-based write
+scoping) are now wired end-to-end. What's still backend-only,
 along with the other open cross-cutting questions, is listed under "Known cross-cutting gaps"
 below. Read a module's backend section and its frontend-wiring section together to know what's
 actually shippable to a user today.
@@ -39,27 +40,30 @@ same PR. A stale doc is worse than no doc.
 
 Worth a team look, not fixed as part of this docs pass:
 
-- **Risk score overrides and staleness are invisible in the UI.** `inherent_is_override` /
-  `*_override_reason` / `*_override_stale` are fully implemented server-side, but the frontend's
-  `Risk` type carries none of them — no override toggle, no reason field, no staleness badge. If
-  the backend marks a score stale after an input changes, nothing tells the user. See
-  [risk.md](risk.md). This is the largest remaining backend-capability-with-no-UI gap.
-- **Assignment-based scoping has no client-side counterpart.** `InspectionAssignment`
-  (Lead-Auditor edit scope, Viewer visibility scope) and `FindingAssignment` (Light-User
-  sub-assignment, with its own approval flow) are both real authorization mechanisms the
-  frontend does not model at all. Client-side gating is role-only — `ADMIN`/`LEAD_AUDITOR` can
-  write, `VIEWER`/`LIGHT_USER` cannot — which is correct-but-coarse: it never narrows a
-  `LEAD_AUDITOR` to their assigned inspections, or a `LIGHT_USER` to their assigned findings, so
-  those two roles can still meet a 403 on something the UI offered them. The server enforces the
-  real rule in every case. See [inspection.md](inspection.md) and
-  [action-findings.md](action-findings.md).
-- **Deep-linked write routes are not role-guarded.** Role gating hides *affordances* on list and
-  detail pages; the routes those affordances lead to (template create/edit, inspection
-  create/edit, the run-inspection page) have no guard of their own, so a `VIEWER` who types or
-  bookmarks the URL still reaches a full editing surface and only discovers the block on submit.
-  See [frontend-overview.md](frontend-overview.md).
-- **`Action.MessageVisibility` (`INTERNAL` / `CLIENT_VISIBLE`) exists on the schema with no
-  enforcement anywhere** — a modeled concept, not a released feature. See
+- **Viewer read-scoping has no client-side counterpart, and two inspection write surfaces are
+  gated too loosely.** Assignment-based *write* gating is now built client-side
+  (aexa-frontend#270 — `LEAD_AUDITOR` narrowed to their real `InspectionAssignment` rows,
+  `LIGHT_USER` to their live `FindingAssignment` grants), but three narrower gaps remain:
+  - **Viewer read-scoping stays server-only.** `resolveViewerVisibleIds` exists in
+    `src/utils/assignmentScope.ts` and correctly models the fallback-vs-deny asymmetry, but is
+    wired to nothing — no list is filtered by it client-side. The server remains the only thing
+    scoping what a Viewer sees.
+  - **aexa-frontend#275 — `RunInspection.tsx` has no in-page write gating.** Its route is now
+    role-guarded (#271), but the page itself gates Save/Complete on inspection status alone, so
+    an unassigned `LEAD_AUDITOR` who passes the role-level route guard still reaches a fully
+    functional editing surface.
+  - **aexa-frontend#276 — "Start New Inspection" is shown to `LEAD_AUDITOR`** even though
+    inspection creation is ADMIN-only server-side. Page-level create affordances stayed role-only
+    under #270 (there's no assignment to scope a not-yet-existing inspection by), and this one's
+    role predicate is too loose.
+
+  See [inspection.md](inspection.md) and [action-findings.md](action-findings.md).
+- **`Action.MessageVisibility` is enforced on reads, but has no compose UI.** `INTERNAL`
+  messages are now filtered out for `LIGHT_USER` org members and every external member at all
+  four read paths (aexa-server#311). What's still missing is the *other* half: nothing in the
+  frontend lets an author choose a message's visibility, so every message composed through the
+  UI takes the schema default of `INTERNAL` — which, now that the filter is live, means no
+  message written from the UI is visible to a Light User or an external member at all. See
   [action-findings.md](action-findings.md).
 - **Report *reads* have no org-role gate — an open product question, deliberately left
   unresolved.** Report *generation* is now correctly scoped (a scoped `LEAD_AUDITOR`'s report no

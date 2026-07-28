@@ -25,11 +25,12 @@ Inspections, Findings, Reports).
 
 ## Role-based UI behavior — coarser than the backend model
 
-- **Route-level gating only distinguishes account type**, not org role. `ProtectedRoute.tsx`
-  checks `"ADMIN"` (internal) vs. `"ORGANIZATION"` (any org member) — all four `OrgRole` values
-  (`ADMIN`/`LEAD_AUDITOR`/`LIGHT_USER`/`VIEWER`) reach the exact same set of `/organization/*`
-  routes. There is no route guard restricting a `LIGHT_USER` to inspection-related pages, or
-  blocking a `VIEWER` from settings. (External light users are the exception — they get their
+- **`ProtectedRoute.tsx` distinguishes account type only**, not org role: `"ADMIN"` (internal)
+  vs. `"ORGANIZATION"` (any org member). Org-role-aware route gating exists separately and
+  narrowly, as `WriteGuardRoute` on the five write routes described below (#271) — everywhere
+  else, all four `OrgRole` values still reach the same `/organization/*` routes. There is no
+  route guard restricting a `LIGHT_USER` to inspection-related pages, or blocking a `VIEWER`
+  from settings. (External light users are the exception — they get their
   own top-level `/external` tree behind `ExternalProtectedRoute`, checking a wholly separate
   session slice; see [account-organization.md](account-organization.md).)
 - **Fine-grained gating runs through `useMyOrgRole()`** — client-computed by cross-referencing
@@ -44,20 +45,43 @@ Inspections, Findings, Reports).
   (Generate), Intelligence, and the settings Team-Members and External-Members tabs. `undefined`
   (role still loading) is treated as "hide" — the same conservative default every
   `useMyOrgRole()` consumer uses.
+- **Row-level assignment gating is layered on top of that, for write surfaces**
+  (aexa-frontend#270). `canWriteOrgResource` alone is role-only, while the server's real rule is
+  narrower for two roles — a `LEAD_AUDITOR` can only write to inspections they're assigned to
+  (`InspectionAssignment`), a `LIGHT_USER` only to findings they hold a live `FindingAssignment`
+  for. `src/utils/assignmentScope.ts` mirrors those rules as pure functions
+  (`canWriteInspection`, `canWriteFinding`, `resolveViewerVisibleIds`, `deriveAssignmentState`),
+  fed by `src/hooks/useMyAssignments.ts` off `GET /inspection/assignments/mine` and
+  `GET /action/assignments/mine`. Kept dependency-free of RTK Query on purpose, so the
+  asymmetries can be unit-tested directly. Wired into `InspectionTable`, `FindingDetails`,
+  `AllFindingsPage` and `FindingClosureControls`.
+  - **`undefined` means "data unavailable," never "zero assignments."** Both hooks return
+    `undefined` while loading or on error, and every consumer degrades to the pre-#270 role-only
+    behavior rather than newly denying. An empty `Set` is the separate, real "assigned to
+    nothing" value. Collapsing the two would turn a failed fetch into a lockout.
+- **Route-level write guards exist now** (aexa-frontend#271), as `WriteGuardRoute` — a sibling to
+  `ProtectedRoute`, not a change to it, since the two answer different questions (account type
+  vs. org-role write capability). It applies the same `canWriteOrgResource` predicate the buttons
+  use, so guard and affordance can't disagree, and wraps five routes: template create/edit,
+  inspection create/edit, and run-inspection. A blocked user is redirected to the relevant list
+  page (this app has no unauthorized-state UX pattern; `ErrorPage.tsx` is a 404), and a
+  still-loading role renders a placeholder rather than flashing a redirect at a legitimate
+  writer.
 
-**What that gating deliberately does *not* cover** — the two places a user can still meet a 403:
+**What that gating still does *not* cover** — where a user can meet a 403, or worse:
 
-- **No row-level assignment gating.** `canWriteOrgResource` is role-only, while the server's real
-  rule is narrower for two roles: a `LEAD_AUDITOR` can only write to inspections they're assigned
-  to (`InspectionAssignment`), and a `LIGHT_USER` only to findings they hold a live
-  `FindingAssignment` for. The frontend has no access to that assignment data today, so it offers
-  both roles actions the server may still reject. This is a deliberate limit of the gate, not an
-  oversight — gating on role alone fixes the "looks broken for a Viewer" problem without
-  pretending to know assignment state it can't see.
-- **No route guards on the write surfaces themselves.** Gating hides controls on list and detail
-  pages; the routes behind them (template create/edit, inspection create/edit, the
-  run-inspection page) have no role guard of their own. A `VIEWER` who deep-links or bookmarks
-  one still reaches a full editing surface, and only learns otherwise on submit.
+- **The route guards are role-only, not assignment-aware.** `WriteGuardRoute` consults
+  `canWriteOrgResource`, so an unassigned `LEAD_AUDITOR` passes it on a specific inspection the
+  server will still refuse.
+- **`RunInspection.tsx` has no in-page gating at all** (**aexa-frontend#275**) — not role, not
+  assignment. It's the one write surface with no baseline of its own; only its route guard stands
+  between a non-writer and Save/Complete.
+- **"Start New Inspection" is offered to `LEAD_AUDITOR`** (**aexa-frontend#276**) despite
+  inspection creation being ADMIN-only server-side.
+- **No client-side read scoping for `VIEWER`.** `resolveViewerVisibleIds` models the rule
+  correctly — never-assigned Viewer gets org-wide fallback, all-revoked Viewer gets denied, and
+  those two are deliberately distinct return values — but it is not wired to any list. #270
+  scoped itself to write-gating; read-scoping remains entirely the server's job.
 
 ## Auth / session model
 

@@ -113,11 +113,30 @@ oversight (e.g. a risk formally accepted by the board) — no existing default c
 - **Core CRUD + raw scores**: fully wired (Risk Register page) — plain numeric inputs for
   `inherent_score`/`residual_score`/`pagerank_score`, financial impact, probability, velocity,
   trend, control effectiveness.
-- **Override + staleness fields — confirmed dead.** The frontend's `Risk` type has none of
-  `inherent_is_override`/`inherent_override_reason`/`residual_is_override`/
-  `residual_override_stale`. There is no override toggle, no reason textarea, and no staleness
-  badge anywhere — if the backend marks a score stale after an input changes, nothing in the UI
-  shows it.
+- **Override + staleness — wired (aexa-frontend#269).** The frontend's `Risk` type now carries
+  all ten override/staleness/audit fields. The create/edit form has a per-score override toggle
+  (inherent and residual) with a React Hook Form `validate` rule making the reason **required
+  only while that toggle is on**, mirroring `risk_scoring.ts`'s own conditional requirement.
+  `RiskOverrideBadge` renders next to a score in one of two states — amber "stale" and blue
+  "overridden" — and renders **nothing** when that score isn't overridden, so the common case
+  stays uncluttered. Both scores get a badge inside the form on **edit** (they're behind `editId`,
+since a brand-new risk has no override to describe); the register **list**
+  carries only the residual one, because residual is the only score with a column of its own
+  there. Adding an inherent column later means adding its badge too. `overriddenBy` is shown as a raw
+  accountId; there's no endpoint to resolve one to a display name from this frontend (the same
+  constraint `attested_by` already lives with).
+- **The override keys are only sent when the user actually touched that control.** Worth
+  knowing before editing `onSubmit` in `RiskRegisterPage.tsx`, because the naive reading is
+  wrong: the form pre-populates both toggles from the stored row, so submitting their current
+  value on *every* save would make an edit to an unrelated field (a rename, say) look like a
+  fresh override to the server. `resolveInherentFields`/`resolveResidualFields` treat an
+  **omitted** `*_override` key as "no instruction, preserve what's there" but an **explicit
+  `true`** as "fresh override — reset `*_overridden_by`/`*_overridden_at` to now, clear
+  `*_override_stale`." So each score's `*_override`/`*_override_reason` pair is gated on
+  `formState.dirtyFields` (its toggle, its reason, or its score being dirty) and deleted from the
+  payload otherwise. That's what keeps an untouched override's audit trail and its unreviewed
+  staleness flag intact through unrelated edits. The server-derived
+  `*_overridden_by`/`*_overridden_at`/`*_override_stale` fields are never sent at all.
 - **Maker-checker approval** — fully wired, including a client-side self-approval guard, a
   reject-reason modal, and a "pending my approval" filter.
 - **RiskLink correlation + correlation matrix + PageRank graph** — fully wired, including

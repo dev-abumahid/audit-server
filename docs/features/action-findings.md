@@ -76,10 +76,35 @@ no Note or Recommendation id is ever an Action id, every such query matched noth
 User saw no notes and no recommendations at all, with no error to explain why (#280). Any new
 model brought under this helper needs its own correct field, not the default.
 
-## `MessageVisibility`
+## `MessageVisibility` (#311)
 
-`INTERNAL` / `CLIENT_VISIBLE` enum exists on the schema today with **no enforcement yet** — a
-known gap, not a released feature.
+`INTERNAL` / `CLIENT_VISIBLE`, defaulting to `INTERNAL`. **Enforced on every read path** as of
+#311, via `canViewInternalMessages(ctx)` in `org_scope.ts` — which is deliberately role-only
+(`ctx.role !== 'LIGHT_USER'`), a strictly coarser distinction than `applyActionScope`'s: it gates
+*which messages on an already-visible Action* you see, not which Actions you see.
+
+Four read paths apply it, and the set matters — missing one leaks:
+
+- **List** (`get_all_action_from_db`) — the list deliberately selects only message *ids* for the
+  badge count rather than the full nested include, so it needed the filter applied separately.
+  Without it the count alone would reveal that INTERNAL messages exist, even with their bodies
+  hidden.
+- **Detail** (`get_single_action_from_db`) — via `messagesInclude(canViewInternalMessages(ctx))`.
+- **External-member detail** — passes `messagesInclude(false)` unconditionally rather than
+  consulting a context: there is no `CallerOrgContext` on this path, and every external member is
+  by definition in one of the two groups INTERNAL messages must be hidden from.
+- **The message-update return payload** — this endpoint echoes the refreshed thread back so the
+  caller doesn't need a second fetch, so it has to filter too; otherwise posting a
+  `CLIENT_VISIBLE` message would hand a Light User back every pre-existing INTERNAL one.
+
+A fifth path returns `messages` unfiltered — `create_action_into_db`'s return — and is
+deliberately exempt rather than missed: a just-created Action can only carry messages the caller
+themselves supplied in that same request.
+
+**The remaining gap is purely the missing frontend affordance, not the API.** Both write paths
+accept an explicit `visibility` (it's in `action.validation.ts` for create and update alike).
+What's missing is any UI to set it, so every message composed in the app lands on the `INTERNAL`
+default and is invisible to exactly the audience the `CLIENT_VISIBLE` value exists to serve.
 
 ## IDOR hardening
 
@@ -114,14 +139,32 @@ caller's own org before being attached to an Action.
   shared helper in `dueDateInput.ts` rather than raw string slicing, which was shifting the
   stored date by up to a day depending on the viewer's UTC offset (#238).
 - **`addFindingMessage` is wired** — the Messages tab has a compose box, and the mutation's
-  `invalidatesTags` refreshes the thread rather than the component patching local state.
+  `invalidatesTags` refreshes the thread rather than the component patching local state. The
+  compose box has **no visibility control**, so everything posted from it is `INTERNAL` by
+  default — see the `MessageVisibility` section above for why that now has a visible consequence.
+- **Assignment-based write gating is wired (aexa-frontend#270)**, replacing the coarse role-only
+  `canWriteOrgResource` on the per-row and per-finding write affordances:
+  - `FindingDetails.tsx` and `AllFindingsPage.tsx` gate on `canWriteInspection(role,
+    action.inspectionId, ...)` — findings live inside an inspection, so a `LEAD_AUDITOR`'s write
+    access to a finding is keyed off an `InspectionAssignment` on its **parent inspection**, not
+    off the finding's own id. This mirrors `assertCanWriteToAction` exactly.
+  - `FindingClosureControls.tsx` gates on the fuller `canWriteFinding`, the only surface that
+    also narrows a `LIGHT_USER` — to findings they hold an **`ACTIVE`, non-revoked**
+    `FindingAssignment` for (a `PENDING_APPROVAL` or `REJECTED` grant confers nothing, matching
+    `getAssignedActionIds`). It passes `lightUserDegradeDefault: true` because this control
+    previously allowed any Light User, while the two pages above excluded them entirely — so each
+    call site degrades to *its own* pre-#270 default when assignment data is unavailable, rather
+    than to one global guess.
+  - Page-level "create" affordances stay role-only, deliberately: there's no assignment to scope
+    a not-yet-existing record by.
 - **`FindingAssignment` sub-assignment — still absent as a distinct concept.** There's a generic
   `assignBy` multi-select (any org member, no internal/external Light-User distinction, no
   approval flow), and the detail page's "Assigned Users" panel does now render it (#215 — it
   previously always showed the empty state without ever reading the list). The real grant
   mechanism — who actually gains write access to a finding, and
   the admin approval step when `requireApprovalForSubAssignment` is on — has no UI, so the whole
-  sub-assignment workflow is reachable only through the API today. This is also why client-side
-  gating can't narrow a Light User to their assigned findings; see
-  [frontend-overview.md](frontend-overview.md).
+  sub-assignment workflow is reachable only through the API today. Note the split this leaves:
+  as of #270 the frontend *reads* a Light User's own assignments (via
+  `GET /action/assignments/mine`) to gate closure controls correctly, but there is still no UI to
+  *create*, approve or revoke one. See [frontend-overview.md](frontend-overview.md).
 - **`line_of_defense`** — same governance-board-only pattern as the other four entities.
