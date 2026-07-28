@@ -338,7 +338,13 @@ const create_action_into_db = async (req: Request) => {
         create: assigneeIds.map((orgMemberId) => ({ orgMemberId })),
       },
     },
-    include: { messages: true, ...RESPONSIBLE_INCLUDE },
+    // aexa-server#315: this was the one read of the `messages` relation not
+    // routed through the shared messagesInclude() helper #312 introduced —
+    // `messages: true` returns every message regardless of visibility,
+    // inconsistent with the other 3 read paths (get_all_action_from_db,
+    // get_single_action_from_db, update_action_messages_into_db) which all
+    // filter INTERNAL messages out for callers who can't see them.
+    include: { ...messagesInclude(canViewInternalMessages(ctx)), ...RESPONSIBLE_INCLUDE },
   });
 
   return shapeResponsibleAssignees(action);
@@ -1128,10 +1134,25 @@ const update_action_messages_into_db = async (req: Request) => {
           create: {
             senderAccountId: user.accountId,
             message: req?.body?.message,
-            // aexa-server#311: same "thread through an explicit value,
-            // otherwise let Prisma's own INTERNAL default apply" rule as
-            // create_action_into_db's message creation above.
-            ...(req?.body?.visibility !== undefined && { visibility: req.body.visibility }),
+            // aexa-server#315: the frontend never sends an explicit
+            // visibility today, so falling through to Prisma's schema
+            // default (INTERNAL) here — the same "thread through an
+            // explicit value, otherwise let Prisma's own default apply"
+            // rule create_action_into_db's message creation uses above —
+            // meant a LIGHT_USER's own just-written message got the
+            // INTERNAL default and was then immediately filtered out of
+            // this very response by messagesInclude(canViewInternalMessages(ctx))
+            // below (#312's visibility enforcement). A caller who can't see
+            // INTERNAL messages can never usefully create one either — they
+            // couldn't read it back regardless of who created it — so for
+            // that caller the default must be the one visibility value they
+            // can actually see: CLIENT_VISIBLE. Callers who CAN see INTERNAL
+            // (ADMIN/LEAD_AUDITOR/VIEWER) keep the schema default unchanged.
+            // An explicit visibility from any caller is still respected
+            // as-is, never overridden.
+            ...(req?.body?.visibility !== undefined
+              ? { visibility: req.body.visibility }
+              : !canViewInternalMessages(ctx) && { visibility: 'CLIENT_VISIBLE' as const }),
           },
         },
       }),

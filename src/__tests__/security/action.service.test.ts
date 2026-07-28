@@ -2047,6 +2047,232 @@ describe('action service — org scoping (ticket #6)', () => {
         expect(callArg.include.messages.where).toBeUndefined();
       });
     });
+
+    // aexa-server#315: #312's INTERNAL-visibility filtering regressed a
+    // LIGHT_USER's ability to see their own just-written message, since
+    // update_action_messages_into_db never defaulted a created message's
+    // visibility away from the schema's own INTERNAL default. Fixed by
+    // defaulting to CLIENT_VISIBLE specifically for callers who can't see
+    // INTERNAL messages, leaving everyone else's default untouched.
+    describe('message visibility default on write (issue #315)', () => {
+      it('LIGHT_USER posting a message with no explicit visibility sees it in the create response', async () => {
+        mockMembership('LIGHT_USER');
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          orgAccountId: ANCHOR,
+          inspectionId: 'insp-1',
+        });
+        db.update.mockResolvedValue({
+          id: 'action-1',
+          messages: [
+            { id: 'msg-1', message: 'hi', senderAccountId: ORG_A, visibility: 'CLIENT_VISIBLE' },
+          ],
+        });
+
+        const result = await action_service.update_action_messages_into_db(
+          makeReq({ params: { id: 'action-1' }, body: { message: 'hi' } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        // Created with the CLIENT_VISIBLE default instead of falling through
+        // to the schema's INTERNAL default.
+        expect(callArg.data.messages.create).toEqual({
+          senderAccountId: ORG_A,
+          message: 'hi',
+          visibility: 'CLIENT_VISIBLE',
+        });
+        // And the response's own message-visibility filter
+        // (messagesInclude(canViewInternalMessages(ctx))) doesn't strip it
+        // back out — the LIGHT_USER's own message survives the CLIENT_VISIBLE-only
+        // where clause used for their role.
+        expect(callArg.include.messages.where).toEqual({ visibility: 'CLIENT_VISIBLE' });
+        expect(result.messages).toEqual([
+          { id: 'msg-1', message: 'hi', senderAccountId: ORG_A, visibility: 'CLIENT_VISIBLE' },
+        ]);
+      });
+
+      it('LIGHT_USER posting a message still sees it on a subsequent read (get_single_action_from_db)', async () => {
+        mockMembership('LIGHT_USER');
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          orgAccountId: ANCHOR,
+          inspectionId: 'insp-1',
+          messages: [
+            { id: 'msg-1', message: 'hi', senderAccountId: ORG_A, visibility: 'CLIENT_VISIBLE' },
+          ],
+        });
+
+        const result = await action_service.get_single_action_from_db(
+          makeReq({ params: { id: 'action-1' } }),
+        );
+
+        // Same CLIENT_VISIBLE-only where clause as every other LIGHT_USER
+        // read — the message created with the new default is a normal
+        // CLIENT_VISIBLE row, so it comes back like any other.
+        const [findArg] = db.findFirst.mock.calls[0];
+        expect(findArg.include.messages.where).toEqual({ visibility: 'CLIENT_VISIBLE' });
+        expect(result.messages).toEqual([
+          { id: 'msg-1', message: 'hi', senderAccountId: ORG_A, visibility: 'CLIENT_VISIBLE' },
+        ]);
+      });
+
+      // VIEWER is deliberately excluded here: assertCanWriteToAction never
+      // permits a VIEWER to write to a finding at all (read + comment/flag
+      // only, per that function's own docstring), so there's no write-path
+      // visibility-default behavior to confirm for that role — it 403s
+      // before reaching the message-create code this test targets.
+      it.each(['ADMIN', 'LEAD_AUDITOR'] as const)(
+        '%s posting a message with no explicit visibility still gets the schema INTERNAL default (unchanged)',
+        async (role) => {
+          mockMembership(role);
+          if (role === 'LEAD_AUDITOR') {
+            assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-1' }]);
+          }
+          db.findFirst.mockResolvedValue({
+            id: 'action-1',
+            orgAccountId: ANCHOR,
+            inspectionId: 'insp-1',
+          });
+          db.update.mockResolvedValue({ id: 'action-1', messages: [] });
+
+          await action_service.update_action_messages_into_db(
+            makeReq({ params: { id: 'action-1' }, body: { message: 'hi' } }),
+          );
+
+          const callArg = db.update.mock.calls[0][0];
+          expect(callArg.data.messages.create).toEqual({
+            senderAccountId: ORG_A,
+            message: 'hi',
+          });
+          expect(callArg.data.messages.create).not.toHaveProperty('visibility');
+        },
+      );
+
+      it('an explicit visibility from a LIGHT_USER caller is respected as-is, not silently overridden', async () => {
+        mockMembership('LIGHT_USER');
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          orgAccountId: ANCHOR,
+          inspectionId: 'insp-1',
+        });
+        db.update.mockResolvedValue({ id: 'action-1', messages: [] });
+
+        await action_service.update_action_messages_into_db(
+          makeReq({
+            params: { id: 'action-1' },
+            body: { message: 'hi', visibility: 'INTERNAL' },
+          }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        // Not overridden to CLIENT_VISIBLE even though this caller can't
+        // see INTERNAL messages back — the explicit value always wins.
+        expect(callArg.data.messages.create).toEqual({
+          senderAccountId: ORG_A,
+          message: 'hi',
+          visibility: 'INTERNAL',
+        });
+      });
+
+      it('an explicit visibility from an ADMIN caller is respected as-is, not silently defaulted', async () => {
+        mockMembership('ADMIN');
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          orgAccountId: ANCHOR,
+          inspectionId: 'insp-1',
+        });
+        db.update.mockResolvedValue({ id: 'action-1', messages: [] });
+
+        await action_service.update_action_messages_into_db(
+          makeReq({
+            params: { id: 'action-1' },
+            body: { message: 'hi', visibility: 'CLIENT_VISIBLE' },
+          }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data.messages.create).toEqual({
+          senderAccountId: ORG_A,
+          message: 'hi',
+          visibility: 'CLIENT_VISIBLE',
+        });
+      });
+    });
+
+    // aexa-server#315: create_action_into_db's `include: { messages: true }`
+    // was the one read of the messages relation not routed through the
+    // shared messagesInclude() helper #312 introduced — it returned every
+    // message regardless of visibility, inconsistent with the other 3 read
+    // paths.
+    describe('create_action_into_db message-read consistency (issue #315)', () => {
+      it('LIGHT_USER creating (via a role that can create) with pre-existing messages only gets CLIENT_VISIBLE ones back', async () => {
+        // LIGHT_USER can't create actions (assertCanWriteToInspection denies
+        // it), so this exercises the include shape via LEAD_AUDITOR — the
+        // point is confirming the include is now routed through
+        // messagesInclude(canViewInternalMessages(ctx)) like every other read,
+        // not asserting a LIGHT_USER can reach this endpoint.
+        mockMembership('LEAD_AUDITOR');
+        assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-1' }]);
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-1',
+          siteId: 'site-1',
+          orgAccountId: ANCHOR,
+        });
+        db.create.mockResolvedValue({ id: 'new', orgAccountId: ANCHOR, messages: [] });
+
+        await action_service.create_action_into_db(
+          makeReq({ body: { inspectionId: 'insp-1', actionTitle: 'x' } }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        // `where` being undefined alone doesn't distinguish the fix from the
+        // old `messages: true` shorthand (`true.where` is also undefined) --
+        // assert the actual messagesInclude() shape (a nested select) is
+        // present, which `messages: true` never produced.
+        expect(callArg.include.messages).not.toBe(true);
+        expect(callArg.include.messages.where).toBeUndefined();
+        expect(callArg.include.messages.select).toEqual(
+          expect.objectContaining({ id: true, message: true, visibility: true }),
+        );
+      });
+
+      it("a fresh action's create response for a LIGHT_USER-visible scenario filters messages the same way as get_single_action_from_db", async () => {
+        // Simulates the include shape a LIGHT_USER caller would get if they
+        // ever reached this path (defense-in-depth: even though
+        // assertCanWriteToInspection blocks LIGHT_USER from create today,
+        // the include itself must not silently leak INTERNAL messages if
+        // that gate ever changes).
+        orgMemberDb.findUnique.mockResolvedValue({
+          id: MEMBER_ID,
+          organizationId: ORG_ID,
+          accountId: ORG_A,
+          role: 'LIGHT_USER',
+          status: 'ACTIVE',
+          expiresAt: null,
+        });
+        organizationDb.findUnique.mockResolvedValue({ id: ORG_ID, anchorAccountId: ANCHOR });
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-1',
+          siteId: 'site-1',
+          orgAccountId: ANCHOR,
+        });
+        db.create.mockResolvedValue({ id: 'new', orgAccountId: ANCHOR, messages: [] });
+
+        // assertCanWriteToInspection throws for LIGHT_USER before the create
+        // call is even made — confirm the include shape passed to
+        // db.create is never reached in that case (i.e. this stays a 403,
+        // not a silent bypass), by asserting the rejection instead.
+        await expect(
+          action_service.create_action_into_db(
+            makeReq({ body: { inspectionId: 'insp-1', actionTitle: 'x' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+        expect(db.create).not.toHaveBeenCalled();
+      });
+    });
   });
 });
 
