@@ -407,6 +407,85 @@ describe('org_scope — applyActionScope', () => {
     });
   });
 
+  // Issue #280: Note/Recommendation callers pass idField: 'inspectionId'
+  // since they have no `id` comparable to an Action id — this exercises the
+  // dedicated getAssignedActionInspectionIds path (joins through Action to
+  // resolve inspection ids) instead of the plain-id LIGHT_USER path above.
+  describe("idField: 'inspectionId' (Note/Recommendation callers)", () => {
+    it('LIGHT_USER: resolves the INSPECTION ids of their assigned actions, not action ids', async () => {
+      findingAssignmentDb.findMany.mockResolvedValue([
+        { action: { inspectionId: 'insp-1' } },
+        { action: { inspectionId: 'insp-2' } },
+      ]);
+
+      const result = await applyActionScope(
+        { orgAccountId: ANCHOR },
+        { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+        'inspectionId',
+      );
+
+      expect(result).toEqual({ orgAccountId: ANCHOR, inspectionId: { in: ['insp-1', 'insp-2'] } });
+      expect(findingAssignmentDb.findMany).toHaveBeenCalledWith({
+        where: { orgMemberId: MEMBER_ID, status: 'ACTIVE', revokedAt: null },
+        select: { action: { select: { inspectionId: true } } },
+      });
+    });
+
+    it('LIGHT_USER: dedupes when multiple assigned actions share the same inspection', async () => {
+      findingAssignmentDb.findMany.mockResolvedValue([
+        { action: { inspectionId: 'insp-1' } },
+        { action: { inspectionId: 'insp-1' } },
+      ]);
+
+      const result = await applyActionScope(
+        { orgAccountId: ANCHOR },
+        { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+        'inspectionId',
+      );
+
+      expect(result).toEqual({ orgAccountId: ANCHOR, inspectionId: { in: ['insp-1'] } });
+    });
+
+    it('LIGHT_USER with no live FindingAssignment: denied (empty inspectionId set)', async () => {
+      findingAssignmentDb.findMany.mockResolvedValue([]);
+
+      const result = await applyActionScope(
+        { orgAccountId: ANCHOR },
+        { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+        'inspectionId',
+      );
+
+      expect(result).toEqual({ orgAccountId: ANCHOR, inspectionId: { in: [] } });
+    });
+
+    it("does not affect the 4 already-correct Action call sites, which never pass idField (defaults to 'id')", async () => {
+      findingAssignmentDb.findMany.mockResolvedValue([{ actionId: 'action-1' }]);
+
+      const result = await applyActionScope(
+        { orgAccountId: ANCHOR },
+        { organizationId: ANCHOR, role: 'LIGHT_USER', orgMemberId: MEMBER_ID },
+      );
+
+      expect(result).toEqual({ orgAccountId: ANCHOR, id: { in: ['action-1'] } });
+      expect(findingAssignmentDb.findMany).toHaveBeenCalledWith({
+        where: { orgMemberId: MEMBER_ID, status: 'ACTIVE', revokedAt: null },
+        select: { actionId: true },
+      });
+    });
+
+    it('LEAD_AUDITOR: unaffected by idField — already scopes by inspectionId regardless of target model', async () => {
+      assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'i1' }]);
+
+      const result = await applyActionScope(
+        { orgAccountId: ANCHOR },
+        { organizationId: ANCHOR, role: 'LEAD_AUDITOR', orgMemberId: MEMBER_ID },
+        'inspectionId',
+      );
+
+      expect(result).toEqual({ orgAccountId: ANCHOR, inspectionId: { in: ['i1'] } });
+    });
+  });
+
   it('LIGHT_USER: a PENDING_APPROVAL assignment grants no access; only ACTIVE does, end to end', async () => {
     // Simulates real DB filtering (not a hand-picked return value) against a
     // small fixture containing both a still-pending and an approved row for

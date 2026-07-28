@@ -255,6 +255,28 @@ const getAssignedActionIds = async (orgMemberId: string | null): Promise<string[
 };
 
 /**
+ * Sibling to getAssignedActionIds for callers of applyActionScope targeting
+ * a model that's keyed by `inspectionId` rather than Action's own `id` (Note,
+ * Recommendation — both 1:1-or-scoped-to an inspection, same as Action
+ * itself). A LIGHT_USER has no direct assignment to a Note/Recommendation
+ * row; their real grant is the FindingAssignment on an Action, so this joins
+ * through Action to resolve which INSPECTIONS their assigned findings live
+ * on (issue #280 — the previous code compared a Note/Recommendation's `id`
+ * against assigned Action ids, two disjoint UUID namespaces that can never
+ * match, so LIGHT_USER always got empty results for these two models).
+ * Dedupes because a member commonly holds more than one active
+ * FindingAssignment on the same inspection.
+ */
+const getAssignedActionInspectionIds = async (orgMemberId: string | null): Promise<string[]> => {
+  if (!orgMemberId) return [];
+  const rows = await prisma.findingAssignment.findMany({
+    where: { orgMemberId, status: 'ACTIVE', revokedAt: null },
+    select: { action: { select: { inspectionId: true } } },
+  });
+  return [...new Set(rows.map((row) => row.action.inspectionId))];
+};
+
+/**
  * Restricts `whereCondition[field]` to `ids`, intersecting with whatever
  * filter is already present instead of blindly overwriting it (e.g.
  * get_single_*_from_db already filters by a specific id — we narrow that
@@ -330,15 +352,33 @@ export const applyInspectionScope = async (
 
 /**
  * Applies Lead Auditor / Viewer / Light User scoping to an Action (finding)
- * where-condition. Lead Auditor and Viewer are scoped transitively via
- * their parent inspection's InspectionAssignment rows (inspection-level
- * access). LIGHT_USER is scoped directly by `id` instead — they never get
- * inspection-level access, only the specific finding(s) they've been
- * sub-assigned via an ACTIVE FindingAssignment (slice 4).
+ * where-condition, OR to any other model that's keyed by the same
+ * Action.inspectionId lineage — Note and Recommendation both live 1:1 (Note)
+ * or scoped (Recommendation) on an inspection exactly like Action does, and
+ * reuse this same scoping rule rather than duplicating it (see
+ * note.service.ts, recommendation.service.ts).
+ *
+ * Lead Auditor and Viewer are scoped transitively via their parent
+ * inspection's InspectionAssignment rows (inspection-level access) — this
+ * is already correct for any target model, since both branches filter by
+ * `inspectionId` regardless of which model owns that column.
+ *
+ * LIGHT_USER is scoped directly to the finding(s) they've been sub-assigned
+ * via an ACTIVE FindingAssignment (slice 4) — but WHICH field that resolves
+ * to depends on the target model:
+ *   - Action itself (`idField: 'id'`, the default): restrict Action.id to
+ *     the assigned action ids directly.
+ *   - Note/Recommendation (`idField: 'inspectionId'`): these models have no
+ *     `id` comparable to an Action id — comparing them would silently
+ *     compare two disjoint UUID namespaces and never match (issue #280).
+ *     Instead resolve the INSPECTION ids of the Light User's assigned
+ *     actions (getAssignedActionInspectionIds, joining through Action) and
+ *     restrict `inspectionId` to that set.
  */
 export const applyActionScope = async (
   whereCondition: Record<string, unknown>,
   ctx: CallerOrgContext,
+  idField: 'id' | 'inspectionId' = 'id',
 ): Promise<Record<string, unknown>> => {
   if (ctx.role === 'ADMIN') return whereCondition;
 
@@ -354,6 +394,10 @@ export const applyActionScope = async (
   }
 
   if (ctx.role === 'LIGHT_USER') {
+    if (idField === 'inspectionId') {
+      const ids = await getAssignedActionInspectionIds(ctx.orgMemberId);
+      return restrictFieldToIds(whereCondition, 'inspectionId', ids);
+    }
     const ids = await getAssignedActionIds(ctx.orgMemberId);
     return restrictFieldToIds(whereCondition, 'id', ids);
   }

@@ -22,7 +22,11 @@ const get_all_note_from_db = async (req: Request) => {
   // Auditor/Viewer assignment scoping as Inspection/Action — otherwise a
   // Lead Auditor restricted to inspection A could still read notes on
   // inspection B. Found by independent review.
-  const whereCondition = await applyActionScope({ orgAccountId: ctx.organizationId }, ctx);
+  const whereCondition = await applyActionScope(
+    { orgAccountId: ctx.organizationId },
+    ctx,
+    'inspectionId',
+  );
 
   // Was an unconditional findMany with no limit, unlike every other list
   // endpoint in this feature (site/template/risk all paginate). Found by
@@ -51,7 +55,11 @@ const get_single_note_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   const { id } = req.params as { id: string };
-  const whereCondition = await applyActionScope({ id, orgAccountId: ctx.organizationId }, ctx);
+  const whereCondition = await applyActionScope(
+    { id, orgAccountId: ctx.organizationId },
+    ctx,
+    'inspectionId',
+  );
   const result = await prisma.note.findFirst({ where: whereCondition });
   if (!result) throw new AppError('Note not found', 404);
   return result;
@@ -63,6 +71,7 @@ const get_note_by_inspection_id_from_db = async (req: Request) => {
   const whereCondition = await applyActionScope(
     { inspectionId, orgAccountId: ctx.organizationId },
     ctx,
+    'inspectionId',
   );
   const result = await prisma.note.findFirst({ where: whereCondition });
   if (!result) throw new AppError('Note not found', 404);

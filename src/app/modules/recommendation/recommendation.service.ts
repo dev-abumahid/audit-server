@@ -15,7 +15,11 @@ const get_all_recommendation_from_db = async (req: Request) => {
   // Recommendations are 1:1 with an inspection, so they inherit the same
   // Lead Auditor/Viewer assignment scoping as Inspection/Action. Found by
   // independent review.
-  const whereCondition = await applyActionScope({ orgAccountId: ctx.organizationId }, ctx);
+  const whereCondition = await applyActionScope(
+    { orgAccountId: ctx.organizationId },
+    ctx,
+    'inspectionId',
+  );
 
   // Was an unconditional findMany with no limit, unlike every other list
   // endpoint in this feature (site/template/risk all paginate). Found by
@@ -51,7 +55,11 @@ const get_single_recommendation_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   const { id } = req.params as { id: string };
-  const whereCondition = await applyActionScope({ id, orgAccountId: ctx.organizationId }, ctx);
+  const whereCondition = await applyActionScope(
+    { id, orgAccountId: ctx.organizationId },
+    ctx,
+    'inspectionId',
+  );
   const result = await prisma.recommendation.findFirst({
     where: whereCondition,
     include: { questions: true },
@@ -123,6 +131,7 @@ const get_recommendation_by_inspectionId_from_db = async (req: Request) => {
   const whereCondition = await applyActionScope(
     { inspectionId, orgAccountId: ctx.organizationId },
     ctx,
+    'inspectionId',
   );
   const result = await prisma.recommendation.findFirst({
     where: whereCondition,

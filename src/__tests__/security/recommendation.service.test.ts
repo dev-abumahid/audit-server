@@ -23,6 +23,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
     inspectionAssignment: {
       findMany: vi.fn(),
     },
+    findingAssignment: {
+      findMany: vi.fn(),
+    },
   },
 }));
 
@@ -34,6 +37,10 @@ const resultDb = prisma.recommendationResult as unknown as Record<string, Return
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const assignmentDb = prisma.inspectionAssignment as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const findingAssignmentDb = prisma.findingAssignment as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -244,6 +251,52 @@ describe('recommendation service — org scoping (ticket #6)', () => {
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(recDb.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  // Issue #280: applyActionScope's LIGHT_USER branch used to compare
+  // Recommendation.id against assigned Action ids — two disjoint UUID
+  // namespaces that can never match, so a LIGHT_USER always got empty
+  // results here even when legitimately assigned to a finding on the
+  // inspection being queried.
+  describe('LIGHT_USER scoping (issue #280)', () => {
+    it('a LIGHT_USER assigned to an action ON a given inspection CAN see the recommendation for that inspection (previously always empty)', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([{ action: { inspectionId: 'insp1' } }]);
+      recDb.findFirst.mockResolvedValue({
+        id: 'rec1',
+        orgAccountId: ANCHOR,
+        inspectionId: 'insp1',
+      });
+
+      const result = await recommendation_service.get_recommendation_by_inspectionId_from_db(
+        makeReq({ params: { inspectionId: 'insp1' } }),
+      );
+
+      // The inspectionId param already narrows the where to a single id, so
+      // restrictFieldToIds intersects it with the assigned set rather than
+      // replacing it — 'insp1' passes through unchanged because it IS in
+      // the LIGHT_USER's assigned set.
+      expect(recDb.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { inspectionId: 'insp1', orgAccountId: ANCHOR } }),
+      );
+      expect(result).toEqual({ id: 'rec1', orgAccountId: ANCHOR, inspectionId: 'insp1' });
+    });
+
+    it('a LIGHT_USER with no live FindingAssignment sees nothing', async () => {
+      mockMembership('LIGHT_USER');
+      findingAssignmentDb.findMany.mockResolvedValue([]);
+      recDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        recommendation_service.get_recommendation_by_inspectionId_from_db(
+          makeReq({ params: { inspectionId: 'insp1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(recDb.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { inspectionId: { in: [] }, orgAccountId: ANCHOR } }),
+      );
     });
   });
 
