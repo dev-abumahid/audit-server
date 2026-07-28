@@ -250,9 +250,27 @@ const update_compliance_into_db = async (req: Request) => {
     safeBody.status ?? existing.status,
     safeBody.attachments ?? existing.attachments,
   );
+  const data: Prisma.ComplianceObligationUncheckedUpdateInput = {
+    ...safeBody,
+    org_account_id: ctx.organizationId,
+  };
+  // aexa-server#260: recurrence is being cleared to falsy/'one_time'/an
+  // unrecognized cadence in THIS patch -- next_review_date must clear with
+  // it, or compute_obligation_overdue (which reads next_review_date ??
+  // due_date) keeps comparing against a stale future date seeded by the old
+  // cadence, falsely flipping the obligation overdue once that date passes
+  // even though there's no more cadence to have missed. Only fires when
+  // recurrence is actually part of this PATCH -- an update that doesn't
+  // touch recurrence at all must leave next_review_date exactly as it was.
+  if (
+    req.body.recurrence !== undefined &&
+    computeNextReviewDate(req.body.recurrence, new Date()) === null
+  ) {
+    data.next_review_date = null;
+  }
   const result = await prisma.complianceObligation.update({
     where: { id },
-    data: { ...safeBody, org_account_id: ctx.organizationId },
+    data,
   });
   return with_overdue(result);
 };

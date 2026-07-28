@@ -543,6 +543,68 @@ describe('compliance service — org scoping (issue #93)', () => {
       expect(callArg.data).not.toHaveProperty('next_review_date');
     });
 
+    // aexa-server#260: clearing recurrence must also clear the stale
+    // next_review_date it seeded, or compute_obligation_overdue keeps
+    // comparing against a future date from the old cadence forever.
+    describe('nulling next_review_date when recurrence is cleared (#260)', () => {
+      it.each([
+        ['null', null],
+        ['one_time', 'one_time'],
+        ['an unrecognized cadence', 'biannual'],
+        ['an empty string', ''],
+        ['a whitespace-only string', '   '],
+      ])('nulls next_review_date when recurrence is cleared to %s', async (_label, recurrence) => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'quarterly',
+          next_review_date: new Date('2099-01-01T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { recurrence } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data.next_review_date).toBeNull();
+      });
+
+      it('does NOT touch next_review_date when recurrence is left unchanged (not part of this PATCH)', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'quarterly',
+          next_review_date: new Date('2099-01-01T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { title: 'Revised' } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data).not.toHaveProperty('next_review_date');
+      });
+
+      it('does NOT null next_review_date when recurrence is switched to another valid cadence', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'quarterly',
+          next_review_date: new Date('2099-01-01T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { recurrence: 'monthly' } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data).not.toHaveProperty('next_review_date');
+      });
+    });
+
     describe('evidence gating for status: compliant (#243)', () => {
       it('rejects setting status to compliant on an obligation with no existing attachments', async () => {
         db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, attachments: [] });
