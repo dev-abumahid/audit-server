@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { NextFunction, Request, Response } from 'express';
 import { logger } from '../lib/logger.js';
 
 // Minimal shape shared with multer's file object (see IFile in cloudinary.ts) —
@@ -80,9 +81,10 @@ export function collectRequestFiles(req: { file?: unknown; files?: unknown }): u
 /**
  * Cleans up every file multer attached to this request that hasn't already
  * been marked handled. Safe to call more than once for the same request
- * (e.g. once from global_error_handler.ts, again from the res.on('finish')
- * safety net) — cleanupUploadedFile's ENOENT-swallowing makes a repeat call
- * against an already-deleted file a silent no-op, not a crash.
+ * (e.g. once from global_error_handler.ts, again from the app.ts safety net's
+ * 'finish'/'close' listeners, or from both of those firing) —
+ * cleanupUploadedFile's ENOENT-swallowing makes a repeat call against an
+ * already-deleted file a silent no-op, not a crash.
  */
 export async function cleanupUnhandledRequestFiles(req: {
   file?: unknown;
@@ -90,4 +92,33 @@ export async function cleanupUnhandledRequestFiles(req: {
 }): Promise<void> {
   const files = collectRequestFiles(req).filter((file) => !isFileHandled(file));
   await Promise.all(files.map((file) => cleanupUploadedFile(file)));
+}
+
+/**
+ * app.ts's request-scoped safety net for uploader.ts's local-disk temp files
+ * (aexa-server#305, gap closed by #309): global_error_handler.ts cleans up on
+ * the error path, but that only covers requests that actually reach it. This
+ * catches everything else.
+ *
+ * Registered once, before the router, so it applies to every route that uses
+ * the uploader middleware without each of them needing to wire it up.
+ *
+ * Listens for BOTH 'finish' (the response completed normally, matching
+ * global_error_handler.ts's coverage gap) and 'close' (the underlying
+ * connection ended — including a client disconnecting mid-request, after
+ * multer has already written a temp file to disk but before any response
+ * ever completes, in which case 'finish' never fires — see #309, and
+ * route_timeout.ts's `res.on('finish')` + `res.on('close')` pair for the same
+ * reasoning). It is fine for both to fire for the same request (a normal
+ * completion also closes the underlying connection): cleanupUnhandledRequestFiles
+ * is idempotent against a repeat call, so the second one is a silent no-op.
+ */
+export function uploadCleanupSafetyNet(req: Request, res: Response, next: NextFunction): void {
+  res.on('finish', () => {
+    void cleanupUnhandledRequestFiles(req);
+  });
+  res.on('close', () => {
+    void cleanupUnhandledRequestFiles(req);
+  });
+  next();
 }

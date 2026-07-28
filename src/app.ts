@@ -15,7 +15,7 @@ import { passportConfig } from './app/passport-js/config.js';
 import { redisConnection } from './app/queues/connection.js';
 import { isDocsRouteEnabled } from './app/utils/docs_visibility.js';
 import manageResponse from './app/utils/manage_response.js';
-import { cleanupUnhandledRequestFiles } from './app/utils/upload_cleanup.js';
+import { uploadCleanupSafetyNet } from './app/utils/upload_cleanup.js';
 import appRouter from './routes.js';
 import { swaggerOptions } from './swaggerOptions.js';
 
@@ -139,20 +139,11 @@ const apiLimiter = rateLimit({
 
 app.use('/api', apiLimiter);
 
-// Safety net for uploader.ts's local-disk temp files (aexa-server#305):
-// global_error_handler.ts cleans up on the error path, but that only covers
-// requests that actually reach it. This catches everything else — any
-// response that completes (success or error, including paths that bypass
-// the error handler) without the file ever being handed to uploadCloud
-// (cloudinary.ts marks a file "handled" right before it starts the upload).
-// Registered once, before the router, so it applies to every route that uses
-// the uploader middleware without each of them needing to wire it up.
-app.use((req, res, next) => {
-  res.on('finish', () => {
-    void cleanupUnhandledRequestFiles(req);
-  });
-  next();
-});
+// Safety net for uploader.ts's local-disk temp files (aexa-server#305, and
+// the client-abort gap in that closed by #309) — see uploadCleanupSafetyNet's
+// own doc comment in upload_cleanup.ts for what it covers and why it listens
+// for both 'finish' and 'close'.
+app.use(uploadCleanupSafetyNet);
 
 // Main router
 app.use('/api', appRouter);
