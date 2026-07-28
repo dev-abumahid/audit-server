@@ -149,6 +149,32 @@ describe('account service', () => {
       );
     });
 
+    it('sends a verification link with a well-formed `token=` query string (#281 — was `?=` with no key name)', async () => {
+      db.findFirst.mockResolvedValue(null);
+      mockTransaction.mockImplementation(async (fn) =>
+        fn({
+          account: { create: vi.fn().mockResolvedValue({ id: 'acc-1' }) },
+          organizationProfile: { create: vi.fn().mockResolvedValue({ id: 'prof-1' }) },
+          organization: { create: vi.fn().mockResolvedValue({ id: 'org-1' }) },
+          orgMember: { create: vi.fn().mockResolvedValue({}) },
+        }),
+      );
+      db.update.mockResolvedValue({});
+
+      await account_services.create_account_into_db(
+        makeReq({ body: { email: 'new@test.com', password: 'pw', organizationName: 'Acme' } }),
+      );
+
+      const verificationLink = (mockOtpQueueAdd.mock.calls[0][1] as { verificationLink: string })
+        .verificationLink;
+      expect(verificationLink).toMatch(/^.*\/verify\/token\?token=/);
+      const token = new URL(verificationLink).searchParams.get('token');
+      if (!token) throw new Error('Expected a token query param on the verification link');
+      expect(() =>
+        jwtHelpers.verifyToken(token, configs.jwt.verified_token as string),
+      ).not.toThrow();
+    });
+
     it('never stores the plaintext password', async () => {
       db.findFirst.mockResolvedValue(null);
       let capturedPassword: string | undefined;
@@ -475,6 +501,26 @@ describe('account service', () => {
         where: { id: 'acc-1' },
         data: { isAccountVerified: true },
       });
+    });
+  });
+
+  describe('resend_otp_and_verification_link_from_db', () => {
+    it('sends a verification link with a well-formed `token=` query string (#281 — was `?=` with no key name)', async () => {
+      db.findUnique.mockResolvedValue({ id: 'acc-1', isAccountVerified: false });
+      db.update.mockResolvedValue({});
+
+      await account_services.resend_otp_and_verification_link_from_db(
+        makeReq({ body: { email: 'a@test.com' } }),
+      );
+
+      const verificationLink = (mockOtpQueueAdd.mock.calls[0][1] as { verificationLink: string })
+        .verificationLink;
+      expect(verificationLink).toMatch(/^.*\/verify\/token\?token=/);
+      const token = new URL(verificationLink).searchParams.get('token');
+      if (!token) throw new Error('Expected a token query param on the verification link');
+      expect(() =>
+        jwtHelpers.verifyToken(token, configs.jwt.verified_token as string),
+      ).not.toThrow();
     });
   });
 

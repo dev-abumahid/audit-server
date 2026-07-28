@@ -99,7 +99,7 @@ const create_account_into_db = async (req: Request) => {
     configs.jwt.verified_token as string,
     '5m',
   );
-  const verificationLink = `${configs.jwt.front_end_url}/verify/token?=${verificationToken}`;
+  const verificationLink = `${configs.jwt.front_end_url}/verify/token?token=${verificationToken}`;
   // save otp into db
   await prisma.account.update({
     where: {
@@ -346,7 +346,7 @@ const resend_otp_and_verification_link_from_db = async (req: Request) => {
     configs.jwt.verified_token as string,
     '5m',
   );
-  const verificationLink = `${configs.jwt.front_end_url}/verify/token?=${verificationToken}`;
+  const verificationLink = `${configs.jwt.front_end_url}/verify/token?token=${verificationToken}`;
   // save otp into db
   await prisma.account.update({
     where: {
