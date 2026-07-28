@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 import { configs } from '../../configs/index.js';
+import { logger } from '../../lib/logger.js';
 import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
@@ -394,8 +395,32 @@ const split_note_into_inspection_using_ai = async (req: Request) => {
   const data = await aiResponse.json();
 
   if (data?.question?.length) {
+    // aexa-ai's response echoes back qestionAnswerId values that are
+    // supposed to be a subset of the ids we just sent it (all scoped to
+    // this inspection via isInspectionExist above). But nothing on our side
+    // enforces that — the `where: { id: item.qestionAnswerId }` used to
+    // write directly to whatever id came back, with no check that it was
+    // actually one of the ids sent, and no org/inspection scoping. Since
+    // QuestionAnswer ids are global, a stale/mismatched id from aexa-ai
+    // could silently overwrite an arbitrary row in ANY organization's
+    // inspection. Same IDOR family as #50/#84 (create_inspection_into_db
+    // above), applied here to the AI round-trip. A mismatch is an
+    // aexa-ai-side data issue, not something that should hard-fail the
+    // whole request, so we drop (not throw on) unmatched ids.
+    const validQuestionAnswerIds = new Set(isInspectionExist.questionAnswers.map((qa) => qa.id));
+    const validItems = data.question.filter((item: any) =>
+      validQuestionAnswerIds.has(item?.qestionAnswerId),
+    );
+    const droppedCount = data.question.length - validItems.length;
+    if (droppedCount > 0) {
+      logger.warn(
+        { inspectionId, droppedCount },
+        'split_note_into_inspection_using_ai: dropped AI-returned qestionAnswerId(s) not belonging to this inspection',
+      );
+    }
+
     await Promise.all(
-      data.question.map((item: any) =>
+      validItems.map((item: any) =>
         prisma.questionAnswer.update({
           where: {
             id: item.qestionAnswerId,

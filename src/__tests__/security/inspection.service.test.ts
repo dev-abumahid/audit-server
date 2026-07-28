@@ -513,6 +513,100 @@ describe('inspection service — org scoping (ticket #6)', () => {
         ),
       ).rejects.toMatchObject({ statusCode: 404 });
     });
+
+    // Issue #273: aexa-ai's response echoes back qestionAnswerId values with
+    // no guarantee they're actually one of the ids we sent (all scoped to
+    // this inspection). Writing straight to `where: { id: item.qestionAnswerId }`
+    // with no membership check let a stale/mismatched id overwrite an
+    // arbitrary QuestionAnswer row in ANY org's inspection, since ids are
+    // global. Same IDOR family as #50/#84.
+    describe("filters AI-returned qestionAnswerId against the inspection's own ids (#273)", () => {
+      it("applies an update for a qestionAnswerId that IS one of this inspection's ids", async () => {
+        noteDb.findUnique.mockResolvedValue({ extracted_text: 'text' });
+        inspectionDb.findUnique.mockResolvedValue({
+          questionAnswers: [
+            { id: 'qa-1', question: { question: 'Q1', answerType: 'TEXT' } },
+            { id: 'qa-2', question: { question: 'Q2', answerType: 'TEXT' } },
+          ],
+        });
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              question: [{ qestionAnswerId: 'qa-1', answer: 'Yes', note: 'looks fine' }],
+            }),
+          }),
+        );
+        qaDb.update.mockResolvedValue({});
+
+        await inspection_service.split_note_into_inspection_using_ai(
+          makeReq({ params: { inspectionId: 'insp-1' } }),
+        );
+
+        expect(qaDb.update).toHaveBeenCalledTimes(1);
+        expect(qaDb.update).toHaveBeenCalledWith({
+          where: { id: 'qa-1' },
+          data: { answer: 'Yes', note: 'looks fine' },
+        });
+      });
+
+      it("drops a qestionAnswerId that is NOT one of this inspection's ids instead of writing to it", async () => {
+        noteDb.findUnique.mockResolvedValue({ extracted_text: 'text' });
+        inspectionDb.findUnique.mockResolvedValue({
+          questionAnswers: [{ id: 'qa-1', question: { question: 'Q1', answerType: 'TEXT' } }],
+        });
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              question: [
+                { qestionAnswerId: 'qa-1', answer: 'Yes' },
+                // Stale/mismatched id from aexa-ai — belongs to some other
+                // inspection (possibly another org) entirely.
+                { qestionAnswerId: 'org-b-qa-99', answer: 'Hijacked' },
+              ],
+            }),
+          }),
+        );
+        qaDb.update.mockResolvedValue({});
+
+        await inspection_service.split_note_into_inspection_using_ai(
+          makeReq({ params: { inspectionId: 'insp-1' } }),
+        );
+
+        expect(qaDb.update).toHaveBeenCalledTimes(1);
+        expect(qaDb.update).not.toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: 'org-b-qa-99' } }),
+        );
+      });
+
+      it('drops all AI-returned ids and updates nothing when none match this inspection', async () => {
+        noteDb.findUnique.mockResolvedValue({ extracted_text: 'text' });
+        inspectionDb.findUnique.mockResolvedValue({
+          questionAnswers: [{ id: 'qa-1', question: { question: 'Q1', answerType: 'TEXT' } }],
+        });
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              question: [{ qestionAnswerId: 'org-b-qa-99', answer: 'Hijacked' }],
+            }),
+          }),
+        );
+
+        await inspection_service.split_note_into_inspection_using_ai(
+          makeReq({ params: { inspectionId: 'insp-1' } }),
+        );
+
+        expect(qaDb.update).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('role scoping (issue #55 slice 3)', () => {
