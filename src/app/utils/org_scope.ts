@@ -24,6 +24,27 @@ export type CallerOrgContext = {
 };
 
 /**
+ * aexa-server#311: ActionMessage.visibility (INTERNAL / CLIENT_VISIBLE) had
+ * a schema field with zero enforcement anywhere. Confirmed decision (Omar,
+ * 2026-07-28): INTERNAL messages are hidden from LIGHT_USER org members and
+ * from every external member (ExternalOrgMember/ExternalCallerContext is
+ * never anything but LIGHT_USER today — see ExternalCallerContext's own doc
+ * comment, so there is no separate external-context predicate: every
+ * external read path passes `false` directly). ADMIN, LEAD_AUDITOR, and
+ * VIEWER see everything, internal or not — this mirrors the existing role
+ * hierarchy (applyActionScope, assertCanWriteToAction) where those three
+ * roles already have unrestricted visibility into an Action's full record.
+ *
+ * Deliberately keyed off role alone, not off any per-message-assignment
+ * check — unlike applyActionScope's LIGHT_USER branch (which further scopes
+ * *which actions* a LIGHT_USER sees via FindingAssignment), this only gates
+ * *which messages on an already-visible action* they see, a strictly
+ * coarser, role-only distinction.
+ */
+export const canViewInternalMessages = (ctx: CallerOrgContext): boolean =>
+  ctx.role !== 'LIGHT_USER';
+
+/**
  * Resolves the caller's org context from their accountId.
  *
  * Backward-compat fallback: a caller with no OrgMember row at all (either

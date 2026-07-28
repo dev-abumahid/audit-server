@@ -13,6 +13,7 @@ import {
   assertCanWriteToInspection,
   assertIsOrgAdmin,
   CallerOrgContext,
+  canViewInternalMessages,
   ExternalCallerContext,
   hasActiveFindingAssignmentForExternalMember,
   isExternalMembershipActive,
@@ -40,25 +41,36 @@ const RESPONSIBLE_INCLUDE = {
 // get_single_action_from_db, and get_single_action_for_external_member —
 // extracted once a 4th call site (update_action_messages_into_db) needed
 // the same shape. Found by independent review.
-const MESSAGES_INCLUDE = {
-  messages: {
-    select: {
-      id: true,
-      message: true,
-      senderAccountId: true,
-      createdAt: true,
-      updatedAt: true,
-      account: {
-        select: {
-          profile: { select: { fullName: true, profilePhoto: true } },
-          organizationProfile: {
-            select: { organizationName: true, organizationLogo: true },
+//
+// aexa-server#311: turned into a function of `canSeeInternal` so every one
+// of those call sites can filter out INTERNAL-visibility messages via
+// Prisma's nested-relation `where` rather than each hand-rolling its own
+// post-fetch filter (which would be easy to forget at a new call site, and
+// wouldn't help get_all_action_from_db's message *count* below either).
+// `where: undefined` on a to-many include is a no-op in Prisma (returns
+// every row), which is exactly what ADMIN/LEAD_AUDITOR/VIEWER need.
+const messagesInclude = (canSeeInternal: boolean) =>
+  ({
+    messages: {
+      where: canSeeInternal ? undefined : { visibility: 'CLIENT_VISIBLE' },
+      select: {
+        id: true,
+        message: true,
+        senderAccountId: true,
+        visibility: true,
+        createdAt: true,
+        updatedAt: true,
+        account: {
+          select: {
+            profile: { select: { fullName: true, profilePhoto: true } },
+            organizationProfile: {
+              select: { organizationName: true, organizationLogo: true },
+            },
           },
         },
       },
     },
-  },
-} satisfies Prisma.ActionInclude;
+  }) satisfies Prisma.ActionInclude;
 
 type ActionWithResponsibles = Prisma.ActionGetPayload<{ include: typeof RESPONSIBLE_INCLUDE }>;
 
@@ -130,14 +142,22 @@ const get_all_action_from_db = async (req: Request) => {
       include: {
         // List rows only need a message *count* for the "Messages" badge
         // (aexa-frontend's AllFindingsPage.tsx reads `action.messages?.length`)
-        // -- not the full nested MESSAGES_INCLUDE (sender account/profile,
+        // -- not the full nested messagesInclude() (sender account/profile,
         // message bodies) that every row was paying for on every list fetch.
         // Detail fetches (get_single_action_from_db) still use the full
-        // MESSAGES_INCLUDE below; aexa-frontend's edit-from-list flow now
+        // messagesInclude() below; aexa-frontend's edit-from-list flow now
         // fetches GET /action/:id for that instead of relying on this list
         // payload (Qiyrix/aexa-frontend#119, landing with/before this PR).
         // See issue #162 (follow-up to #126).
-        messages: { select: { id: true } },
+        //
+        // aexa-server#311: same INTERNAL-visibility filter as messagesInclude
+        // below, applied here too — otherwise a LIGHT_USER's "Messages" badge
+        // count would include INTERNAL messages they can never actually open,
+        // revealing their existence even though the content stays hidden.
+        messages: {
+          where: canViewInternalMessages(ctx) ? undefined : { visibility: 'CLIENT_VISIBLE' },
+          select: { id: true },
+        },
         site: { select: { name: true, id: true } },
         ...RESPONSIBLE_INCLUDE,
       },
@@ -159,7 +179,7 @@ const get_single_action_from_db = async (req: Request) => {
   const result = await prisma.action.findFirst({
     where: whereCondition,
     include: {
-      ...MESSAGES_INCLUDE,
+      ...messagesInclude(canViewInternalMessages(ctx)),
       site: { select: { name: true, id: true } },
       ...RESPONSIBLE_INCLUDE,
     },
@@ -295,11 +315,24 @@ const create_action_into_db = async (req: Request) => {
       line_of_defense: body.line_of_defense,
       attachments: body.attachments ?? [],
       messages: {
+        // aexa-server#311: visibility is optional here — when the caller
+        // doesn't specify it, Prisma's own column default (INTERNAL, see
+        // action.prisma's MessageVisibility comment) applies. Deliberately
+        // NOT defaulted to CLIENT_VISIBLE at the application layer: that
+        // would flip every message created without an explicit visibility
+        // (which today is *all* of them — the compose UI for setting this
+        // doesn't exist yet) to visible-by-default for LIGHT_USER/external
+        // readers, the opposite of the schema's documented fail-closed
+        // intent ("keeps existing rows behaving exactly as before —
+        // internal-only").
         create:
-          body.messages?.map((msg: { message: string }) => ({
-            senderAccountId: user.accountId,
-            message: msg.message,
-          })) || [],
+          body.messages?.map(
+            (msg: { message: string; visibility?: 'INTERNAL' | 'CLIENT_VISIBLE' }) => ({
+              senderAccountId: user.accountId,
+              message: msg.message,
+              ...(msg.visibility !== undefined && { visibility: msg.visibility }),
+            }),
+          ) || [],
       },
       responsibleAssignees: {
         create: assigneeIds.map((orgMemberId) => ({ orgMemberId })),
@@ -999,7 +1032,12 @@ const get_single_action_for_external_member = async (req: Request) => {
   const result = await prisma.action.findFirst({
     where: { id, orgAccountId: externalMember.organizationId },
     include: {
-      ...MESSAGES_INCLUDE,
+      // aexa-server#311: `false` (not canViewInternalMessages(ctx)) because
+      // there is no CallerOrgContext here at all — ExternalCallerContext.role
+      // is never anything but 'LIGHT_USER' today (see its own doc comment in
+      // org_scope.ts), and every external member is explicitly one of the
+      // two groups INTERNAL messages must be hidden from.
+      ...messagesInclude(false),
       site: { select: { name: true, id: true } },
       ...RESPONSIBLE_INCLUDE,
     },
@@ -1090,6 +1128,10 @@ const update_action_messages_into_db = async (req: Request) => {
           create: {
             senderAccountId: user.accountId,
             message: req?.body?.message,
+            // aexa-server#311: same "thread through an explicit value,
+            // otherwise let Prisma's own INTERNAL default apply" rule as
+            // create_action_into_db's message creation above.
+            ...(req?.body?.visibility !== undefined && { visibility: req.body.visibility }),
           },
         },
       }),
@@ -1098,7 +1140,12 @@ const update_action_messages_into_db = async (req: Request) => {
     // this endpoint's whole purpose is adding a message, so the caller
     // needs to see it without a separate refetch. Found by independent
     // review.
-    include: { ...MESSAGES_INCLUDE, ...RESPONSIBLE_INCLUDE },
+    //
+    // aexa-server#311: filtered by the caller's own visibility, same as
+    // every other read of this relation — a LIGHT_USER who just posted a
+    // CLIENT_VISIBLE message still shouldn't have any pre-existing INTERNAL
+    // messages on this action reflected back in the response.
+    include: { ...messagesInclude(canViewInternalMessages(ctx)), ...RESPONSIBLE_INCLUDE },
   });
   return shapeResponsibleAssignees(result);
 };

@@ -35,11 +35,18 @@ const STATUS_ENUM = z.enum(['TO_DO', 'IN_PROGRESS', 'COMPLETE', 'CANT_DO']);
 // (action.service.ts). GOVERNING_BODY added as a 4th selectable value.
 const LINE_OF_DEFENSE_ENUM = z.enum(['FIRST', 'SECOND', 'THIRD', 'GOVERNING_BODY']);
 
+// aexa-server#311: MessageVisibility enum, mirrors action.prisma. Optional
+// here on purpose — when omitted, action.service.ts lets Prisma's own
+// column default (INTERNAL) apply rather than the app layer picking a
+// default, see create_action_into_db's comment for why.
+const MESSAGE_VISIBILITY_ENUM = z.enum(['INTERNAL', 'CLIENT_VISIBLE']);
+
 // Message Schema
 const actionMessageSchema = z.object({
   actionId: z.string().optional(),
   senderAccountId: z.string().optional(),
   message: z.string().min(1),
+  visibility: MESSAGE_VISIBILITY_ENUM.optional(),
 });
 
 // Create Action
@@ -151,6 +158,9 @@ const update_action_messages = z.object({
   // conceptual field -- without it an empty string passes validation and
   // creates an empty message row. Found by independent review.
   message: z.string('Message text is required!').min(1),
+  // aexa-server#311: same optional visibility field as actionMessageSchema
+  // above, threaded through by update_action_messages_into_db.
+  visibility: MESSAGE_VISIBILITY_ENUM.optional(),
 });
 
 // aexa-server#252: finding closure maker-checker workflow.

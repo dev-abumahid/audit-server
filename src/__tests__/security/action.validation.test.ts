@@ -190,6 +190,28 @@ describe('action_validations.update_action_messages (issue #51)', () => {
     const result = action_validations.update_action_messages.safeParse({});
     expect(result.success).toBe(false);
   });
+
+  // aexa-server#311
+  it('accepts an omitted visibility', () => {
+    const result = action_validations.update_action_messages.safeParse({ message: 'Hi there' });
+    expect(result.success).toBe(true);
+  });
+
+  it.each(['INTERNAL', 'CLIENT_VISIBLE'])('accepts visibility: %s', (visibility) => {
+    const result = action_validations.update_action_messages.safeParse({
+      message: 'Hi there',
+      visibility,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an invalid visibility value', () => {
+    const result = action_validations.update_action_messages.safeParse({
+      message: 'Hi there',
+      visibility: 'PUBLIC',
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 // Issue #97: Three Lines of Defense classification. Unlike Risk/Kri/

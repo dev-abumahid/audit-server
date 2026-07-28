@@ -392,6 +392,61 @@ describe('action service — org scoping (ticket #6)', () => {
       });
     });
 
+    // aexa-server#311: message visibility on create.
+    describe('message visibility (#311)', () => {
+      it('omits visibility (letting the Prisma column default of INTERNAL apply) when not specified', async () => {
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-1',
+          siteId: 'site-1',
+          orgAccountId: ORG_A,
+        });
+        db.create.mockResolvedValue({ id: 'new', orgAccountId: ORG_A });
+
+        await action_service.create_action_into_db(
+          makeReq({
+            body: {
+              inspectionId: 'insp-1',
+              actionTitle: 'x',
+              messages: [{ message: 'hello' }],
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.messages.create[0]).toEqual({
+          senderAccountId: ORG_A,
+          message: 'hello',
+        });
+        expect(callArg.data.messages.create[0]).not.toHaveProperty('visibility');
+      });
+
+      it('threads an explicit visibility through when the caller provides one', async () => {
+        dbInspection.findFirst.mockResolvedValue({
+          id: 'insp-1',
+          siteId: 'site-1',
+          orgAccountId: ORG_A,
+        });
+        db.create.mockResolvedValue({ id: 'new', orgAccountId: ORG_A });
+
+        await action_service.create_action_into_db(
+          makeReq({
+            body: {
+              inspectionId: 'insp-1',
+              actionTitle: 'x',
+              messages: [{ message: 'hello', visibility: 'CLIENT_VISIBLE' }],
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.messages.create[0]).toEqual({
+          senderAccountId: ORG_A,
+          message: 'hello',
+          visibility: 'CLIENT_VISIBLE',
+        });
+      });
+    });
+
     // Issue #97: no extra role gate needed on create — assertCanWriteToInspection
     // already restricts action creation to ADMIN/LEAD_AUDITOR, the same set
     // allowed to reassign line_of_defense on update. This just confirms the
@@ -1339,6 +1394,42 @@ describe('action service — org scoping (ticket #6)', () => {
         { id: 'msg-1', message: 'Hi there', senderAccountId: ORG_A },
       ]);
     });
+
+    // aexa-server#311: message visibility on this creation path too.
+    it('omits visibility (letting the Prisma column default of INTERNAL apply) when not specified', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, inspectionId: 'insp-1' });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_messages_into_db(
+        makeReq({ params: { id: 'a1' }, body: { message: 'Hi there' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.messages.create).toEqual({
+        senderAccountId: ORG_A,
+        message: 'Hi there',
+      });
+      expect(callArg.data.messages.create).not.toHaveProperty('visibility');
+    });
+
+    it('threads an explicit visibility through when the caller provides one', async () => {
+      db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ORG_A, inspectionId: 'insp-1' });
+      db.update.mockResolvedValue({});
+
+      await action_service.update_action_messages_into_db(
+        makeReq({
+          params: { id: 'a1' },
+          body: { message: 'Hi there', visibility: 'CLIENT_VISIBLE' },
+        }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.messages.create).toEqual({
+        senderAccountId: ORG_A,
+        message: 'Hi there',
+        visibility: 'CLIENT_VISIBLE',
+      });
+    });
   });
 
   // ── attachment upload ────────────────────────────────────────────────────
@@ -1857,6 +1948,103 @@ describe('action service — org scoping (ticket #6)', () => {
 
         const callArg = db.update.mock.calls[0][0];
         expect(callArg.data.line_of_defense).toBe('FIRST');
+      });
+    });
+
+    describe('message visibility (issue #311)', () => {
+      it('LIGHT_USER reading a finding only gets CLIENT_VISIBLE messages, not INTERNAL', async () => {
+        mockMembership('LIGHT_USER');
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+        db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+
+        await action_service.get_single_action_from_db(makeReq({ params: { id: 'action-1' } }));
+
+        const [findArg] = db.findFirst.mock.calls[0];
+        expect(findArg.include.messages.where).toEqual({ visibility: 'CLIENT_VISIBLE' });
+      });
+
+      it.each(['ADMIN', 'LEAD_AUDITOR', 'VIEWER'] as const)(
+        '%s reading a finding sees every message, INTERNAL and CLIENT_VISIBLE alike',
+        async (role) => {
+          mockMembership(role);
+          if (role === 'LEAD_AUDITOR') {
+            assignmentDb.findMany.mockResolvedValue([{ inspectionId: 'insp-1' }]);
+          }
+          if (role === 'VIEWER') {
+            // Never-assigned Viewer falls back to org-wide (see
+            // applyViewerAssignmentScope) — an empty array, not undefined,
+            // matters here since getInspectionAssignmentState calls .map on
+            // the result.
+            assignmentDb.findMany.mockResolvedValue([]);
+          }
+          db.findFirst.mockResolvedValue({
+            id: 'action-1',
+            inspectionId: 'insp-1',
+            orgAccountId: ANCHOR,
+          });
+
+          await action_service.get_single_action_from_db(makeReq({ params: { id: 'action-1' } }));
+
+          const [findArg] = db.findFirst.mock.calls[0];
+          expect(findArg.include.messages.where).toBeUndefined();
+        },
+      );
+
+      it("LIGHT_USER's message-count badge on the list endpoint also excludes INTERNAL messages", async () => {
+        mockMembership('LIGHT_USER');
+        db.findMany.mockResolvedValue([]);
+        db.count.mockResolvedValue(0);
+
+        await action_service.get_all_action_from_db(makeReq());
+
+        const [findArg] = db.findMany.mock.calls[0];
+        expect(findArg.include.messages.where).toEqual({ visibility: 'CLIENT_VISIBLE' });
+      });
+
+      it('ADMIN sees the unfiltered message count on the list endpoint', async () => {
+        mockMembership('ADMIN');
+        db.findMany.mockResolvedValue([]);
+        db.count.mockResolvedValue(0);
+
+        await action_service.get_all_action_from_db(makeReq());
+
+        const [findArg] = db.findMany.mock.calls[0];
+        expect(findArg.include.messages.where).toBeUndefined();
+      });
+
+      it('update_action_messages_into_db filters the returned message list for a LIGHT_USER', async () => {
+        mockMembership('LIGHT_USER');
+        findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          orgAccountId: ANCHOR,
+          inspectionId: 'insp-1',
+        });
+        db.update.mockResolvedValue({ id: 'action-1', messages: [] });
+
+        await action_service.update_action_messages_into_db(
+          makeReq({ params: { id: 'action-1' }, body: { message: 'hi' } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.include.messages.where).toEqual({ visibility: 'CLIENT_VISIBLE' });
+      });
+
+      it('update_action_messages_into_db returns every message for an ADMIN', async () => {
+        mockMembership('ADMIN');
+        db.findFirst.mockResolvedValue({
+          id: 'action-1',
+          orgAccountId: ANCHOR,
+          inspectionId: 'insp-1',
+        });
+        db.update.mockResolvedValue({ id: 'action-1', messages: [] });
+
+        await action_service.update_action_messages_into_db(
+          makeReq({ params: { id: 'action-1' }, body: { message: 'hi' } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.include.messages.where).toBeUndefined();
       });
     });
   });
@@ -2994,6 +3182,21 @@ describe('action service — external Light User sub-assignment (issue #55 slice
       ).rejects.toMatchObject({ statusCode: 404 });
 
       expect(db.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('issue #311: excludes INTERNAL messages for the external member, unconditionally', async () => {
+      findingAssignmentDb.findFirst.mockResolvedValue({ id: 'fa-1' });
+      db.findFirst.mockResolvedValue({ id: 'action-1', orgAccountId: ANCHOR });
+
+      await action_service.get_single_action_for_external_member(
+        makeReq({
+          params: { id: 'action-1' },
+          externalMember: { externalOrgMemberId: EXTERNAL_MEMBER_ID, organizationId: ANCHOR },
+        } as never),
+      );
+
+      const [findArg] = db.findFirst.mock.calls[0];
+      expect(findArg.include.messages.where).toEqual({ visibility: 'CLIENT_VISIBLE' });
     });
   });
 
