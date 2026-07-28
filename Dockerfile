@@ -41,7 +41,8 @@ RUN apk add --no-cache \
     freetype \
     harfbuzz \
     ca-certificates \
-    ttf-freefont
+    ttf-freefont \
+    tini
 # The Alpine `chromium` package (this base tracks Alpine v3.21) installs the
 # binary at /usr/bin/chromium — there is no /usr/bin/chromium-browser, so the
 # previous value here pointed at a nonexistent path and every render would fail
@@ -67,4 +68,12 @@ RUN mkdir -p /app/uploads
 
 EXPOSE 5002
 
+# node runs as PID 1 with no init process, so SIGTERM has nowhere to go by
+# default (the kernel silently ignores it for PID 1 unless the process
+# installs its own handler) — every deploy that recreates this container
+# stalled ~10s and then got SIGKILLed instead of shutting down gracefully
+# (#307). tini becomes PID 1 instead, forwards SIGTERM/SIGINT to node so our
+# graceful-shutdown handler (src/app/lib/graceful_shutdown.ts) actually runs,
+# and also reaps zombie processes Puppeteer/Chromium can leave behind.
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/server.js"]
