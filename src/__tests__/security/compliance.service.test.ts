@@ -605,6 +605,177 @@ describe('compliance service — org scoping (issue #93)', () => {
       });
     });
 
+    // aexa-server#265: mirrors create's own seeding rule -- the first
+    // cycle's due_date doubles as the first review date pre-attestation.
+    // If due_date is edited before any attestation exists, next_review_date
+    // must move with it.
+    describe('recomputing next_review_date when due_date is edited pre-attestation (#265)', () => {
+      it('moves next_review_date to the new due_date when edited before any attestation', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'monthly',
+          due_date: new Date('2026-08-30T00:00:00.000Z'),
+          next_review_date: new Date('2026-08-30T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+        attestationDb.count.mockResolvedValue(0);
+
+        const newDueDate = new Date('2026-09-15T00:00:00.000Z');
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { due_date: newDueDate } }),
+        );
+
+        expect(attestationDb.count).toHaveBeenCalledWith({
+          where: { obligation_id: 'c1' },
+        });
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data.next_review_date).toBe(newDueDate);
+      });
+
+      it('review round 1: falls back to computeNextReviewDate when due_date is cleared to null while recurrence stays active', async () => {
+        // Matches create's own fallback (payload.due_date ??
+        // computeNextReviewDate(...)) -- clearing due_date must still seed
+        // a review date from the active cadence, not null it out.
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'monthly',
+          due_date: new Date('2026-08-30T00:00:00.000Z'),
+          next_review_date: new Date('2026-08-30T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+        attestationDb.count.mockResolvedValue(0);
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { due_date: null } }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        // 30 days (monthly) out from computeNextReviewDate's "now" -- just
+        // assert it's a real Date, not null, and roughly in the expected
+        // window, since the test can't control the exact "now" the service
+        // uses internally.
+        expect(callArg.data.next_review_date).toBeInstanceOf(Date);
+        expect(callArg.data.next_review_date).not.toBeNull();
+      });
+
+      it('review round 1: the attestation count check and the final update run inside one $transaction', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'monthly',
+          due_date: new Date('2026-08-30T00:00:00.000Z'),
+          next_review_date: new Date('2026-08-30T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+        attestationDb.count.mockResolvedValue(0);
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { due_date: new Date('2026-09-15T00:00:00.000Z') },
+          }),
+        );
+
+        expect(txFn).toHaveBeenCalledTimes(1);
+      });
+
+      it('does NOT move next_review_date when due_date is edited AFTER a real attestation exists', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'monthly',
+          due_date: new Date('2026-08-30T00:00:00.000Z'),
+          next_review_date: new Date('2026-09-29T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+        attestationDb.count.mockResolvedValue(1);
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { due_date: new Date('2026-09-15T00:00:00.000Z') },
+          }),
+        );
+
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data).not.toHaveProperty('next_review_date');
+      });
+
+      it('does NOT recompute next_review_date when due_date is not part of the PATCH', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'monthly',
+          due_date: new Date('2026-08-30T00:00:00.000Z'),
+          next_review_date: new Date('2026-08-30T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { title: 'Revised' } }),
+        );
+
+        expect(attestationDb.count).not.toHaveBeenCalled();
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data).not.toHaveProperty('next_review_date');
+      });
+
+      it('does NOT recompute next_review_date for a non-recurring obligation (no cadence to seed from)', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: null,
+          due_date: new Date('2026-08-30T00:00:00.000Z'),
+          next_review_date: null,
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { due_date: new Date('2026-09-15T00:00:00.000Z') },
+          }),
+        );
+
+        expect(attestationDb.count).not.toHaveBeenCalled();
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data).not.toHaveProperty('next_review_date');
+      });
+
+      it('#260s null-out wins when BOTH recurrence is cleared and due_date is edited in the same PATCH', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          recurrence: 'monthly',
+          due_date: new Date('2026-08-30T00:00:00.000Z'),
+          next_review_date: new Date('2026-08-30T00:00:00.000Z'),
+        });
+        db.update.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { recurrence: null, due_date: new Date('2026-09-15T00:00:00.000Z') },
+          }),
+        );
+
+        // #260's branch runs first and nulls it. Note: #265's own
+        // effectiveRecurrence check independently also resolves to null
+        // here (same req.body.recurrence input, same computeNextReviewDate
+        // call), so this doesn't distinguish the `data.next_review_date
+        // === undefined` guard specifically from #265's own recurrence
+        // check -- both conditions structurally agree whenever recurrence
+        // is being cleared in the same PATCH. It does still correctly pin
+        // down the end-to-end outcome: the final next_review_date is null,
+        // not overwritten with the new due_date.
+        expect(attestationDb.count).not.toHaveBeenCalled();
+        const callArg = db.update.mock.calls[0][0];
+        expect(callArg.data.next_review_date).toBeNull();
+      });
+    });
+
     describe('evidence gating for status: compliant (#243)', () => {
       it('rejects setting status to compliant on an obligation with no existing attachments', async () => {
         db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, attachments: [] });

@@ -268,9 +268,45 @@ const update_compliance_into_db = async (req: Request) => {
   ) {
     data.next_review_date = null;
   }
-  const result = await prisma.complianceObligation.update({
-    where: { id },
-    data,
+  // aexa-server#265: mirrors create's own seeding rule (the first cycle's
+  // due_date doubles as the first review date pre-attestation, since
+  // there's no attestation yet to compute one from) -- if due_date is
+  // edited BEFORE any attestation exists on a recurring obligation,
+  // next_review_date must move with it, or compute_obligation_overdue keeps
+  // comparing against the stale, now-superseded due date. Skipped if the
+  // #260 branch above already decided next_review_date should be nulled
+  // (recurrence being cleared in the same PATCH wins). Only the pre-
+  // attestation case is handled -- once a real attestation exists,
+  // next_review_date is attest_compliance_into_db's responsibility, not a
+  // plain due_date edit's.
+  //
+  // The attestation-existence check and the final write are wrapped in one
+  // $transaction (review round 1): reading the count separately from the
+  // update left a TOCTOU window where an attestation created concurrently,
+  // between the count and the write, would go unseen -- next_review_date
+  // would still get recomputed from due_date as if no attestation existed.
+  const result = await prisma.$transaction(async (tx) => {
+    if (req.body.due_date !== undefined && data.next_review_date === undefined) {
+      const effectiveRecurrence =
+        req.body.recurrence !== undefined ? req.body.recurrence : existing.recurrence;
+      if (computeNextReviewDate(effectiveRecurrence, new Date()) !== null) {
+        const attestationCount = await tx.complianceAttestation.count({
+          where: { obligation_id: id },
+        });
+        if (attestationCount === 0) {
+          // Matches create's own fallback exactly (payload.due_date ??
+          // computeNextReviewDate(...)): clearing due_date to null while
+          // recurrence stays active must still seed a review date from the
+          // cadence, not null one out from under an active recurrence.
+          data.next_review_date =
+            req.body.due_date ?? computeNextReviewDate(effectiveRecurrence, new Date());
+        }
+      }
+    }
+    return tx.complianceObligation.update({
+      where: { id },
+      data,
+    });
   });
   return with_overdue(result);
 };
