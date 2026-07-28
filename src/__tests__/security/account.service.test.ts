@@ -578,6 +578,52 @@ describe('account service', () => {
     });
   });
 
+  describe('malformed/garbage tokens return a clean 4xx instead of crashing (#285)', () => {
+    // Previously both functions only string-matched 'invalid signature' and
+    // 'jwt expired' on error.message, with no fallback branch. Any other
+    // jsonwebtoken error (jwt malformed, jwt must be provided, invalid
+    // algorithm, etc.) fell through, leaving decodeToken undefined and
+    // crashing with an uncaught TypeError on decodeToken.email instead of a
+    // handled 4xx.
+    it('verify_account_using_link_into_db rejects a malformed token with a 4xx, not a TypeError', async () => {
+      await expect(
+        account_services.verify_account_using_link_into_db(
+          makeReq({ body: { token: 'not-a-jwt-at-all' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('verify_account_using_link_into_db rejects an empty/garbage token with a 4xx, not a TypeError', async () => {
+      await expect(
+        account_services.verify_account_using_link_into_db(makeReq({ body: { token: '' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('reset_password_using_token_into_db rejects a malformed token with a 4xx, not a TypeError', async () => {
+      await expect(
+        account_services.reset_password_using_token_into_db(
+          makeReq({ body: { token: 'not-a-jwt-at-all', newPass: 'new-password' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('reset_password_using_token_into_db rejects an empty/garbage token with a 4xx, not a TypeError', async () => {
+      await expect(
+        account_services.reset_password_using_token_into_db(
+          makeReq({ body: { token: 'garbage.garbage.garbage', newPass: 'new-password' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('get_social_providers', () => {
     const original = {
       google: configs.google_login_config.is_google_login,

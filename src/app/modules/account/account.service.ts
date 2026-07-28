@@ -1,5 +1,6 @@
 import bcrypt from 'bcrypt';
 import { Request } from 'express';
+import jwt from 'jsonwebtoken';
 import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { otpEmailQueue } from '../../queues/email/otp/otp.email.queue.js';
@@ -169,11 +170,21 @@ const verify_account_using_link_into_db = async (req: Request) => {
   let decodeToken: any;
   try {
     decodeToken = jwtHelpers.verifyToken(token, configs.jwt.verified_token as string);
-  } catch (error: any) {
-    if (error?.message == 'invalid signature') {
-      throw new AppError('Invalid Token', 403);
-    } else if (error?.message == 'jwt expired') {
+  } catch (error) {
+    // Tampered, malformed, or expired tokens must return a clean 4xx, not an
+    // uncaught TypeError from decodeToken being undefined below (see #285).
+    // TokenExpiredError is a subclass of JsonWebTokenError, so it must be
+    // checked first to keep its distinct message; the JsonWebTokenError
+    // branch then covers every other jsonwebtoken error class (malformed,
+    // invalid signature, invalid algorithm, jwt must be provided,
+    // NotBeforeError, etc.) — matching the pattern in
+    // src/app/middlewares/auth.ts.
+    if (error instanceof jwt.TokenExpiredError) {
       throw new AppError('Token expired, please reset again', 403);
+    } else if (error instanceof jwt.JsonWebTokenError) {
+      throw new AppError('Invalid Token', 403);
+    } else {
+      throw error;
     }
   }
   // check account
@@ -405,11 +416,18 @@ const reset_password_using_token_into_db = async (req: Request) => {
   let decodeToken: any;
   try {
     decodeToken = jwtHelpers.verifyToken(token, configs.jwt.reset_secret as string);
-  } catch (error: any) {
-    if (error?.message == 'invalid signature') {
-      throw new AppError('Invalid Token', 403);
-    } else if (error?.message == 'jwt expired') {
+  } catch (error) {
+    // Same rationale as verify_account_using_link_into_db above (#285):
+    // check TokenExpiredError first (it subclasses JsonWebTokenError) so its
+    // message stays distinct, then let JsonWebTokenError catch every other
+    // jsonwebtoken error class so decodeToken.email below is never reached
+    // with decodeToken undefined.
+    if (error instanceof jwt.TokenExpiredError) {
       throw new AppError('Link expired, please reset again', 403);
+    } else if (error instanceof jwt.JsonWebTokenError) {
+      throw new AppError('Invalid Token', 403);
+    } else {
+      throw error;
     }
   }
   // check account
