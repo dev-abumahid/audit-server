@@ -45,10 +45,17 @@ vi.mock('../../app/queues/email/reset-password/reset.email.processor.js', () => 
 vi.mock('../../app/queues/email/org-invite/org-invite.email.processor.js', () => ({
   orgInviteEmailProcessor: vi.fn(),
 }));
+vi.mock(
+  '../../app/queues/email/external-verification/external-verification.email.processor.js',
+  () => ({
+    externalVerificationEmailProcessor: vi.fn(),
+  }),
+);
 
 describe('email queue reliability', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.resetModules();
     queueInstances.length = 0;
     workerListeners.clear();
   });
@@ -69,6 +76,13 @@ describe('email queue reliability', () => {
       queueModule: '../../app/queues/email/org-invite/org-invite.email.queue.js',
       workerModule: '../../app/queues/email/org-invite/org-invite.email.worker.js',
     },
+    {
+      queueName: 'external-verification-email-queue',
+      queueModule:
+        '../../app/queues/email/external-verification/external-verification.email.queue.js',
+      workerModule:
+        '../../app/queues/email/external-verification/external-verification.email.worker.js',
+    },
   ];
 
   for (const { queueName, queueModule, workerModule } of cases) {
@@ -78,6 +92,33 @@ describe('email queue reliability', () => {
 
       expect(instance?.opts.defaultJobOptions.attempts).toBeGreaterThan(1);
       expect(instance?.opts.defaultJobOptions.backoff).toMatchObject({ type: 'exponential' });
+    });
+
+    it(`${queueName}: does not retain completed/failed jobs (and their plaintext secrets) in Redis indefinitely`, async () => {
+      await import(queueModule);
+      const instance = queueInstances.find((q) => q.name === queueName);
+
+      const { removeOnComplete, removeOnFail } = instance?.opts.defaultJobOptions ?? {};
+
+      // Must be explicitly configured — undefined means BullMQ's default of
+      // "keep every job forever", which is exactly the bug being fixed.
+      expect(removeOnComplete).toBeDefined();
+      expect(removeOnFail).toBeDefined();
+
+      // Must not be the "keep forever" sentinel value.
+      expect(removeOnComplete).not.toBe(true);
+      expect(removeOnFail).not.toBe(true);
+      expect(removeOnComplete?.count).not.toBe(-1);
+      expect(removeOnFail?.count).not.toBe(-1);
+
+      // Should bound retention by count and/or age so recent sends remain
+      // debuggable without keeping plaintext secrets around indefinitely.
+      expect(
+        typeof removeOnComplete?.count === 'number' || typeof removeOnComplete?.age === 'number',
+      ).toBe(true);
+      expect(typeof removeOnFail?.count === 'number' || typeof removeOnFail?.age === 'number').toBe(
+        true,
+      );
     });
 
     it(`${queueName}: logs a 'failed' event instead of silently dropping it`, async () => {
