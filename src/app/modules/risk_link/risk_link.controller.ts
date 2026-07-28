@@ -14,13 +14,18 @@ const create_risk_link = catchAsync(async (req, res) => {
 });
 
 const get_all_risk_links = catchAsync(async (req, res) => {
+  // aexa-server#271: get_all_risk_links_from_db now returns {data, meta}
+  // (was a bare array) -- forward both, matching note_controller/
+  // recommendation_controller's identical pattern. Passing the whole
+  // result as `data` would double-nest it (data: {data, meta}) and always
+  // send an empty meta, losing the pagination info entirely.
   const result = await risk_link_service.get_all_risk_links_from_db(req);
   manageResponse(res, {
     success: true,
     statusCode: 200,
     message: 'All risk links fetched successfully.',
-    data: result,
-    meta: {},
+    data: result.data,
+    meta: result.meta,
   });
 });
 

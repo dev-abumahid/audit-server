@@ -9,6 +9,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findFirst: vi.fn(),
       create: vi.fn(),
       delete: vi.fn(),
+      count: vi.fn(),
     },
     risk: {
       findFirst: vi.fn(),
@@ -180,6 +181,7 @@ describe('risk_link_service', () => {
   describe('get_all_risk_links_from_db', () => {
     it('scopes to the caller org and applies optional source_ref/target_ref filters', async () => {
       linkDb.findMany.mockResolvedValue([]);
+      linkDb.count.mockResolvedValue(0);
 
       await risk_link_service.get_all_risk_links_from_db(
         makeReq({ query: { source_ref: 'CYB-001' } }),
@@ -187,19 +189,59 @@ describe('risk_link_service', () => {
 
       expect(linkDb.findMany).toHaveBeenCalledWith({
         where: { org_account_id: ORG_A, source_ref: 'CYB-001' },
+        skip: 0,
+        take: 10,
         orderBy: { createdAt: 'desc' },
+      });
+      expect(linkDb.count).toHaveBeenCalledWith({
+        where: { org_account_id: ORG_A, source_ref: 'CYB-001' },
       });
     });
 
     it('lists all org links when no filter is given', async () => {
       linkDb.findMany.mockResolvedValue([]);
+      linkDb.count.mockResolvedValue(0);
 
       await risk_link_service.get_all_risk_links_from_db(makeReq({}));
 
       expect(linkDb.findMany).toHaveBeenCalledWith({
         where: { org_account_id: ORG_A },
+        skip: 0,
+        take: 10,
         orderBy: { createdAt: 'desc' },
       });
+    });
+
+    // aexa-server#271: was an unconditional findMany with no limit, unlike
+    // every other list endpoint in this codebase.
+    it('paginates via page/limit query params and returns {data, meta}', async () => {
+      const links = [{ id: 'link-1' }, { id: 'link-2' }];
+      linkDb.findMany.mockResolvedValue(links);
+      linkDb.count.mockResolvedValue(25);
+
+      const result = await risk_link_service.get_all_risk_links_from_db(
+        makeReq({ query: { page: '2', limit: '5' } }),
+      );
+
+      expect(linkDb.findMany).toHaveBeenCalledWith({
+        where: { org_account_id: ORG_A },
+        skip: 5,
+        take: 5,
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(result).toEqual({
+        data: links,
+        meta: expect.objectContaining({ page: 2, limit: 5, total: 25, totalPage: 5 }),
+      });
+    });
+
+    it('caps an oversized limit at the shared MAX_LIMIT ceiling (issue #117)', async () => {
+      linkDb.findMany.mockResolvedValue([]);
+      linkDb.count.mockResolvedValue(0);
+
+      await risk_link_service.get_all_risk_links_from_db(makeReq({ query: { limit: '99999' } }));
+
+      expect(linkDb.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
     });
   });
 

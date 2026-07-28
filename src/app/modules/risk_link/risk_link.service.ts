@@ -4,6 +4,7 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/org_scope.js';
+import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 /**
  * aexa-frontend#142 — RiskLink CRUD. `source_ref`/`target_ref` are plain
@@ -85,11 +86,29 @@ const get_all_risk_links_from_db = async (req: Request) => {
   if (source_ref) whereCondition.source_ref = source_ref;
   if (target_ref) whereCondition.target_ref = target_ref;
 
-  const result = await prisma.riskLink.findMany({
-    where: whereCondition,
-    orderBy: { createdAt: 'desc' },
+  // aexa-server#271: was an unconditional findMany with no limit, unlike
+  // every other list endpoint in this codebase (note/recommendation/site/
+  // template/kri/compliance/audit/action/risk/report all paginate) -- an
+  // org with a large risk graph could serialize every RiskLink row in one
+  // unbounded response.
+  const pagination = paginationHelper({
+    page: req.query.page as string,
+    limit: req.query.limit as string,
   });
-  return result;
+  const [data, total] = await Promise.all([
+    prisma.riskLink.findMany({
+      where: whereCondition,
+      skip: pagination.skip,
+      take: pagination.limit,
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.riskLink.count({ where: whereCondition }),
+  ]);
+
+  return {
+    data,
+    meta: buildPaginationMeta(pagination, total),
+  };
 };
 
 const delete_risk_link_from_db = async (req: Request) => {
