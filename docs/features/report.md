@@ -42,7 +42,7 @@ they don't otherwise have full visibility into (#289). Publishing stays ADMIN-on
 `GET /report/:id` and the download route are gated on account type alone, so any org member —
 `VIEWER` and `LIGHT_USER` included — can list and download every generated board report,
 including ones assembled from findings they can't see individually. This was left open rather
-than hardened alongside #289: a published board risk report is plausibly *meant* to be
+than hardened alongside #289: a published board risk report is plausibly _meant_ to be
 org-wide-readable, which makes tightening it a product decision about what a report is for,
 not a straightforward fix. It needs a call either way — see [README.md](README.md)'s known-gaps
 list.

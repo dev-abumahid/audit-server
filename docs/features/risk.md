@@ -30,7 +30,7 @@ actually behaves:
   re-confirmation.
 - `impact` (0–100, added in #241) is a real, separately-collected measurement — before this, the
   risk matrix's likelihood×impact axes weren't actually independent ("impact" was faked from
-  `inherent_score`). It is deliberately *not* wired back into `inherent_score`'s own value.
+  `inherent_score`). It is deliberately _not_ wired back into `inherent_score`'s own value.
 
 **Every AI-derived producer clamps before writing.** The 0–100 percent columns are populated by
 three paths — manual entry, intelligence promotion, and the onboarding wizard — and the latter
@@ -101,11 +101,11 @@ oversight (e.g. a risk formally accepted by the board) — no existing default c
 
 ## Permissions summary
 
-| Action | Gate |
-|---|---|
-| Create / update / delete | `assertCanWriteOrgResource` (ADMIN/LEAD_AUDITOR) |
-| Submit for approval | `assertCanWriteOrgResource` |
-| Approve / reject | `assertIsOrgAdmin` |
+| Action                     | Gate                                                                  |
+| -------------------------- | --------------------------------------------------------------------- |
+| Create / update / delete   | `assertCanWriteOrgResource` (ADMIN/LEAD_AUDITOR)                      |
+| Submit for approval        | `assertCanWriteOrgResource`                                           |
+| Approve / reject           | `assertIsOrgAdmin`                                                    |
 | Reassign `line_of_defense` | `assertCanReassignLineOfDefense` (stricter than a plain field update) |
 
 ## Frontend wiring (aexa-frontend)
@@ -120,7 +120,7 @@ oversight (e.g. a risk formally accepted by the board) — no existing default c
   `RiskOverrideBadge` renders next to a score in one of two states — amber "stale" and blue
   "overridden" — and renders **nothing** when that score isn't overridden, so the common case
   stays uncluttered. Both scores get a badge inside the form on **edit** (they're behind `editId`,
-since a brand-new risk has no override to describe); the register **list**
+  since a brand-new risk has no override to describe); the register **list**
   carries only the residual one, because residual is the only score with a column of its own
   there. Adding an inherent column later means adding its badge too. `overriddenBy` is shown as a raw
   accountId; there's no endpoint to resolve one to a display name from this frontend (the same
@@ -128,7 +128,7 @@ since a brand-new risk has no override to describe); the register **list**
 - **The override keys are only sent when the user actually touched that control.** Worth
   knowing before editing `onSubmit` in `RiskRegisterPage.tsx`, because the naive reading is
   wrong: the form pre-populates both toggles from the stored row, so submitting their current
-  value on *every* save would make an edit to an unrelated field (a rename, say) look like a
+  value on _every_ save would make an edit to an unrelated field (a rename, say) look like a
   fresh override to the server. `resolveInherentFields`/`resolveResidualFields` treat an
   **omitted** `*_override` key as "no instruction, preserve what's there" but an **explicit
   `true`** as "fresh override — reset `*_overridden_by`/`*_overridden_at` to now, clear

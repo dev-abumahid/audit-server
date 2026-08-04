@@ -41,7 +41,7 @@ same PR. A stale doc is worse than no doc.
 Worth a team look, not fixed as part of this docs pass:
 
 - **Viewer read-scoping has no client-side counterpart, and two inspection write surfaces are
-  gated too loosely.** Assignment-based *write* gating is now built client-side
+  gated too loosely.** Assignment-based _write_ gating is now built client-side
   (aexa-frontend#270 — `LEAD_AUDITOR` narrowed to their real `InspectionAssignment` rows,
   `LIGHT_USER` to their live `FindingAssignment` grants), but three narrower gaps remain:
   - **Viewer read-scoping stays server-only.** `resolveViewerVisibleIds` exists in
@@ -58,15 +58,16 @@ Worth a team look, not fixed as part of this docs pass:
     role predicate is too loose.
 
   See [inspection.md](inspection.md) and [action-findings.md](action-findings.md).
+
 - **`Action.MessageVisibility` is enforced on reads, but has no compose UI.** `INTERNAL`
   messages are now filtered out for `LIGHT_USER` org members and every external member at all
-  four read paths (aexa-server#311). What's still missing is the *other* half: nothing in the
+  four read paths (aexa-server#311). What's still missing is the _other_ half: nothing in the
   frontend lets an author choose a message's visibility, so every message composed through the
   UI takes the schema default of `INTERNAL` — which, now that the filter is live, means no
   message written from the UI is visible to a Light User or an external member at all. See
   [action-findings.md](action-findings.md).
-- **Report *reads* have no org-role gate — an open product question, deliberately left
-  unresolved.** Report *generation* is now correctly scoped (a scoped `LEAD_AUDITOR`'s report no
+- **Report _reads_ have no org-role gate — an open product question, deliberately left
+  unresolved.** Report _generation_ is now correctly scoped (a scoped `LEAD_AUDITOR`'s report no
   longer pulls org-wide Action data), and publishing is ADMIN-only. But `GET /report`,
   `GET /report/:id`, and the signed-download route are gated only on account type, so any org
   member — including a `VIEWER` or `LIGHT_USER` — can read every generated board report. Whether
@@ -93,6 +94,6 @@ Worth a team look, not fixed as part of this docs pass:
 ## How to read these docs
 
 Each file favors concrete specifics over generic description: real field names, enum values,
-and status transitions. Where a rule exists *because* of a specific product decision or a fixed
+and status transitions. Where a rule exists _because_ of a specific product decision or a fixed
 bug, that's noted — it's the part a generic code read won't tell you, and the part most likely
 to get silently violated by a future change that doesn't know the history.

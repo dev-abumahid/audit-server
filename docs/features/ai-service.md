@@ -26,6 +26,7 @@ Its README is stale (wrong path prefix, wrong/missing endpoint names) — treat 
    `ENV=production` (`docs_url`/`redoc_url`/`openapi_url` set to `None`), wired through both
    docker-compose and the Dockerfile default (#164). Worth remembering before adding anything
    else that FastAPI registers on the app rather than on a router.
+
 2. **`X-Org-Token`** — a signed JWT (`{org_account_id, exp}`, HS256, **signed with the same
    shared secret** as `X-Internal-Secret` — deliberately, so no second secret needs
    provisioning/rotation). Verification failures return `None` silently rather than rejecting
@@ -35,19 +36,19 @@ Its README is stale (wrong path prefix, wrong/missing endpoint names) — treat 
 
 ## Endpoints, by capability
 
-| Capability | Route(s) |
-|---|---|
-| Template generation (topic / PDF / risk) | `POST /template_from_topic`, `POST /template_from_pdf`, `POST /tamplate_from_risk` *(sic, real route)* |
-| Site risk analysis | `POST /risk_analysis` |
-| Inspection recommendations (RAG) | `POST /generate_recommendations_from_answer` |
-| Note/survey-answer extraction | `POST /extract-survey-answers` |
-| Root-cause bucketing | `POST /risk/rootcause-bucketing` |
-| Threat intelligence (5 actions) | `POST /intelligence/{analyze,predict,mitigations,rcsa,resilience-scan}` |
-| KRI baseline (onboarding) | `POST /kri-baseline` |
-| Company-profile / sites (onboarding "Identify") | `POST /company-profile`, `POST /company-sites` |
-| Knowledge-base / Pinecone pipeline | `POST /upload-pdf-to-pinecone`, `GET /upload-status/{file_id}`, `DELETE /delete-vectors-by-filename` |
-| OCR (standalone) | `POST /extract-text` |
-| Board report content | `POST /report_content` — **not previously documented from the aexa-server side; confirm which module (Reports/Governance) actually calls this.** |
+| Capability                                      | Route(s)                                                                                                                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Template generation (topic / PDF / risk)        | `POST /template_from_topic`, `POST /template_from_pdf`, `POST /tamplate_from_risk` _(sic, real route)_                                           |
+| Site risk analysis                              | `POST /risk_analysis`                                                                                                                            |
+| Inspection recommendations (RAG)                | `POST /generate_recommendations_from_answer`                                                                                                     |
+| Note/survey-answer extraction                   | `POST /extract-survey-answers`                                                                                                                   |
+| Root-cause bucketing                            | `POST /risk/rootcause-bucketing`                                                                                                                 |
+| Threat intelligence (5 actions)                 | `POST /intelligence/{analyze,predict,mitigations,rcsa,resilience-scan}`                                                                          |
+| KRI baseline (onboarding)                       | `POST /kri-baseline`                                                                                                                             |
+| Company-profile / sites (onboarding "Identify") | `POST /company-profile`, `POST /company-sites`                                                                                                   |
+| Knowledge-base / Pinecone pipeline              | `POST /upload-pdf-to-pinecone`, `GET /upload-status/{file_id}`, `DELETE /delete-vectors-by-filename`                                             |
+| OCR (standalone)                                | `POST /extract-text`                                                                                                                             |
+| Board report content                            | `POST /report_content` — **not previously documented from the aexa-server side; confirm which module (Reports/Governance) actually calls this.** |
 
 ## Mechanism notes worth knowing
 
@@ -60,7 +61,7 @@ Its README is stale (wrong path prefix, wrong/missing endpoint names) — treat 
 - **The rerank stage fails toward keeping chunks, not dropping them.** Scores are zipped onto
   chunks under an explicit length check rather than a bare `zip()`, which silently stops at the
   shorter sequence — a short score list left the tail of the chunks unscored and misaligned the
-  rest (#125). And when score *parsing* fails, the documented behavior is "fall back to the
+  rest (#125). And when score _parsing_ fails, the documented behavior is "fall back to the
   original order": that fallback now stamps each chunk with the minimum passing score, because
   chunks carrying no score at all defaulted to `0` against a positive threshold downstream, which
   discarded every retrieved chunk instead of keeping them unranked (#149). A genuinely unexpected
@@ -119,6 +120,7 @@ each worker process/replica enforces its own independent bucket. Two tiers: `exp
 delete).
 
 Key function, in priority order:
+
 1. Verified `X-Org-Token` → keys on the real `org_account_id` claim.
 2. **`X-Organization` header** — self-reported, unauthenticated fallback. Explicitly and
    knowingly **not a security boundary**: since the only real auth (`X-Internal-Secret`) is
@@ -126,7 +128,7 @@ Key function, in priority order:
    Tests document this as accepted debt, not a bug.
 3. Remote IP — final fallback.
 
-Net effect: at any scale beyond one worker, the *effective* per-org ceiling is `10/minute ×
+Net effect: at any scale beyond one worker, the _effective_ per-org ceiling is `10/minute ×
 (worker count)`, not a true global 10/minute.
 
 ## Knowledge-base pipeline detail
@@ -167,12 +169,12 @@ touching this endpoint:
 
 - **`describe_index_stats(filter=...)` is silently ignored on Pinecone serverless indexes** —
   not an error, just an unfiltered response, so the pre- and post-delete existence checks were
-  really answering "does this org have *any* vectors" rather than "any for this file." They use
+  really answering "does this org have _any_ vectors" rather than "any for this file." They use
   `index.list(prefix=...)` instead, which works because vector ids are minted as
   `{file_id}-chunk-{n}` (#156).
 - **`file_name` is not a stable key for a file's vectors.** `file_id` is the SHA-256 of the
   content, so the same PDF uploaded under two names dedupes to one `file_id` shared by two DB
-  records — but every vector carries only the *first* upload's `file_name`. Keying the delete on
+  records — but every vector carries only the _first_ upload's `file_name`. Keying the delete on
   `file_name` while the existence check keyed on `file_id` meant the second record's delete
   matched zero vectors and reported a false 404 (#162). The two must stay on the same key.
 
@@ -196,7 +198,7 @@ touching this endpoint:
 into the site count the onboarding "Identify" stage seeds an org with. It has two paths:
 
 - A **qualifier-anchored path** for "more than N sites" / "over N sites", which is well-hardened
-  (#137): it anchors to the qualifier *and* requires "site(s)" shortly after the number, so an
+  (#137): it anchors to the qualifier _and_ requires "site(s)" shortly after the number, so an
   earlier unrelated figure — a year, an employee count — can't win by being the leftmost match.
 - A **no-qualifier fallback**, which is still a bare leftmost-number match. It will return a
   year, a percentage, or an employee count as the site count, which is exactly the #137 bug in

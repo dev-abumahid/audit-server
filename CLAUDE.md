@@ -12,7 +12,7 @@ Quick reference for AI coding assistants and new contributors.
 | Queues  | BullMQ + ioredis (`src/app/queues/`)              |
 | Auth    | JWT (`src/app/utils/JWT.ts`) + Passport.js social |
 | Logging | pino (`src/app/lib/logger.ts`)                    |
-| Uploads | AWS S3 (`@aws-sdk/client-s3`)                      |
+| Uploads | AWS S3 (`@aws-sdk/client-s3`)                     |
 | Docs    | Swagger (`/docs`)                                 |
 
 ## Dev commands

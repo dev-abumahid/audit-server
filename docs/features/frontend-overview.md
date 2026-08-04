@@ -9,7 +9,7 @@ the "Frontend wiring" section in each module's own doc.
 Router: `src/routes/MainRoute.tsx` (`createBrowserRouter`), three top-level branches:
 
 - **Public** (`/`): Home, terms, privacy, reset-password.
-- **`/organization`** (account role `"ORGANIZATION"` — this is the *account*-level role; it does
+- **`/organization`** (account role `"ORGANIZATION"` — this is the _account_-level role; it does
   **not** distinguish `LEAD_AUDITOR`/`LIGHT_USER`/`VIEWER`, see below): dashboard, sites,
   risks/risk-matrix/correlation-matrix/risk-graph, KRIs, intelligence, alerts, compliance,
   three-lines-of-defense, audit (templates/inspections/reports/run-workflow), findings, reports,
@@ -68,7 +68,7 @@ Inspections, Findings, Reports).
   still-loading role renders a placeholder rather than flashing a redirect at a legitimate
   writer.
 
-**What that gating still does *not* cover** — where a user can meet a 403, or worse:
+**What that gating still does _not_ cover** — where a user can meet a 403, or worse:
 
 - **The route guards are role-only, not assignment-aware.** `WriteGuardRoute` consults
   `canWriteOrgResource`, so an unassigned `LEAD_AUDITOR` passes it on a specific inspection the
@@ -88,7 +88,7 @@ Inspections, Findings, Reports).
 - **Login**: plain email+password (`SignInModal.tsx`, `POST /auth/sign-in`), same flow for every
   org role.
 - **Session storage**: an **httpOnly cookie** — `baseApi.ts`'s `fetchBaseQuery` uses
-  `credentials: "include"`, no bearer-token/localStorage handling of the JWT itself. What *is*
+  `credentials: "include"`, no bearer-token/localStorage handling of the JWT itself. What _is_
   persisted to `localStorage` (via `redux-persist`) is just the lightweight `IUser` profile
   object (email/id/role/provider) — used purely for UI state, not as a credential.
 - **Cache reset at every session transition.** Sign-in, logout, and the global 401 handler all

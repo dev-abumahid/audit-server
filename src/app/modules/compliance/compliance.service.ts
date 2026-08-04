@@ -71,7 +71,7 @@ const with_overdue = <
 // FREQUENCY_INTERVAL_DAYS (case-insensitive lookup, free string rather than
 // a DB enum). 'one_time'/null/unrecognized means no recurrence — no interval
 // to compute a next_review_date from.
-const RECURRENCE_INTERVAL_DAYS: Record<string, number> = {
+export const RECURRENCE_INTERVAL_DAYS: Record<string, number> = {
   monthly: 30,
   quarterly: 90,
   annual: 365,

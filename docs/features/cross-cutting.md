@@ -64,7 +64,7 @@ The actual authorization engine used across almost every module:
   verify-link paths in `account.service.ts` branch on `jwt.TokenExpiredError` first (it
   subclasses `JsonWebTokenError`, so order matters if the expiry message is to stay distinct),
   then `jwt.JsonWebTokenError` for everything else — malformed, wrong signature, wrong algorithm.
-  This used to match two specific error *message strings*, so every other token failure fell
+  This used to match two specific error _message strings_, so every other token failure fell
   through as an unhandled 500 rather than a clean 401 (#285). The `auth` and `auth_external`
   middlewares follow the same shape.
 - **Social login rejects soft-deleted accounts.** `accountCreatorHelper.ts` hard-rejects an
@@ -95,7 +95,7 @@ between that write and the Cloudinary upload orphaned the file permanently — a
 rejecting the request, a validation failure, or the client disconnecting mid-upload (#305,
 #309).
 
-Cleanup is wired into the global error handler *and* both the `finish` and `close` response
+Cleanup is wired into the global error handler _and_ both the `finish` and `close` response
 events — `close` is the one that fires on a client abort, where `finish` never does. A
 symbol-keyed `markFileHandled` flag marks a file whose disk lifecycle `uploadCloud` has already
 taken ownership of, so the safety net can't race or double-delete a file that's mid-upload. The
@@ -122,6 +122,7 @@ work.
 
 Auth is OTP-based (`external-auth.service.ts`, `request_verification_code` /
 `verify_code_and_login`) with real anti-enumeration engineering:
+
 - Constant-time dummy bcrypt compare (`DUMMY_CODE_HASH`) plus a dummy-member-id lookup path so
   DB round-trip counts don't leak "does this email exist."
 - Per-code `failedAttempts` / `lockedUntil` with atomic increments.

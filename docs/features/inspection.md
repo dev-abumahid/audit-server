@@ -6,6 +6,7 @@ An `Inspection` is a completed/in-progress audit checklist run against a `Templa
 ## Assignment-based edit scope — `InspectionAssignment`
 
 The same table backs two different purposes:
+
 - **LEAD_AUDITOR edit scope**: an assigned Lead Auditor can edit an inspection's content; an
   unassigned one cannot.
 - **VIEWER visibility scope**: an empty assignment-row set for a Viewer means org-wide
@@ -29,7 +30,7 @@ The ids aexa-ai echoes back are **re-verified against this inspection's own ques
 before anything is written**, and unmatched ones dropped with a warning rather than failing the
 request (a mismatch is an aexa-ai-side data problem, not a reason to lose the whole split). This
 matters because `QuestionAnswer` ids are globally unique, not org-scoped: writing straight to
-whatever id came back meant a stale or mismatched one could silently overwrite a row in *any*
+whatever id came back meant a stale or mismatched one could silently overwrite a row in _any_
 organization's inspection (#273).
 
 ## IDOR hardening
@@ -43,11 +44,11 @@ passed through; that's the failure mode to watch for when adding one.
 
 ## Permissions summary
 
-| Action | Gate |
-|---|---|
-| Create / delete | ADMIN only |
-| Edit content | ADMIN, or LEAD_AUDITOR if assigned via `InspectionAssignment` |
-| View | scoped by `applyInspectionScope` (Viewer: org-wide unless assigned, deny if all assignments revoked) |
+| Action          | Gate                                                                                                 |
+| --------------- | ---------------------------------------------------------------------------------------------------- |
+| Create / delete | ADMIN only                                                                                           |
+| Edit content    | ADMIN, or LEAD_AUDITOR if assigned via `InspectionAssignment`                                        |
+| View            | scoped by `applyInspectionScope` (Viewer: org-wide unless assigned, deny if all assignments revoked) |
 
 ## Frontend wiring (aexa-frontend)
 
@@ -67,7 +68,7 @@ passed through; that's the failure mode to watch for when adding one.
   fired a request per keystroke, and on a deep page could momentarily query e.g. page 7 of a
   freshly narrowed result set — rendering a false "no results" state before the page reset
   landed. Both the query term and the page reset now move together, off one delayed effect.
-- **`InspectionAssignment`-based *write* scoping — wired (aexa-frontend#270).** A self-scoped
+- **`InspectionAssignment`-based _write_ scoping — wired (aexa-frontend#270).** A self-scoped
   `GET /inspection/assignments/mine` (added server-side in aexa-server#313, mirroring the
   existing `GET /action/assignments/mine`) returns the caller's own assignment rows, active and
   revoked. `src/hooks/useMyAssignments.ts` derives the active-id set from it, and
@@ -80,14 +81,14 @@ passed through; that's the failure mode to watch for when adding one.
     never as "known to have zero assignments." A failed fetch therefore can't newly lock a Lead
     Auditor out of their own work — it just returns the gate to the coarser rule it had before.
     An empty `Set` is the distinct "genuinely assigned to nothing" value.
-- **Viewer *read* scoping is still server-only.** `resolveViewerVisibleIds` exists in
+- **Viewer _read_ scoping is still server-only.** `resolveViewerVisibleIds` exists in
   `assignmentScope.ts` and correctly preserves the asymmetry (never-assigned Viewer → `null`,
   meaning org-wide fallback; every-assignment-revoked Viewer → empty `Set`, meaning denied), but
   nothing calls it — no list narrows a Viewer's visible rows client-side. #270 covered
   write-gating only.
 - **Two write surfaces here are still open gaps.** `RunInspection.tsx` gates Save/Complete on the
   inspection's status alone, with no role or assignment check in the page itself
-  (**aexa-frontend#275**). Its *route* is now guarded (see below), so a `VIEWER` no longer
+  (**aexa-frontend#275**). Its _route_ is now guarded (see below), so a `VIEWER` no longer
   reaches it — but an unassigned `LEAD_AUDITOR` passes that role-level guard and gets a fully
   functional editing surface. Separately, the "Start New Inspection" button is still gated on the
   role-only `canWriteOrgResource`, so a `LEAD_AUDITOR` is offered it despite creation being

@@ -12,6 +12,7 @@ candidates for manual review/import, never auto-creates), generates inspection r
 and manages Pinecone-backed knowledge-base document upload/status/delete.
 
 **Security-relevant plumbing:**
+
 - `buildAiHeaders(orgAccountId)` attaches both the shared `X-Internal-Secret` and a freshly
   minted, short-lived signed org-identity token (`org_token.ts`), so aexa-ai's rate limiter keys
   on a real authenticated org rather than a self-reported header.

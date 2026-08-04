@@ -43,6 +43,7 @@ A finding only ever reaches a terminal status (`COMPLETE` or `CANT_DO`) via an *
 closure request** — a direct `PATCH /action/:id` setting either status is rejected with 400.
 
 Endpoints:
+
 - `POST /api/action/:id/closure/submit` — requests a terminal status. Requires at least one
   attachment already on the finding. Does not itself change status.
 - `GET /api/action/:id/closure` — current closure state.
@@ -66,7 +67,7 @@ always a `FindingAssignment` on an **Action** while the row being filtered often
 `applyActionScope` takes an `idField`:
 
 - `'id'` (the default) — filtering Actions themselves. Restricts `id` to `getAssignedActionIds`.
-- `'inspectionId'` — filtering rows that hang off an assigned Action's *inspection*, namely Note
+- `'inspectionId'` — filtering rows that hang off an assigned Action's _inspection_, namely Note
   and Recommendation. Restricts `inspectionId` to `getAssignedActionInspectionIds`, which
   resolves a Light User's assigned actions through to the inspections those actions belong to.
 
@@ -81,11 +82,11 @@ model brought under this helper needs its own correct field, not the default.
 `INTERNAL` / `CLIENT_VISIBLE`, defaulting to `INTERNAL`. **Enforced on every read path** as of
 #311, via `canViewInternalMessages(ctx)` in `org_scope.ts` — which is deliberately role-only
 (`ctx.role !== 'LIGHT_USER'`), a strictly coarser distinction than `applyActionScope`'s: it gates
-*which messages on an already-visible Action* you see, not which Actions you see.
+_which messages on an already-visible Action_ you see, not which Actions you see.
 
 Four read paths apply it, and the set matters — missing one leaks:
 
-- **List** (`get_all_action_from_db`) — the list deliberately selects only message *ids* for the
+- **List** (`get_all_action_from_db`) — the list deliberately selects only message _ids_ for the
   badge count rather than the full nested include, so it needed the filter applied separately.
   Without it the count alone would reveal that INTERNAL messages exist, even with their bodies
   hidden.
@@ -113,14 +114,14 @@ caller's own org before being attached to an Action.
 
 ## Permissions summary
 
-| Action | Gate |
-|---|---|
-| Create / update (ordinary fields) | `assertCanWriteToAction` (assignee-aware for Light Users) |
-| Reassign `line_of_defense` | `assertCanReassignLineOfDefense` |
-| Sub-assign to a Light User | write-role check; approval required only if org setting is on |
-| Approve/reject a sub-assignment | ADMIN |
-| Submit for closure | anyone who can write to the finding |
-| Approve/reject closure | ADMIN/LEAD_AUDITOR, never the submitter |
+| Action                            | Gate                                                          |
+| --------------------------------- | ------------------------------------------------------------- |
+| Create / update (ordinary fields) | `assertCanWriteToAction` (assignee-aware for Light Users)     |
+| Reassign `line_of_defense`        | `assertCanReassignLineOfDefense`                              |
+| Sub-assign to a Light User        | write-role check; approval required only if org setting is on |
+| Approve/reject a sub-assignment   | ADMIN                                                         |
+| Submit for closure                | anyone who can write to the finding                           |
+| Approve/reject closure            | ADMIN/LEAD_AUDITOR, never the submitter                       |
 
 ## Frontend wiring (aexa-frontend)
 
@@ -145,7 +146,7 @@ caller's own org before being attached to an Action.
 - **Assignment-based write gating is wired (aexa-frontend#270)**, replacing the coarse role-only
   `canWriteOrgResource` on the per-row and per-finding write affordances:
   - `FindingDetails.tsx` and `AllFindingsPage.tsx` gate on `canWriteInspection(role,
-    action.inspectionId, ...)` — findings live inside an inspection, so a `LEAD_AUDITOR`'s write
+action.inspectionId, ...)` — findings live inside an inspection, so a `LEAD_AUDITOR`'s write
     access to a finding is keyed off an `InspectionAssignment` on its **parent inspection**, not
     off the finding's own id. This mirrors `assertCanWriteToAction` exactly.
   - `FindingClosureControls.tsx` gates on the fuller `canWriteFinding`, the only surface that
@@ -153,7 +154,7 @@ caller's own org before being attached to an Action.
     `FindingAssignment` for (a `PENDING_APPROVAL` or `REJECTED` grant confers nothing, matching
     `getAssignedActionIds`). It passes `lightUserDegradeDefault: true` because this control
     previously allowed any Light User, while the two pages above excluded them entirely — so each
-    call site degrades to *its own* pre-#270 default when assignment data is unavailable, rather
+    call site degrades to _its own_ pre-#270 default when assignment data is unavailable, rather
     than to one global guess.
   - Page-level "create" affordances stay role-only, deliberately: there's no assignment to scope
     a not-yet-existing record by.
@@ -164,7 +165,7 @@ caller's own org before being attached to an Action.
   mechanism — who actually gains write access to a finding, and
   the admin approval step when `requireApprovalForSubAssignment` is on — has no UI, so the whole
   sub-assignment workflow is reachable only through the API today. Note the split this leaves:
-  as of #270 the frontend *reads* a Light User's own assignments (via
+  as of #270 the frontend _reads_ a Light User's own assignments (via
   `GET /action/assignments/mine`) to gate closure controls correctly, but there is still no UI to
-  *create*, approve or revoke one. See [frontend-overview.md](frontend-overview.md).
+  _create_, approve or revoke one. See [frontend-overview.md](frontend-overview.md).
 - **`line_of_defense`** — same governance-board-only pattern as the other four entities.

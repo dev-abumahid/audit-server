@@ -6,7 +6,7 @@ A `Kri` always belongs to a parent `Risk` — never standalone. `current_value`,
 ## Derived status
 
 `OK` / `WARNING` / `ALERT`, computed on read (`compute_kri_status`), never stored. Direction
-(higher-is-better vs. lower-is-better) is *inferred* from whether `target_value` is above or
+(higher-is-better vs. lower-is-better) is _inferred_ from whether `target_value` is above or
 below `alert_threshold` — validation rejects the two being equal so direction is never
 ambiguous.
 
