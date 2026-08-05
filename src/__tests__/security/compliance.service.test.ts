@@ -500,6 +500,31 @@ describe('compliance service — org scoping (issue #93)', () => {
         expect(nextReviewMs).toBeGreaterThanOrEqual(before + yearMs);
         expect(nextReviewMs).toBeLessThanOrEqual(after + yearMs);
       });
+
+      // aexa-server#318: a recurrence value that normalizes to an inherited
+      // Object.prototype key (e.g. 'constructor') must be treated the same
+      // as any other unrecognized recurrence -- null, not resolved through
+      // the prototype chain into NaN arithmetic and an invalid Date.
+      // Deliberately omits due_date: `payload.due_date ?? computeNextReviewDate(...)`
+      // short-circuits before computeNextReviewDate ever runs when due_date
+      // is supplied, so a due_date-present variant wouldn't exercise the bug.
+      it('leaves next_review_date null for a prototype-chain-colliding recurrence (#318) with no due_date', async () => {
+        db.create.mockResolvedValue({});
+
+        await compliance_service.create_compliance_into_db(
+          makeReq({
+            body: {
+              title: 'Suspicious recurrence, no due date',
+              domain: 'Financial',
+              status: 'pending',
+              recurrence: 'constructor',
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.next_review_date).toBeNull();
+      });
     });
   });
 

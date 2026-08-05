@@ -79,8 +79,17 @@ export const RECURRENCE_INTERVAL_DAYS: Record<string, number> = {
 
 const computeNextReviewDate = (recurrence: string | null | undefined, from: Date): Date | null => {
   if (!recurrence) return null;
-  const intervalDays = RECURRENCE_INTERVAL_DAYS[recurrence.trim().toLowerCase()];
-  if (!intervalDays) return null;
+  const normalized = recurrence.trim().toLowerCase();
+  // aexa-server#318: bracket access on a plain object literal resolves
+  // through the prototype chain, so a normalized value matching an
+  // inherited Object.prototype key (e.g. 'constructor') would return that
+  // inherited function instead of undefined -- truthy, so the old `!intervalDays`
+  // guard let it through into `intervalDays * 24 * 60 * 60 * 1000`, producing
+  // NaN and an invalid Date. Object.hasOwn scopes the lookup to the object's
+  // own keys only, same fix already applied to the sibling backfill script's
+  // shouldClearNextReviewDate in #317.
+  if (!Object.hasOwn(RECURRENCE_INTERVAL_DAYS, normalized)) return null;
+  const intervalDays = RECURRENCE_INTERVAL_DAYS[normalized];
   return new Date(from.getTime() + intervalDays * 24 * 60 * 60 * 1000);
 };
 
