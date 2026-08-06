@@ -95,7 +95,21 @@ const get_single_risk_from_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
   const { id } = req.params as Record<string, string>;
-  const result = await prisma.risk.findFirst({ where: { id, org_account_id: ctx.organizationId } });
+  const result = await prisma.risk.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+    // aexa-frontend#541: get_all_risk_from_db already joins this (the
+    // register list needs it), but this single-risk read never did --
+    // RiskDetails.tsx's Site card always fell back to "Group" for a risk
+    // that genuinely has one, since risk.site was silently undefined here.
+    include: {
+      site: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  });
   if (!result) throw new AppError('Risk not found', 404);
   return result;
 };

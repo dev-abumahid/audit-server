@@ -274,6 +274,7 @@ describe('risk service — org scoping (ticket #6)', () => {
 
       expect(db.findFirst).toHaveBeenCalledWith({
         where: { id: 'r1', org_account_id: ORG_A },
+        include: { site: { select: { id: true, name: true } } },
       });
     });
 
