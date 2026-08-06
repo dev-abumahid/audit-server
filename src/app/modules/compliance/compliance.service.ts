@@ -156,6 +156,13 @@ const get_all_compliance_from_db = async (req: Request) => {
       orderBy: {
         createdAt: 'desc',
       },
+      include: {
+        // aexa-frontend#531: lets the "Create Action" button on a
+        // non-compliant row become "View Action" once a remediation
+        // action already exists, instead of offering to create a
+        // duplicate with no way to tell one's already in flight.
+        actions: { select: { id: true, actionTitle: true, status: true } },
+      },
     }),
     prisma.complianceObligation.count({
       where: whereCondition,
@@ -174,6 +181,9 @@ const get_single_compliance_from_db = async (req: Request) => {
   const id = req.params?.id as string;
   const result = await prisma.complianceObligation.findUnique({
     where: { id, org_account_id: ctx.organizationId },
+    include: {
+      actions: { select: { id: true, actionTitle: true, status: true } },
+    },
   });
   // Every sibling module's get_single_* throws 404 for a missing/cross-org
   // record rather than returning a bare 200 with data: null.

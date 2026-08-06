@@ -182,6 +182,11 @@ const get_single_action_from_db = async (req: Request) => {
       ...messagesInclude(canViewInternalMessages(ctx)),
       site: { select: { name: true, id: true } },
       ...RESPONSIBLE_INCLUDE,
+      // aexa-frontend#531: complianceObligationId was already written on
+      // create (aexa-frontend#166) but never joined back on read, so a
+      // finding remediating an obligation had no way to show/link which one
+      // -- only the FK's raw uuid was returned, unusable for display.
+      complianceObligation: { select: { id: true, title: true } },
     },
   });
   if (!result) throw new AppError('Action not found', 404);

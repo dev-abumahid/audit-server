@@ -311,6 +311,9 @@ describe('compliance service — org scoping (issue #93)', () => {
 
       expect(db.findUnique).toHaveBeenCalledWith({
         where: { id: 'c1', org_account_id: ORG_A },
+        include: {
+          actions: { select: { id: true, actionTitle: true, status: true } },
+        },
       });
     });
 
