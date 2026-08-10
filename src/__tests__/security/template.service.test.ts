@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
 
@@ -672,6 +673,141 @@ describe('template service — error-handling consistency (issue #55 follow-up)'
     ).rejects.toMatchObject({ statusCode: 404 });
 
     expect(questionDb.delete).not.toHaveBeenCalled();
+  });
+});
+
+describe('template service — duplicate_template_into_db (aexa-frontend quality-bar-loop, industry-standards: cloning parity with SafetyCulture/Typeform/Google Forms)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  const sourceTemplate = {
+    id: 't1',
+    orgAccountId: ORG_A,
+    templateLogo: 'https://cdn.example.com/logo.png',
+    templateName: 'ISO 27001 Audit',
+    templateDisc: 'Standard checklist',
+    category: 'Safety',
+    pages: [
+      {
+        id: 'p1',
+        pageIndex: 0,
+        title: 'Section 1',
+        questions: [
+          {
+            id: 'q1',
+            index: 0,
+            question: 'Is the door locked?',
+            isRequired: true,
+            answerType: 'checkbox',
+            // Prisma's JsonValue read type allows a literal JSON `null` for
+            // a required Json column -- the write side needs the explicit
+            // Prisma.JsonNull sentinel to represent that, not JS `null`
+            // (which Prisma treats as "field omitted"). This source row
+            // exercises that path.
+            value: null,
+          },
+        ],
+      },
+    ],
+  };
+
+  it('throws 404 and does NOT create anything for another org template', async () => {
+    templateDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      template_service.duplicate_template_into_db(makeReq({ params: { id: 'org-b-template' } })),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(templateDb.create).not.toHaveBeenCalled();
+  });
+
+  it('VIEWER cannot duplicate a template', async () => {
+    mockMembership('VIEWER');
+
+    await expect(
+      template_service.duplicate_template_into_db(makeReq({ params: { id: 't1' } })),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(templateDb.findFirst).not.toHaveBeenCalled();
+    expect(templateDb.create).not.toHaveBeenCalled();
+  });
+
+  it('copies name (suffixed), logo, description, and every page/question, scoped to the caller org', async () => {
+    templateDb.findFirst.mockResolvedValue(sourceTemplate);
+    templateDb.create.mockResolvedValue({ id: 't2' });
+
+    await template_service.duplicate_template_into_db(makeReq({ params: { id: 't1' } }));
+
+    expect(templateDb.findFirst).toHaveBeenCalledWith({
+      where: { id: 't1', orgAccountId: ORG_A },
+      include: { pages: { include: { questions: true } } },
+    });
+    const callArg = templateDb.create.mock.calls[0][0];
+    expect(callArg.data.orgAccountId).toBe(ORG_A);
+    expect(callArg.data.templateName).toBe('ISO 27001 Audit (copy)');
+    expect(callArg.data.templateLogo).toBe('https://cdn.example.com/logo.png');
+    expect(callArg.data.templateDisc).toBe('Standard checklist');
+    expect(callArg.data.category).toBe('Safety');
+    expect(callArg.data.status).toBe('DRAFT');
+    expect(callArg.data.pages.create).toEqual([
+      {
+        pageIndex: 0,
+        title: 'Section 1',
+        questions: {
+          create: [
+            {
+              index: 0,
+              question: 'Is the door locked?',
+              isRequired: true,
+              answerType: 'checkbox',
+              value: Prisma.JsonNull,
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  // A duplicate is a fresh, private draft -- matching create_template_into_db,
+  // which never populates `access` on creation either. Copying the original's
+  // sharing grants would leak them to a template the copy's creator may not
+  // want shared yet.
+  it('does not copy the source template access grants onto the duplicate', async () => {
+    templateDb.findFirst.mockResolvedValue({
+      ...sourceTemplate,
+      access: [{ userId: 'someone-else' }],
+    });
+    templateDb.create.mockResolvedValue({ id: 't2' });
+
+    await template_service.duplicate_template_into_db(makeReq({ params: { id: 't1' } }));
+
+    const callArg = templateDb.create.mock.calls[0][0];
+    expect(callArg.data.access).toBeUndefined();
+  });
+
+  // quality-bar-loop round 5 follow-up: a copy of a published template
+  // hasn't itself been reviewed, so it starts DRAFT regardless of the
+  // source's own status -- same rationale as not copying access grants.
+  it('always creates the duplicate as DRAFT, even when the source is PUBLISHED', async () => {
+    templateDb.findFirst.mockResolvedValue({ ...sourceTemplate, status: 'PUBLISHED' });
+    templateDb.create.mockResolvedValue({ id: 't2' });
+
+    await template_service.duplicate_template_into_db(makeReq({ params: { id: 't1' } }));
+
+    const callArg = templateDb.create.mock.calls[0][0];
+    expect(callArg.data.status).toBe('DRAFT');
+  });
+
+  it('duplicates a template with no pages without throwing', async () => {
+    templateDb.findFirst.mockResolvedValue({ ...sourceTemplate, pages: [] });
+    templateDb.create.mockResolvedValue({ id: 't2' });
+
+    await template_service.duplicate_template_into_db(makeReq({ params: { id: 't1' } }));
+
+    const callArg = templateDb.create.mock.calls[0][0];
+    expect(callArg.data.pages.create).toEqual([]);
   });
 });
 

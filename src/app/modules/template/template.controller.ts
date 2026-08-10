@@ -68,6 +68,17 @@ const delete_template = catchAsync(async (req, res) => {
   });
 });
 
+const duplicate_template = catchAsync(async (req, res) => {
+  const result = await template_service.duplicate_template_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'template duplicated successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 // part by part update
 
 const update_or_create_new_page = catchAsync(async (req, res) => {
@@ -138,6 +149,7 @@ export const template_controller = {
   create_template,
   update_template,
   delete_template,
+  duplicate_template,
   update_or_create_new_page,
   delete_template_page_by_id,
   update_or_delete_new_question,

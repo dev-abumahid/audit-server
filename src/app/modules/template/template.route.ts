@@ -85,5 +85,6 @@ router.patch(
   template_controller.update_template,
 );
 router.delete('/:id', auth('ORGANIZATION'), template_controller.delete_template);
+router.post('/:id/duplicate', auth('ORGANIZATION'), template_controller.duplicate_template);
 
 export default router;

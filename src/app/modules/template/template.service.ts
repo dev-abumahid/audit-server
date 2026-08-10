@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 import { JwtPayload } from 'jsonwebtoken';
 import { prisma } from '../../lib/prisma.js';
@@ -210,6 +211,60 @@ const delete_template_from_db = async (req: Request) => {
 
   const result = await prisma.template.delete({
     where: { id, orgAccountId: ctx.organizationId },
+  });
+  return result;
+};
+
+const duplicate_template_into_db = async (req: Request) => {
+  const user = req?.user as JwtPayload;
+  const ctx = await resolveCallerOrgContext(user?.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { id } = req.params as { id: string };
+
+  const source = await prisma.template.findFirst({
+    where: { id, orgAccountId: ctx.organizationId },
+    include: { pages: { include: { questions: true } } },
+  });
+  if (!source) throw new AppError('Template not found', 404);
+
+  // Duplicating a template is a fresh, private draft, not a snapshot of the
+  // original's sharing state -- matching create_template_into_db, which
+  // never populates `access` on creation either. Nested pages/questions are
+  // real, structural copy-target data (the whole point of this endpoint);
+  // `access` is per-user grant state that belongs to the original template's
+  // owner relationships, not to a new copy nobody has reviewed yet.
+  //
+  // For the same reason, the copy always starts DRAFT regardless of the
+  // source's own status -- a copy of a published template hasn't itself
+  // been reviewed, so it shouldn't be immediately usable for real
+  // inspections (see StartInspectionModal's status=PUBLISHED filter on
+  // the frontend). Matches CreateTemplatePage.tsx's own new-template
+  // default.
+  const result = await prisma.template.create({
+    data: {
+      orgAccountId: ctx.organizationId,
+      templateLogo: source.templateLogo,
+      templateName: `${source.templateName} (copy)`,
+      templateDisc: source.templateDisc,
+      category: source.category,
+      status: 'DRAFT',
+      pages: {
+        create: source.pages.map((page) => ({
+          pageIndex: page.pageIndex,
+          title: page.title,
+          questions: {
+            create: page.questions.map((q) => ({
+              index: q.index,
+              question: q.question,
+              isRequired: q.isRequired,
+              answerType: q.answerType,
+              value: q.value === null ? Prisma.JsonNull : q.value,
+            })),
+          },
+        })),
+      },
+    },
+    include: { pages: { include: { questions: true } } },
   });
   return result;
 };
@@ -435,6 +490,7 @@ export const template_service = {
   create_template_into_db,
   update_template_into_db,
   delete_template_from_db,
+  duplicate_template_into_db,
   update_or_create_new_page_into_db,
   delete_template_page_by_id_from_db,
   update_or_delete_new_question_into_db,

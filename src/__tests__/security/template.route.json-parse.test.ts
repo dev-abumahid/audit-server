@@ -50,6 +50,7 @@ vi.mock('../../app/modules/template/template.controller.js', () => ({
     remove_template_access_member: vi.fn(),
     delete_template: vi.fn(),
     get_template_categories: vi.fn(),
+    duplicate_template: vi.fn(),
   },
 }));
 

@@ -201,6 +201,28 @@ export const templateSwaggerDocs = {
       },
     },
   },
+  '/api/template/{id}/duplicate': {
+    post: {
+      tags: ['template'],
+      summary: 'Duplicate a template, including all of its pages and questions',
+      description:
+        'Creates a new template in the caller org as a copy of the source template (name suffixed with " (copy)"). Access grants are not copied -- the duplicate starts private.',
+      parameters: [
+        {
+          name: 'id',
+          in: 'path',
+          required: true,
+          schema: { type: 'string' },
+        },
+      ],
+      responses: {
+        200: { description: 'template duplicated successfully' },
+        401: { description: 'unauthorized' },
+        403: { description: 'forbidden -- caller cannot write org resources' },
+        404: { description: 'template not found' },
+      },
+    },
+  },
   '/api/template/update-or-create-new-page': {
     patch: {
       tags: ['template [page]'],
