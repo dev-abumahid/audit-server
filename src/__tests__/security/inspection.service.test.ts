@@ -490,6 +490,42 @@ describe('inspection service — org scoping (ticket #6)', () => {
         data: { status: 'COMPLETED' },
       });
     });
+
+    // quality-bar-loop (Inspections, round 3, resilience/security finding):
+    // a client-supplied siteId was written with zero check it belongs to
+    // the caller's org, unlike create_inspection_into_db's siteId check —
+    // letting a caller silently reassign an inspection to another org's
+    // site.
+    it('rejects reassigning the inspection to a site from another org', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'i1', orgAccountId: ORG_A });
+      siteDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        inspection_service.update_inspection_into_db(
+          makeReq({ params: { id: 'i1' }, body: { siteId: 'org-b-site' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(siteDb.findFirst).toHaveBeenCalledWith({
+        where: { id: 'org-b-site', org_account_id: ORG_A },
+      });
+      expect(inspectionDb.update).not.toHaveBeenCalled();
+    });
+
+    it('allows reassigning to a site that does belong to the caller org', async () => {
+      inspectionDb.findFirst.mockResolvedValue({ id: 'i1', orgAccountId: ORG_A });
+      siteDb.findFirst.mockResolvedValue({ id: 's2', org_account_id: ORG_A });
+      inspectionDb.update.mockResolvedValue({});
+
+      await inspection_service.update_inspection_into_db(
+        makeReq({ params: { id: 'i1' }, body: { siteId: 's2' } }),
+      );
+
+      expect(inspectionDb.update).toHaveBeenCalledWith({
+        where: { id: 'i1' },
+        data: { siteId: 's2' },
+      });
+    });
   });
 
   describe('delete_inspection_from_db', () => {

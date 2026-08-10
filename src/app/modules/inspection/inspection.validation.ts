@@ -13,11 +13,27 @@ const httpUrl = z
     message: 'Attachment URL must be http(s)',
   });
 
+// quality-bar-loop (Inspections, round 3, security finding): mediaFiles
+// entries are always `{ url, type }` attachment references (see
+// CreateNewInspection.tsx/UpdateInspection.tsx on the frontend) rendered
+// straight into <img src>/<video><source src>/<a href>/window.open with no
+// further sanitization (InspectionReport.tsx). They were previously
+// z.any(), unlike Inspection.attachments, which already got this same
+// httpUrl scheme check after an earlier independent review specifically to
+// reject javascript:/data: schemes. `answer` itself is intentionally left
+// as z.any() here — it's polymorphic per question type (text/number/
+// boolean/etc, not just media), so a scheme check at this layer would
+// reject legitimate non-URL answers.
+const mediaFileSchema = z.object({
+  url: httpUrl,
+  type: z.string(),
+});
+
 export const QuestionAnswerSchema = z.object({
   questionId: z.string().uuid(),
   answer: z.any(),
   note: z.string().optional().nullable(),
-  mediaFiles: z.any().optional(),
+  mediaFiles: z.array(mediaFileSchema).optional(),
 });
 
 const create_inspection = z.object({
@@ -41,7 +57,7 @@ const update_inspection = z.object({
 const update_question_answer = z.object({
   answer: z.any(),
   note: z.string().optional().nullable(),
-  mediaFiles: z.any(),
+  mediaFiles: z.array(mediaFileSchema).optional(),
 });
 
 const assign_inspection_member = z.object({

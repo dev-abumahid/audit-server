@@ -267,6 +267,19 @@ const update_inspection_into_db = async (req: Request) => {
   });
   if (!existing) throw new AppError('Inspection not found', 404);
   await assertCanWriteToInspection(ctx, id);
+
+  // quality-bar-loop (Inspections, round 3, resilience/security finding):
+  // a client-supplied siteId was written with no check it belongs to the
+  // caller's org, unlike create_inspection_into_db's siteId check above —
+  // letting a caller silently reassign an inspection to another org's
+  // site. Same org-ownership guard as create.
+  if (req.body.siteId) {
+    const site = await prisma.site.findFirst({
+      where: { id: req.body.siteId, org_account_id: ctx.organizationId },
+    });
+    if (!site) throw new AppError('Site not found', 404);
+  }
+
   const result = await prisma.inspection.update({
     where: { id },
     data: {

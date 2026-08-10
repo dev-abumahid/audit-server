@@ -90,3 +90,103 @@ describe('inspection_validations.create_inspection — inspectorProfileId', () =
     expect(result.success).toBe(false);
   });
 });
+
+// quality-bar-loop (Inspections, round 3, security finding): mediaFiles
+// entries were previously z.any(), unlike Inspection.attachments, which
+// already rejects javascript:/data: schemes. mediaFiles is always a
+// `{ url, type }` attachment reference (see the frontend's
+// CreateNewInspection.tsx/UpdateInspection.tsx), so it can get the same
+// httpUrl check attachments already has.
+describe('QuestionAnswerSchema.mediaFiles', () => {
+  const BASE = {
+    templateId: '11111111-1111-4111-8111-111111111111',
+    siteId: '22222222-2222-4222-8222-222222222222',
+  };
+
+  it('accepts a valid https mediaFiles URL', () => {
+    const result = inspection_validations.create_inspection.safeParse({
+      ...BASE,
+      questionAnswers: [
+        {
+          questionId: '33333333-3333-4333-8333-333333333333',
+          answer: null,
+          mediaFiles: [{ url: 'https://s3.example.com/photo.jpg', type: 'image' }],
+        },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a javascript: URI in mediaFiles', () => {
+    const result = inspection_validations.create_inspection.safeParse({
+      ...BASE,
+      questionAnswers: [
+        {
+          questionId: '33333333-3333-4333-8333-333333333333',
+          answer: null,
+          mediaFiles: [{ url: 'javascript:alert(1)', type: 'image' }],
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a data: URI in mediaFiles', () => {
+    const result = inspection_validations.create_inspection.safeParse({
+      ...BASE,
+      questionAnswers: [
+        {
+          questionId: '33333333-3333-4333-8333-333333333333',
+          answer: null,
+          mediaFiles: [{ url: 'data:text/html,<script>alert(1)</script>', type: 'image' }],
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('allows omitting mediaFiles entirely', () => {
+    const result = inspection_validations.create_inspection.safeParse({
+      ...BASE,
+      questionAnswers: [
+        { questionId: '33333333-3333-4333-8333-333333333333', answer: 'plain text answer' },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('does not restrict `answer` to a URL shape, since it is polymorphic across question types', () => {
+    const result = inspection_validations.create_inspection.safeParse({
+      ...BASE,
+      questionAnswers: [
+        { questionId: '33333333-3333-4333-8333-333333333333', answer: 'javascript:alert(1)' },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('inspection_validations.update_question_answer — mediaFiles', () => {
+  it('accepts a valid https mediaFiles URL', () => {
+    const result = inspection_validations.update_question_answer.safeParse({
+      answer: null,
+      mediaFiles: [{ url: 'https://s3.example.com/photo.jpg', type: 'image' }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a javascript: URI in mediaFiles', () => {
+    const result = inspection_validations.update_question_answer.safeParse({
+      answer: null,
+      mediaFiles: [{ url: 'javascript:alert(1)', type: 'image' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('allows omitting mediaFiles entirely', () => {
+    const result = inspection_validations.update_question_answer.safeParse({
+      answer: 'plain text answer',
+    });
+    expect(result.success).toBe(true);
+  });
+});
