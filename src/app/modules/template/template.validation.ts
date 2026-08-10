@@ -50,6 +50,7 @@ const create_template = z.object({
   templateLogo: z.string().url().optional(),
   templateName: z.string().min(1),
   templateDisc: z.string().optional(),
+  category: z.string().optional(),
   pages: z.array(PageSchema).min(1),
   access: z.array(TemplateAccessSchema).optional(),
 });
@@ -57,6 +58,7 @@ const update_template = z.object({
   templateLogo: z.string().optional(),
   templateName: z.string().optional(),
   templateDisc: z.string().optional(),
+  category: z.string().optional(),
 });
 
 const update_or_create_new_page = z.object({

@@ -15,10 +15,11 @@ import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHel
 import { mapTemplateData } from './template.utils.js';
 
 const get_all_template_from_db = async (req: Request) => {
-  const { page, limit, searchTerm } = req.query as {
+  const { page, limit, searchTerm, category } = req.query as {
     page?: string;
     limit?: string;
     searchTerm?: string;
+    category?: string;
   };
 
   const user = req?.user as JwtPayload;
@@ -38,6 +39,10 @@ const get_all_template_from_db = async (req: Request) => {
     };
   }
 
+  if (category && category.trim() !== '') {
+    whereCondition.category = category;
+  }
+
   const [data, total] = await Promise.all([
     prisma.template.findMany({
       where: whereCondition,
@@ -51,6 +56,7 @@ const get_all_template_from_db = async (req: Request) => {
         templateLogo: true,
         templateName: true,
         templateDisc: true,
+        category: true,
         createdAt: true,
         updatedAt: true,
         access: {
@@ -70,6 +76,24 @@ const get_all_template_from_db = async (req: Request) => {
     meta: buildPaginationMeta(pagination, total),
     data,
   };
+};
+
+// Suggest-from-existing-values source for the frontend's category input --
+// intentionally a flat list of the org's own distinct, non-null category
+// strings rather than a managed taxonomy (see template.prisma's comment on
+// why `category` is a plain string, not a relational model).
+const get_template_categories_from_db = async (req: Request) => {
+  const user = req?.user as JwtPayload;
+  const ctx = await resolveCallerOrgContext(user?.accountId);
+
+  const rows = await prisma.template.findMany({
+    where: { orgAccountId: ctx.organizationId, category: { not: null } },
+    select: { category: true },
+    distinct: ['category'],
+    orderBy: { category: 'asc' },
+  });
+
+  return rows.map((r) => r.category).filter((c): c is string => !!c);
 };
 
 const get_single_template_from_db = async (req: Request) => {
@@ -397,6 +421,7 @@ const remove_template_access_member_from_db = async (req: Request) => {
 
 export const template_service = {
   get_all_template_from_db,
+  get_template_categories_from_db,
   get_single_template_from_db,
   create_template_into_db,
   update_template_into_db,

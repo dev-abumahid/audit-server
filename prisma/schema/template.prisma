@@ -5,6 +5,17 @@ model Template {
     templateName String
     templateDisc String?
     riskId       String?
+    // quality-bar-loop round 4 (Templates, industry-standards): free-text
+    // category/tag, addressing the "no categories/tagging/folders" gap --
+    // every reference tool in this category (SafetyCulture/iAuditor,
+    // Typeform, Google Forms) supports at least basic categorization.
+    // Deliberately a plain string, not a relational Category model: a
+    // full taxonomy (org-level category management, reordering, merging)
+    // is a much larger feature than this round's scope, and a free-text
+    // field with a suggest-from-existing-values UI (same pattern as
+    // AuditPage's lead-auditor <datalist>) covers the common case without
+    // it. Nullable/optional so every existing template stays valid.
+    category     String?
 
     pages       Page[]
     access      TemplateAccess[]
@@ -17,6 +28,7 @@ model Template {
     updatedAt DateTime @updatedAt
 
     @@index([orgAccountId])
+    @@index([orgAccountId, category])
 }
 
 model Page {

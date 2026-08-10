@@ -10,6 +10,7 @@ export const mapTemplateData = (body: any, orgAnchorAccountId: string) => ({
   templateLogo: body.templateLogo,
   templateName: body.templateName,
   templateDisc: body.templateDisc,
+  category: body.category,
 
   pages: {
     create: body.pages.map((page: any) => ({

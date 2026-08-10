@@ -64,6 +64,10 @@ router.delete(
 
 // -----------------------------
 
+// Must be registered before GET /:id -- otherwise Express would match
+// "categories" as an :id value and route here instead of get_single_template.
+router.get('/categories', auth('ORGANIZATION'), template_controller.get_template_categories);
+
 router.get('/:id', auth('ORGANIZATION'), template_controller.get_single_template);
 router.patch(
   '/:id',

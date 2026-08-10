@@ -323,6 +323,60 @@ describe('template service — get_all_template_from_db pagination (ticket #116)
       totalPage: 0,
     });
   });
+
+  // quality-bar-loop round 4 (Templates, industry-standards): category
+  // filter, same optional-query-param shape as searchTerm above.
+  it('filters by an exact category match when the category query param is given', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(0);
+
+    await template_service.get_all_template_from_db(makeReq({ query: { category: 'Safety' } }));
+
+    expect(templateDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ category: 'Safety' }),
+      }),
+    );
+  });
+
+  it('does not add a category filter when the query param is missing or blank', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(0);
+
+    await template_service.get_all_template_from_db(makeReq({ query: { category: '  ' } }));
+
+    const callArg = templateDb.findMany.mock.calls[0][0];
+    expect(callArg.where).not.toHaveProperty('category');
+  });
+});
+
+describe('template service — get_template_categories_from_db (quality-bar-loop round 4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+  });
+
+  it('returns the distinct, non-null category values scoped to the caller org', async () => {
+    templateDb.findMany.mockResolvedValue([{ category: 'Safety' }, { category: 'Quality' }]);
+
+    const result = await template_service.get_template_categories_from_db(makeReq({ query: {} }));
+
+    expect(templateDb.findMany).toHaveBeenCalledWith({
+      where: { orgAccountId: ORG_A, category: { not: null } },
+      select: { category: true },
+      distinct: ['category'],
+      orderBy: { category: 'asc' },
+    });
+    expect(result).toEqual(['Safety', 'Quality']);
+  });
+
+  it('returns an empty array when the org has no categorized templates', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+
+    const result = await template_service.get_template_categories_from_db(makeReq({ query: {} }));
+
+    expect(result).toEqual([]);
+  });
 });
 
 describe('template service — write/access-grant role scoping (issue #55 slice 3)', () => {

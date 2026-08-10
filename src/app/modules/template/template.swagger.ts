@@ -90,9 +90,28 @@ export const templateSwaggerDocs = {
           required: false,
           schema: { type: 'number' },
         },
+        {
+          name: 'category',
+          in: 'query',
+          required: false,
+          schema: { type: 'string' },
+          description: 'Exact-match filter on the template category',
+        },
       ],
       responses: {
         200: { description: 'template fetched successfully' },
+        401: { description: 'unauthorized' },
+      },
+    },
+  },
+  '/api/template/categories': {
+    get: {
+      tags: ['template'],
+      summary: "List the caller org's distinct template categories",
+      description:
+        'Flat list of distinct, non-null category values already used in this org, for a suggest-from-existing-values UI (not a managed taxonomy).',
+      responses: {
+        200: { description: 'template categories fetched successfully' },
         401: { description: 'unauthorized' },
       },
     },

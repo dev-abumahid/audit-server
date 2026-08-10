@@ -13,6 +13,17 @@ const get_all_template = catchAsync(async (req, res) => {
   });
 });
 
+const get_template_categories = catchAsync(async (req, res) => {
+  const result = await template_service.get_template_categories_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Template categories fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 const get_single_template = catchAsync(async (req, res) => {
   const result = await template_service.get_single_template_from_db(req);
   manageResponse(res, {
@@ -122,6 +133,7 @@ const remove_template_access_member = catchAsync(async (req, res) => {
 
 export const template_controller = {
   get_all_template,
+  get_template_categories,
   get_single_template,
   create_template,
   update_template,
