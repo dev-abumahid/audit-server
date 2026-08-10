@@ -46,11 +46,14 @@ const TemplateAccessSchema = z.object({
   userId: z.string().min(1),
 });
 
+const TemplateStatusSchema = z.enum(['DRAFT', 'PUBLISHED']);
+
 const create_template = z.object({
   templateLogo: z.string().url().optional(),
   templateName: z.string().min(1),
   templateDisc: z.string().optional(),
   category: z.string().optional(),
+  status: TemplateStatusSchema.optional(),
   pages: z.array(PageSchema).min(1),
   access: z.array(TemplateAccessSchema).optional(),
 });
@@ -59,6 +62,7 @@ const update_template = z.object({
   templateName: z.string().optional(),
   templateDisc: z.string().optional(),
   category: z.string().optional(),
+  status: TemplateStatusSchema.optional(),
 });
 
 const update_or_create_new_page = z.object({

@@ -348,6 +348,57 @@ describe('template service — get_all_template_from_db pagination (ticket #116)
     const callArg = templateDb.findMany.mock.calls[0][0];
     expect(callArg.where).not.toHaveProperty('category');
   });
+
+  // quality-bar-loop round 5 (Templates, industry-standards): draft/
+  // publish status filter, so StartInspectionModal's template picker can
+  // exclude drafts.
+  it('filters by status=PUBLISHED when given', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(0);
+
+    await template_service.get_all_template_from_db(makeReq({ query: { status: 'PUBLISHED' } }));
+
+    expect(templateDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: 'PUBLISHED' }),
+      }),
+    );
+  });
+
+  it('filters by status=DRAFT when given', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(0);
+
+    await template_service.get_all_template_from_db(makeReq({ query: { status: 'DRAFT' } }));
+
+    expect(templateDb.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: 'DRAFT' }),
+      }),
+    );
+  });
+
+  it('ignores an invalid status value rather than passing it through to Prisma', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(0);
+
+    await template_service.get_all_template_from_db(
+      makeReq({ query: { status: 'NOT_A_REAL_STATUS' } }),
+    );
+
+    const callArg = templateDb.findMany.mock.calls[0][0];
+    expect(callArg.where).not.toHaveProperty('status');
+  });
+
+  it('does not add a status filter when the query param is missing', async () => {
+    templateDb.findMany.mockResolvedValue([]);
+    templateDb.count.mockResolvedValue(0);
+
+    await template_service.get_all_template_from_db(makeReq({ query: {} }));
+
+    const callArg = templateDb.findMany.mock.calls[0][0];
+    expect(callArg.where).not.toHaveProperty('status');
+  });
 });
 
 describe('template service — get_template_categories_from_db (quality-bar-loop round 4)', () => {

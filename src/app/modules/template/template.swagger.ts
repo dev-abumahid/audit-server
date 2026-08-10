@@ -97,6 +97,13 @@ export const templateSwaggerDocs = {
           schema: { type: 'string' },
           description: 'Exact-match filter on the template category',
         },
+        {
+          name: 'status',
+          in: 'query',
+          required: false,
+          schema: { type: 'string', enum: ['DRAFT', 'PUBLISHED'] },
+          description: 'Exact-match filter on draft/publish status',
+        },
       ],
       responses: {
         200: { description: 'template fetched successfully' },

@@ -15,11 +15,12 @@ import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHel
 import { mapTemplateData } from './template.utils.js';
 
 const get_all_template_from_db = async (req: Request) => {
-  const { page, limit, searchTerm, category } = req.query as {
+  const { page, limit, searchTerm, category, status } = req.query as {
     page?: string;
     limit?: string;
     searchTerm?: string;
     category?: string;
+    status?: string;
   };
 
   const user = req?.user as JwtPayload;
@@ -43,6 +44,13 @@ const get_all_template_from_db = async (req: Request) => {
     whereCondition.category = category;
   }
 
+  // Exact match against the TemplateStatus enum, same optional-param shape
+  // as category/searchTerm above -- e.g. StartInspectionModal passes
+  // status=PUBLISHED to exclude drafts from the inspection template picker.
+  if (status === 'DRAFT' || status === 'PUBLISHED') {
+    whereCondition.status = status;
+  }
+
   const [data, total] = await Promise.all([
     prisma.template.findMany({
       where: whereCondition,
@@ -57,6 +65,7 @@ const get_all_template_from_db = async (req: Request) => {
         templateName: true,
         templateDisc: true,
         category: true,
+        status: true,
         createdAt: true,
         updatedAt: true,
         access: {

@@ -11,6 +11,11 @@ export const mapTemplateData = (body: any, orgAnchorAccountId: string) => ({
   templateName: body.templateName,
   templateDisc: body.templateDisc,
   category: body.category,
+  // Prisma treats an explicit `undefined` the same as an omitted field, so
+  // this still resolves to the schema's @default(PUBLISHED) when the
+  // caller doesn't send a status -- only CreateTemplatePage.tsx currently
+  // sends one (DRAFT), so every other/older caller keeps today's behavior.
+  status: body.status,
 
   pages: {
     create: body.pages.map((page: any) => ({

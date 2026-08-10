@@ -1,3 +1,8 @@
+enum TemplateStatus {
+    DRAFT
+    PUBLISHED
+}
+
 model Template {
     id           String  @id @default(uuid())
     orgAccountId String
@@ -5,6 +10,21 @@ model Template {
     templateName String
     templateDisc String?
     riskId       String?
+    // quality-bar-loop round 5 (Templates, industry-standards): draft/
+    // publish state, addressing the "no publish/draft state or usage
+    // tracking" gap -- every reference tool in this category (Typeform,
+    // Google Forms, SafetyCulture) distinguishes a half-built template
+    // from one that's ready to use. Defaults to PUBLISHED so every
+    // existing row (created before this field existed) keeps behaving
+    // exactly as it always has -- only the frontend's create flow opts
+    // new templates into starting as DRAFT (see CreateTemplatePage.tsx).
+    // Enforced at the one place a draft's incompleteness would actually
+    // hurt: StartInspectionModal's template picker excludes drafts via
+    // GET /template's new `status` filter, so nobody accidentally starts
+    // a real inspection against an unfinished checklist. Everywhere else
+    // (list, edit, report, duplicate) a draft behaves like any other
+    // template -- the goal is to gate usage, not to hide or lock it.
+    status       TemplateStatus @default(PUBLISHED)
     // quality-bar-loop round 4 (Templates, industry-standards): free-text
     // category/tag, addressing the "no categories/tagging/folders" gap --
     // every reference tool in this category (SafetyCulture/iAuditor,
