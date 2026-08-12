@@ -5,7 +5,7 @@ import path from 'path';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import globalErrorHandler from '../../app/middlewares/global_error_handler.js';
-import uploader from '../../app/middlewares/uploader.js';
+import uploader, { enforceUploadSizeLimit } from '../../app/middlewares/uploader.js';
 import { AppError } from '../../app/utils/app_error.js';
 import { cleanupUnhandledRequestFiles, markFileHandled } from '../../app/utils/upload_cleanup.js';
 
@@ -14,9 +14,13 @@ import { cleanupUnhandledRequestFiles, markFileHandled } from '../../app/utils/u
 // in local dev or CI, so create/clean it up around these tests.
 const UPLOAD_DIR = path.join(process.cwd(), 'uploads');
 
+// Mirrors the real route wiring (uploader.single('file') immediately
+// followed by enforceUploadSizeLimit — see every *.route.ts consumer) so
+// this suite exercises the same middleware chain production actually runs,
+// not just the multer instance in isolation.
 function buildApp() {
   const app = express();
-  app.post('/upload', uploader.single('file'), (req, res) => {
+  app.post('/upload', uploader.single('file'), enforceUploadSizeLimit, (req, res) => {
     res.status(200).json({ success: true, file: req.file });
   });
   app.use(globalErrorHandler);
@@ -149,7 +153,12 @@ describe('uploader middleware (file upload validation)', () => {
     expect(fs.existsSync(path.join(UPLOAD_DIR, 'script.sh'))).toBe(false);
   });
 
-  it('rejects a file over the 10MB size limit with 400 (multer LIMIT_FILE_SIZE)', async () => {
+  // Images/PDFs get a 10 MB budget; video gets 50 MB (see uploader.ts). Since
+  // multer's own top-level `limits.fileSize` has to be one flat number, it's
+  // set to the *largest* bucket (video's 50 MB) — a 10MB+1 PDF slips past
+  // multer itself and is instead caught by enforceUploadSizeLimit, the
+  // per-mimetype check that runs right after uploader.single(...).
+  it('rejects a non-video file over its 10MB per-type limit with 400 (enforceUploadSizeLimit)', async () => {
     const app = buildApp();
     const oversized = Buffer.alloc(10 * 1024 * 1024 + 1, 'a');
 
@@ -158,9 +167,6 @@ describe('uploader middleware (file upload validation)', () => {
       contentType: 'application/pdf',
     });
 
-    // The uploader middleware itself only enforces MIME type via fileFilter;
-    // the size limit is enforced by multer and surfaces through the shared
-    // global error handler as 400 (not 413 — see global_error_handler.ts).
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/10 MB/i);
   }, 15000);
@@ -175,6 +181,74 @@ describe('uploader middleware (file upload validation)', () => {
     });
 
     expect(res.status).toBe(200);
+  }, 15000);
+
+  it('accepts an MP4 video under its 50MB limit', async () => {
+    const app = buildApp();
+    const video = Buffer.alloc(1 * 1024 * 1024, 'a'); // 1 MB, well under budget
+
+    const res = await request(app).post('/upload').attach('file', video, {
+      filename: 'clip.mp4',
+      contentType: 'video/mp4',
+    });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('accepts a .mov (video/quicktime) and a .webm video', async () => {
+    const app = buildApp();
+
+    for (const [filename, contentType] of [
+      ['clip.mov', 'video/quicktime'],
+      ['clip.webm', 'video/webm'],
+    ] as const) {
+      const res = await request(app)
+        .post('/upload')
+        .attach('file', Buffer.from('fake video bytes'), { filename, contentType });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it('allows a video just under its 50MB limit through, well past the 10MB image/PDF budget', async () => {
+    const app = buildApp();
+    const justUnderVideoLimit = Buffer.alloc(50 * 1024 * 1024 - 1024, 'a');
+
+    const res = await request(app).post('/upload').attach('file', justUnderVideoLimit, {
+      filename: 'large-but-ok.mp4',
+      contentType: 'video/mp4',
+    });
+
+    expect(res.status).toBe(200);
+  }, 15000);
+
+  it('rejects a video over its 50MB per-type limit with 400 (enforceUploadSizeLimit)', async () => {
+    const app = buildApp();
+    const oversizedVideo = Buffer.alloc(50 * 1024 * 1024 + 1, 'a');
+
+    const res = await request(app).post('/upload').attach('file', oversizedVideo, {
+      filename: 'huge.mp4',
+      contentType: 'video/mp4',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/50 MB/i);
+  }, 15000);
+
+  // multer's own top-level limits.fileSize (the video bucket's 50 MB) is
+  // still the hard ceiling for every mimetype, video included — confirms
+  // enforceUploadSizeLimit isn't the *only* thing standing between a client
+  // and an unbounded upload.
+  it('rejects a file over the top-level 50MB multer limit regardless of type', async () => {
+    const app = buildApp();
+    const massivelyOversized = Buffer.alloc(50 * 1024 * 1024 + 1024, 'a');
+
+    const res = await request(app).post('/upload').attach('file', massivelyOversized, {
+      filename: 'way-too-big.mp4',
+      contentType: 'video/mp4',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/50 MB/i);
   }, 15000);
 
   // aexa-server#305 — uploader.ts writes multipart uploads to local disk
@@ -255,6 +329,29 @@ describe('uploader middleware (file upload validation)', () => {
 
       expect(fs.readdirSync(UPLOAD_DIR)).toHaveLength(0);
     });
+
+    // Found by review of the video-upload/per-type-size-limit PR: the file
+    // enforceUploadSizeLimit rejects has already been fully written to disk
+    // by multer by the time the size check runs (that's the whole point --
+    // the real size isn't known until then). enforceUploadSizeLimit itself
+    // deliberately does no cleanup (see its own comment in uploader.ts),
+    // relying on this same global_error_handler.ts safety net as every
+    // other post-multer rejection above -- this test actually exercises
+    // that path instead of just trusting the comment.
+    it('cleans up the local file when enforceUploadSizeLimit rejects it for exceeding its per-type budget', async () => {
+      const app = buildApp();
+      const oversized = Buffer.alloc(10 * 1024 * 1024 + 1, 'a');
+
+      const res = await request(app).post('/upload').attach('file', oversized, {
+        filename: 'huge.pdf',
+        contentType: 'application/pdf',
+      });
+
+      expect(res.status).toBe(400);
+      await flush();
+
+      expect(fs.readdirSync(UPLOAD_DIR)).toHaveLength(0);
+    }, 15000);
 
     it('the res.on("finish") safety net cleans up a file left unhandled on a successful (non-error) response', async () => {
       const app = express();

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import authExternal from '../../middlewares/auth_external.js';
 import RequestValidator from '../../middlewares/request_validator.js';
-import uploader from '../../middlewares/uploader.js';
+import uploader, { enforceUploadSizeLimit } from '../../middlewares/uploader.js';
 import { action_controller } from './action.controller.js';
 import { action_validations } from './action.validation.js';
 
@@ -19,6 +19,7 @@ router.post(
   '/attachment',
   auth('ORGANIZATION'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   action_controller.upload_action_attachment,
 );
 router.get('/:id', auth('ORGANIZATION'), action_controller.get_single_action);

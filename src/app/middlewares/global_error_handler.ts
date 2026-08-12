@@ -6,6 +6,7 @@ import handleZodError from '../errors/zodError.js';
 import { logger } from '../lib/logger.js';
 import { TErrorSources } from '../types/error.js';
 import { AppError } from '../utils/app_error.js';
+import { MAX_FILE_SIZE_BYTES } from './uploader.js';
 import { cleanupUnhandledRequestFiles } from '../utils/upload_cleanup.js';
 
 const globalErrorHandler: ErrorRequestHandler = (err, req, res, _next) => {
@@ -32,7 +33,12 @@ const globalErrorHandler: ErrorRequestHandler = (err, req, res, _next) => {
 
   if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
     statusCode = 400;
-    message = 'File exceeds the 10 MB size limit.';
+    // This is multer's own top-level `limits.fileSize`, the largest
+    // per-mimetype bucket (see uploader.ts) -- a genuinely oversized file
+    // of any type. A smaller file that's still over its own *tighter*
+    // per-type budget is instead caught by enforceUploadSizeLimit
+    // (uploader.ts), which throws its own AppError with the right number.
+    message = `File exceeds the ${Math.floor(MAX_FILE_SIZE_BYTES / (1024 * 1024))} MB size limit.`;
     errorSources = [{ path: 'file', message }];
   } else if (err instanceof ZodError) {
     const simplifiedError = handleZodError(err);

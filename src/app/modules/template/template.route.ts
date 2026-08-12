@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import RequestValidator from '../../middlewares/request_validator.js';
-import uploader from '../../middlewares/uploader.js';
+import uploader, { enforceUploadSizeLimit } from '../../middlewares/uploader.js';
 import { AppError } from '../../utils/app_error.js';
 import { template_controller } from './template.controller.js';
 import { template_validations } from './template.validation.js';
@@ -13,6 +13,7 @@ router.post(
   '/',
   auth('ORGANIZATION'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   (req, res, next) => {
     try {
       req.body = JSON.parse(req?.body?.data);
@@ -73,6 +74,7 @@ router.patch(
   '/:id',
   auth('ORGANIZATION'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   (req, res, next) => {
     try {
       req.body = JSON.parse(req?.body?.data);

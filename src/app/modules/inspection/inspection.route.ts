@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import RequestValidator from '../../middlewares/request_validator.js';
-import uploader from '../../middlewares/uploader.js';
+import uploader, { enforceUploadSizeLimit } from '../../middlewares/uploader.js';
 import { inspection_controller } from './inspection.controller.js';
 import { inspection_validations } from './inspection.validation.js';
 
@@ -18,6 +18,7 @@ router.post(
   '/upload-file-aws',
   auth('ORGANIZATION', 'ADMIN', 'USER'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   inspection_controller.upload_any_file_into_aws,
 );
 router.post(

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import RequestValidator from '../../middlewares/request_validator.js';
-import uploader from '../../middlewares/uploader.js';
+import uploader, { enforceUploadSizeLimit } from '../../middlewares/uploader.js';
 import { note_controller } from './note.controller.js';
 import { note_validations } from './note.validation.js';
 import { AppError } from '../../utils/app_error.js';
@@ -19,6 +19,7 @@ router.post(
   '/extract-note-from-file',
   auth('ORGANIZATION'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   (req, res, next) => {
     try {
       req.body = JSON.parse(req.body.data);

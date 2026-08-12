@@ -134,6 +134,12 @@ describe('global error handler (ticket #9)', () => {
   });
 
   describe('multer file size error', () => {
+    // uploader.ts's top-level multer `limits.fileSize` is set to the
+    // largest per-mimetype bucket (video's 50 MB, see uploader.ts) so a
+    // legitimate video upload isn't truncated mid-stream -- a smaller
+    // per-type budget (e.g. images/PDF at 10 MB) is instead enforced by
+    // enforceUploadSizeLimit, which throws its own AppError, not a
+    // multer.MulterError, so it never reaches this branch.
     it('returns 400 with a clear message for LIMIT_FILE_SIZE', () => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const multer = require('multer');
@@ -141,7 +147,7 @@ describe('global error handler (ticket #9)', () => {
 
       const { statusCode, body } = runHandler(err);
       expect(statusCode).toBe(400);
-      expect(body.message).toMatch(/10 MB/i);
+      expect(body.message).toMatch(/50 MB/i);
       expect(body).not.toHaveProperty('err');
     });
   });

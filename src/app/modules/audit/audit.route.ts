@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import RequestValidator from '../../middlewares/request_validator.js';
-import uploader from '../../middlewares/uploader.js';
+import uploader, { enforceUploadSizeLimit } from '../../middlewares/uploader.js';
 import { audit_controller } from './audit.controller.js';
 import { audit_validations } from './audit.validation.js';
 
@@ -22,6 +22,7 @@ router.post(
   '/attachment',
   auth('ORGANIZATION'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   audit_controller.upload_audit_report,
 );
 router.get('/:id', auth('ORGANIZATION'), audit_controller.get_single_audit);

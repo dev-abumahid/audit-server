@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import auth from '../../middlewares/auth.js';
 import RequestValidator from '../../middlewares/request_validator.js';
-import uploader from '../../middlewares/uploader.js';
+import uploader, { enforceUploadSizeLimit } from '../../middlewares/uploader.js';
 import { ai_controller } from './ai.controller.js';
 import { ai_validations } from './ai.validation.js';
 
@@ -17,6 +17,7 @@ router.post(
   '/generate-with-pdf',
   auth('ORGANIZATION'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   ai_controller.generate_template_with_pdf,
 );
 router.post(
@@ -41,6 +42,7 @@ router.post(
   '/upload-pdf-into-pinecone',
   auth('ORGANIZATION'),
   uploader.single('file'),
+  enforceUploadSizeLimit,
   ai_controller.upload_pdf_into_pinecone,
 );
 router.get(
