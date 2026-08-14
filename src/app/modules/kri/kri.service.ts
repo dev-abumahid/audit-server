@@ -147,9 +147,17 @@ const create_kri_into_db = async (req: Request) => {
   // KriReading commit atomically (a single Prisma nested write runs in one
   // implicit transaction).
   const now = new Date();
+  // Round-2 independent review of #328: the frontend never sends an
+  // explicit owner: "" on create (a blank field is omitted entirely), but
+  // owner has no .min(1) in create_kri's zod schema, so a direct API caller
+  // posting owner: "" would otherwise store a literal empty string here —
+  // the same "" vs NULL split update_kri_into_db already guards against.
+  // Normalizing on both paths is what actually backs the "no owner is
+  // always NULL" invariant, not just the update path.
   const result = await prisma.kri.create({
     data: {
       ...payload,
+      owner: payload.owner === '' ? null : payload.owner,
       org_account_id: ctx.organizationId,
       last_measured_at: now,
       readings: {
@@ -198,9 +206,19 @@ const update_kri_into_db = async (req: Request) => {
     throw new AppError('target_value and alert_threshold must be different', 400);
   }
 
+  // Independent review of #328: the frontend sends "" (not omitted) to
+  // clear a previously-set owner, so a bare `...safeBody` spread would leave
+  // an empty-string owner in the DB instead of NULL -- a real data-integrity
+  // split from a KRI that simply never had an owner set (which stays NULL,
+  // since create omits the key entirely rather than sending ""). Normalizing
+  // here means "no owner" is always NULL regardless of which path cleared
+  // it, so a future `WHERE owner IS NULL` query (an "unassigned KRIs"
+  // filter, a report) sees every unowned KRI, not just some of them.
+  const normalizedBody = safeBody.owner === '' ? { ...safeBody, owner: null } : safeBody;
+
   const result = await prisma.kri.update({
     where: { id },
-    data: { ...safeBody, org_account_id: ctx.organizationId },
+    data: { ...normalizedBody, org_account_id: ctx.organizationId },
   });
   return with_status(result);
 };

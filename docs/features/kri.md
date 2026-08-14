@@ -1,7 +1,9 @@
 # KRIs (Key Risk Indicators)
 
 A `Kri` always belongs to a parent `Risk` — never standalone. `current_value`, `alert_threshold`,
-`target_value`, optional `frequency` (e.g. "monthly").
+`target_value`, optional `frequency` (e.g. "monthly"), optional `owner` (free-text name of who's
+responsible for this KRI — same convention as `ComplianceObligation.owner`/`AuditEngagement.owner`,
+not an `OrgMember`/`Account` FK).
 
 ## Derived status
 

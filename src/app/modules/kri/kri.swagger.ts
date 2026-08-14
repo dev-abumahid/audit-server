@@ -11,6 +11,7 @@ export const kriSwaggerDocs = {
             example: JSON.stringify({
               risk_id: '',
               name: 'Supplier Lead Time',
+              owner: 'Jane Procurement',
               unit: 'days',
               current_value: 25,
               alert_threshold: 30,
@@ -63,6 +64,7 @@ export const kriSwaggerDocs = {
           'application/json': {
             example: JSON.stringify({
               name: 'Supplier Lead Time',
+              owner: 'Jane Procurement',
               unit: 'days',
               alert_threshold: 30,
               target_value: 20,

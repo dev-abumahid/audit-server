@@ -14,6 +14,7 @@ const create_kri = z
   .object({
     risk_id: z.string().min(1, 'risk_id is required'),
     name: z.string().min(1, 'Name is required'),
+    owner: z.string().optional(),
     unit: z.string().min(1, 'Unit is required'),
     current_value: z.number(),
     alert_threshold: z.number(),
@@ -31,6 +32,7 @@ const create_kri = z
 const update_kri = z
   .object({
     name: z.string().min(1).optional(),
+    owner: z.string().optional(),
     unit: z.string().min(1).optional(),
     alert_threshold: z.number().optional(),
     target_value: z.number().optional(),

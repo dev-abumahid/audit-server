@@ -5,6 +5,10 @@ model Kri {
     risk_id         String
     risk            Risk     @relation(fields: [risk_id], references: [id], onDelete: Cascade)
     name            String
+    // Free-text owner name, matching ComplianceObligation.owner /
+    // AuditEngagement.lead_auditor's precedent (not an OrgMember FK) — see
+    // compliance.prisma's identical comment for the full reasoning.
+    owner           String?
     unit            String
     current_value   Float
     alert_threshold Float

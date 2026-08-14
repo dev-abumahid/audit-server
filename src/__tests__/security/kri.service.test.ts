@@ -44,6 +44,7 @@ import {
   compute_kri_status,
   kri_service,
 } from '../../app/modules/kri/kri.service.js';
+import { kri_validations } from '../../app/modules/kri/kri.validation.js';
 
 const db = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const kriReadingDb = prisma.kriReading as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -311,6 +312,66 @@ describe('kri service — org scoping and role gating', () => {
         create: { org_account_id: ORG_A, value: 5 },
       });
     });
+
+    // KRI owner field (#252 industry-standards follow-up): free-text owner,
+    // matching ComplianceObligation.owner's convention — not an OrgMember FK.
+    // Validated by the zod allowlist tests below; here we confirm the
+    // service layer passes it straight through to Prisma once validated.
+    it('passes owner through to the create payload when supplied', async () => {
+      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.create.mockResolvedValue({
+        id: 'k1',
+        owner: 'Jane Procurement',
+        current_value: 1,
+        alert_threshold: 2,
+        target_value: 3,
+      });
+
+      await kri_service.create_kri_into_db(
+        makeReq({
+          body: {
+            risk_id: 'r1',
+            owner: 'Jane Procurement',
+            current_value: 1,
+            alert_threshold: 2,
+            target_value: 3,
+          },
+        }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.owner).toBe('Jane Procurement');
+    });
+
+    // Round-2 independent review of #328: create_kri's zod schema has no
+    // .min(1) on owner, so a direct API caller (not just the frontend, which
+    // never sends this) posting owner: "" must still land as NULL, not a
+    // stored empty string -- same invariant update_kri_into_db enforces.
+    it('normalizes an empty-string owner to null on create, same as update', async () => {
+      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.create.mockResolvedValue({
+        id: 'k1',
+        owner: null,
+        current_value: 1,
+        alert_threshold: 2,
+        target_value: 3,
+      });
+
+      await kri_service.create_kri_into_db(
+        makeReq({
+          body: {
+            risk_id: 'r1',
+            owner: '',
+            current_value: 1,
+            alert_threshold: 2,
+            target_value: 3,
+          },
+        }),
+      );
+
+      const callArg = db.create.mock.calls[0][0];
+      expect(callArg.data.owner).toBeNull();
+    });
   });
 
   describe('update_kri_into_db', () => {
@@ -380,6 +441,45 @@ describe('kri service — org scoping and role gating', () => {
         kri_service.update_kri_into_db(makeReq({ params: { id: 'org-b-kri' } })),
       ).rejects.toMatchObject({ statusCode: 404 });
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('passes owner through to the update payload when supplied', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'k1',
+        org_account_id: ORG_A,
+        risk_id: 'r1',
+        alert_threshold: 30,
+        target_value: 20,
+      });
+      db.update.mockResolvedValue({});
+
+      await kri_service.update_kri_into_db(
+        makeReq({ params: { id: 'k1' }, body: { owner: 'Jane Procurement' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.owner).toBe('Jane Procurement');
+    });
+
+    // Independent review of #328: the frontend sends "" (not omitted) to
+    // clear a previously-set owner -- normalized to NULL here so "no owner"
+    // is always NULL regardless of whether a KRI simply never had one set
+    // (create omits the key entirely) or had one cleared via edit.
+    it('normalizes an empty-string owner to null so clearing it produces a real NULL, not an empty string', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'k1',
+        org_account_id: ORG_A,
+        risk_id: 'r1',
+        owner: 'Jane Procurement',
+        alert_threshold: 30,
+        target_value: 20,
+      });
+      db.update.mockResolvedValue({});
+
+      await kri_service.update_kri_into_db(makeReq({ params: { id: 'k1' }, body: { owner: '' } }));
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.owner).toBeNull();
     });
   });
 
@@ -832,5 +932,41 @@ describe('kri service — org scoping and role gating', () => {
 
       expect(db.delete).not.toHaveBeenCalled();
     });
+  });
+});
+
+// KRI owner field: create_kri/update_kri use explicit zod allowlists (unlike
+// Compliance's looser Partial<KRI> pattern), so owner must be listed
+// explicitly on both schemas or it gets silently stripped by zod before the
+// service layer ever sees it.
+describe('kri_validations — owner field allowlisting', () => {
+  it('create_kri accepts an owner string and keeps it in the parsed payload', () => {
+    const parsed = kri_validations.create_kri.parse({
+      risk_id: 'r1',
+      name: 'Supplier Lead Time',
+      owner: 'Jane Procurement',
+      unit: 'days',
+      current_value: 25,
+      alert_threshold: 30,
+      target_value: 20,
+    });
+    expect(parsed.owner).toBe('Jane Procurement');
+  });
+
+  it('create_kri succeeds without an owner (optional field)', () => {
+    const parsed = kri_validations.create_kri.parse({
+      risk_id: 'r1',
+      name: 'Supplier Lead Time',
+      unit: 'days',
+      current_value: 25,
+      alert_threshold: 30,
+      target_value: 20,
+    });
+    expect(parsed.owner).toBeUndefined();
+  });
+
+  it('update_kri accepts an owner-only partial update', () => {
+    const parsed = kri_validations.update_kri.parse({ owner: 'Jane Procurement' });
+    expect(parsed.owner).toBe('Jane Procurement');
   });
 });
