@@ -19,6 +19,13 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findMany: vi.fn(),
       count: vi.fn(),
     },
+    // Quality-bar-loop industry-standards gap: field-level edit-history log,
+    // written inside update_compliance_into_db's own $transaction.
+    complianceObligationEdit: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      count: vi.fn(),
+    },
     site: {
       findFirst: vi.fn(),
     },
@@ -39,6 +46,7 @@ vi.mock('../../app/utils/cloudinary.js', () => ({
 
 import { prisma } from '../../app/lib/prisma.js';
 import {
+  build_compliance_edit_diff,
   compliance_service,
   compute_obligation_overdue,
 } from '../../app/modules/compliance/compliance.service.js';
@@ -47,6 +55,10 @@ import uploadCloud from '../../app/utils/cloudinary.js';
 
 const db = prisma.complianceObligation as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const attestationDb = prisma.complianceAttestation as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const editHistoryDb = prisma.complianceObligationEdit as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -129,6 +141,80 @@ describe('compute_obligation_overdue', () => {
         false,
       );
     });
+  });
+});
+
+// Quality-bar-loop industry-standards gap: the field-level diff builder that
+// backs ComplianceObligationEdit.
+describe('build_compliance_edit_diff', () => {
+  it('returns null when the patch touches no tracked fields', () => {
+    expect(
+      build_compliance_edit_diff({ title: 'A', ai_generated: false }, { ai_generated: true }),
+    ).toBeNull();
+  });
+
+  it('returns null when a tracked field is present in the patch but unchanged', () => {
+    expect(build_compliance_edit_diff({ title: 'Same' }, { title: 'Same' })).toBeNull();
+  });
+
+  it('diffs a single changed tracked field', () => {
+    expect(build_compliance_edit_diff({ title: 'Old' }, { title: 'New' })).toEqual({
+      title: { old: 'Old', new: 'New' },
+    });
+  });
+
+  it('diffs multiple changed tracked fields in one patch', () => {
+    expect(
+      build_compliance_edit_diff(
+        { title: 'Old', owner: 'Alice', status: 'in_progress' },
+        { title: 'New', owner: 'Bob', status: 'in_progress' },
+      ),
+    ).toEqual({
+      title: { old: 'Old', new: 'New' },
+      owner: { old: 'Alice', new: 'Bob' },
+    });
+  });
+
+  // A PATCH that never mentions `owner` must never fabricate a diff entry
+  // for it just because some other field also happens to differ from a
+  // hypothetical default -- only keys actually present on `patch` count,
+  // mirroring Prisma's own "undefined = don't touch" semantics.
+  it('ignores tracked fields not present in the patch at all', () => {
+    expect(build_compliance_edit_diff({ title: 'Old', owner: 'Alice' }, { title: 'New' })).toEqual({
+      title: { old: 'Old', new: 'New' },
+    });
+  });
+
+  it('normalizes Date values to ISO strings so a Date vs. equivalent ISO string is not a false-positive change', () => {
+    const d = new Date('2026-12-31T00:00:00.000Z');
+    expect(
+      build_compliance_edit_diff({ due_date: d }, { due_date: '2026-12-31T00:00:00.000Z' }),
+    ).toBeNull();
+  });
+
+  it('records a real due_date change with both values as ISO strings', () => {
+    const oldDate = new Date('2026-01-01T00:00:00.000Z');
+    const newDate = new Date('2026-06-01T00:00:00.000Z');
+    expect(build_compliance_edit_diff({ due_date: oldDate }, { due_date: newDate })).toEqual({
+      due_date: { old: '2026-01-01T00:00:00.000Z', new: '2026-06-01T00:00:00.000Z' },
+    });
+  });
+
+  it('treats undefined/null existing values as equal to a null patch value (no diff)', () => {
+    expect(build_compliance_edit_diff({ owner: undefined }, { owner: null })).toBeNull();
+  });
+
+  it('ignores explicitly untracked fields even when present in the patch (is_edited, next_review_date, attachments)', () => {
+    expect(
+      build_compliance_edit_diff(
+        { is_edited: false, next_review_date: null, attachments: [] },
+        {
+          is_edited: true,
+          next_review_date: new Date('2099-01-01'),
+          attachments: ['https://example.com/a.pdf'],
+        },
+      ),
+    ).toBeNull();
   });
 });
 
@@ -922,6 +1008,91 @@ describe('compliance service — org scoping (issue #93)', () => {
         expect(db.update).toHaveBeenCalled();
       });
     });
+
+    // Quality-bar-loop industry-standards gap: the edit-history write, done
+    // inside the same $transaction as the row update itself.
+    describe('edit-history logging (quality-bar-loop)', () => {
+      it('writes a ComplianceObligationEdit row inside the same transaction as the update when a tracked field changes', async () => {
+        db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, title: 'Old title' });
+        db.update.mockResolvedValue({ id: 'c1' });
+        editHistoryDb.create.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { title: 'New title' } }),
+        );
+
+        expect(txFn).toHaveBeenCalledTimes(1);
+        expect(editHistoryDb.create).toHaveBeenCalledWith({
+          data: {
+            org_account_id: ORG_A,
+            obligation_id: 'c1',
+            edited_by: ORG_A,
+            changes: { title: { old: 'Old title', new: 'New title' } },
+          },
+        });
+      });
+
+      it('does NOT write an edit-history row when the patch touches no tracked fields', async () => {
+        db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, is_edited: false });
+        db.update.mockResolvedValue({ id: 'c1' });
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { is_edited: true } }),
+        );
+
+        expect(editHistoryDb.create).not.toHaveBeenCalled();
+      });
+
+      it('does NOT write an edit-history row when a tracked field is present but unchanged', async () => {
+        db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, title: 'Same title' });
+        db.update.mockResolvedValue({ id: 'c1' });
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({ params: { id: 'c1' }, body: { title: 'Same title' } }),
+        );
+
+        expect(editHistoryDb.create).not.toHaveBeenCalled();
+      });
+
+      it('captures multiple simultaneous tracked-field changes in one edit-history row', async () => {
+        db.findFirst.mockResolvedValue({
+          id: 'c1',
+          org_account_id: ORG_A,
+          title: 'Old title',
+          owner: 'Alice',
+          status: 'in_progress',
+        });
+        db.update.mockResolvedValue({ id: 'c1' });
+        editHistoryDb.create.mockResolvedValue({});
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { title: 'New title', owner: 'Bob', status: 'in_progress' },
+          }),
+        );
+
+        const [{ data }] = editHistoryDb.create.mock.calls[0];
+        expect(data.changes).toEqual({
+          title: { old: 'Old title', new: 'New title' },
+          owner: { old: 'Alice', new: 'Bob' },
+        });
+      });
+
+      it('does NOT log a change to attachments (explicitly deferred, its own history concern)', async () => {
+        db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A, attachments: [] });
+        db.update.mockResolvedValue({ id: 'c1' });
+
+        await compliance_service.update_compliance_into_db(
+          makeReq({
+            params: { id: 'c1' },
+            body: { attachments: ['https://cdn.example/e.pdf'] },
+          }),
+        );
+
+        expect(editHistoryDb.create).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // Issue #97: Three Lines of Defense classification. update_compliance_into_db
@@ -1224,6 +1395,48 @@ describe('compliance service — org scoping (issue #93)', () => {
       const [callArg] = attestationDb.findMany.mock.calls[0];
       expect(callArg.where).toEqual({ obligation_id: 'c1' });
       expect(callArg.orderBy).toEqual({ attested_at: 'desc' });
+      expect(result.data).toHaveLength(2);
+      expect(result.meta.total).toBe(2);
+    });
+  });
+
+  describe('get_compliance_edit_history_from_db (quality-bar-loop industry-standards gap)', () => {
+    it('throws 404 for another org obligation', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.get_compliance_edit_history_from_db(
+          makeReq({ params: { id: 'org-b-c1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(editHistoryDb.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns the edit history for the obligation, newest first, org-scoped via the obligation ownership check', async () => {
+      db.findFirst.mockResolvedValue({ id: 'c1', org_account_id: ORG_A });
+      editHistoryDb.findMany.mockResolvedValue([
+        {
+          id: 'edit-2',
+          edited_at: new Date('2026-02-01'),
+          changes: { status: { old: 'in_progress', new: 'compliant' } },
+        },
+        {
+          id: 'edit-1',
+          edited_at: new Date('2026-01-01'),
+          changes: { title: { old: 'Old title', new: 'New title' } },
+        },
+      ]);
+      editHistoryDb.count.mockResolvedValue(2);
+
+      const result = await compliance_service.get_compliance_edit_history_from_db(
+        makeReq({ params: { id: 'c1' } }),
+      );
+
+      expect(db.findFirst).toHaveBeenCalledWith({ where: { id: 'c1', org_account_id: ORG_A } });
+      const [callArg] = editHistoryDb.findMany.mock.calls[0];
+      expect(callArg.where).toEqual({ obligation_id: 'c1' });
+      expect(callArg.orderBy).toEqual({ edited_at: 'desc' });
       expect(result.data).toHaveLength(2);
       expect(result.meta.total).toBe(2);
     });

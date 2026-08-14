@@ -101,6 +101,17 @@ const get_compliance_attestations = catchAsync(async (req, res) => {
   });
 });
 
+const get_compliance_edit_history = catchAsync(async (req, res) => {
+  const result = await compliance_service.get_compliance_edit_history_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Compliance edit history fetched successfully.',
+    data: result.data,
+    meta: result.meta,
+  });
+});
+
 export const compliance_controller = {
   get_all_compliance,
   get_single_compliance,
@@ -111,4 +122,5 @@ export const compliance_controller = {
   get_compliance_scorecard,
   attest_compliance,
   get_compliance_attestations,
+  get_compliance_edit_history,
 };

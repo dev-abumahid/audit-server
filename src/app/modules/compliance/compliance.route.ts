@@ -43,5 +43,10 @@ router.get(
   auth('ORGANIZATION'),
   compliance_controller.get_compliance_attestations,
 );
+router.get(
+  '/:id/edit-history',
+  auth('ORGANIZATION'),
+  compliance_controller.get_compliance_edit_history,
+);
 
 export default router;

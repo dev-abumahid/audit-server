@@ -43,6 +43,27 @@ obligation was previously indistinguishable from a one-time one.
   separate, larger decision reserved for closing something; re-attestation here just answers
   "has someone recently reconfirmed this still holds."
 
+## Edit history (quality-bar-loop industry-standards gap)
+
+Distinct from re-attestation: `ComplianceObligationEdit` is an **append-only** log of direct
+field mutations (`title`/`description`/`domain`/`site_id`/`status`/`owner`/`due_date`/
+`regulation_reference`/`recurrence`/`line_of_defense` — see `compliance.service.ts`'s
+`TRACKED_HISTORY_FIELDS`). A re-attestation records "someone reconfirmed this still holds"; an
+edit-history row records "this field was actually changed, from X to Y, by whom, when."
+
+- `build_compliance_edit_diff` computes the field-level old/new pairs against the row as it stood
+  before the PATCH, considering only fields actually present in the request body (Prisma's own
+  "undefined = don't touch" semantics) — a PATCH that never mentions `owner` never produces a
+  synthetic diff entry for it.
+- Deliberately excludes `is_edited`/`next_review_date`/`updatedAt` (meta/derived fields, not
+  user-facing changes) and `attachments` (array diffing is its own history concern, explicitly
+  deferred rather than silently dropped).
+- Written inside the **same `$transaction`** as `update_compliance_into_db`'s own row update, so a
+  history entry is never recorded without the actual change landing, and vice versa — same
+  reasoning as `attest_compliance_into_db`'s attestation-insert-plus-update transaction.
+- `GET /compliance/{id}/edit-history` returns the log for one obligation, newest first,
+  paginated identically to `/attestations`.
+
 ## Scorecard
 
 `get_compliance_scorecard_from_db` computes at request time (no caching, Phase 1): overall

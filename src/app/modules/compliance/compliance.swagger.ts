@@ -129,6 +129,25 @@ export const complianceSwaggerDocs = {
     },
   },
 
+  '/api/compliance/{id}/edit-history': {
+    get: {
+      tags: ['compliance'],
+      summary: "Get a compliance obligation's edit history",
+      description:
+        'Returns every recorded field-level edit (title/description/domain/site_id/status/owner/due_date/regulation_reference/recurrence/line_of_defense) for this obligation, newest first. Distinct from /attestations, which logs re-confirmation events rather than edits.',
+      parameters: [
+        { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+        { name: 'page', in: 'query', required: false, schema: { type: 'number' } },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'number' } },
+      ],
+      responses: {
+        200: { description: 'compliance edit history fetched successfully' },
+        401: { description: 'unauthorized' },
+        404: { description: 'compliance obligation not found' },
+      },
+    },
+  },
+
   '/api/compliance/{id}': {
     get: {
       tags: ['compliance'],

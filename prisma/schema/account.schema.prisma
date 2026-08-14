@@ -45,6 +45,7 @@ model Account {
     auditEngagements    AuditEngagement[]
     complianceObligations ComplianceObligation[]
     complianceAttestations ComplianceAttestation[]
+    complianceObligationEdits ComplianceObligationEdit[]
     reports             Report[]
     // aexa-frontend#141 stage 2: threat intelligence persistence.
     intelligenceItems IntelligenceItem[]
