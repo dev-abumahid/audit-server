@@ -64,14 +64,25 @@ const create_alert_into_db = async (req: Request) => {
 };
 
 /**
- * Marking an alert read/unread is not gated by assertCanWriteOrgResource —
- * unlike creating or deleting an alert, this is a low-stakes per-viewer
- * acknowledgement action, not an edit to the underlying org resource, so
- * any active org member (any role) may do it.
+ * Found on audit (no evidence in aexa-frontend of a server-side role check
+ * here, prompting this repo to be checked directly): `is_read` is a single
+ * `Boolean` column directly on `Alert` (see prisma/schema/alert.prisma) —
+ * there is no per-account read-state join table, so this is NOT a
+ * per-viewer acknowledgement the way an unread-badge-per-user model would
+ * be. It's one shared, org-wide flag: whoever calls this clears (or sets)
+ * the unread state for every org member at once. A previous version of
+ * this comment justified skipping assertCanWriteOrgResource on exactly the
+ * "low-stakes per-viewer acknowledgement" premise this schema disproves —
+ * without this gate, any active member of any role (including VIEWER)
+ * could silently clear the unread flag on a critical alert org-wide, e.g.
+ * hiding it from an ADMIN/LEAD_AUDITOR who hasn't seen it yet. Same class
+ * of bug assertCanWriteOrgResource's own docs describe for Site/Template:
+ * a write with org-anchor scoping but no role check.
  */
 const mark_alert_read_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
   const { id } = req.params as Record<string, string>;
   const { is_read } = req.body as { is_read: boolean };
 

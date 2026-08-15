@@ -186,8 +186,40 @@ describe('alert service — org scoping and role gating', () => {
   });
 
   describe('mark_alert_read_into_db', () => {
-    it('is NOT role-gated — a VIEWER can mark an alert read', async () => {
+    // Found on audit: `is_read` is a single shared column on Alert (no
+    // per-account read-state join table), so marking one read/unread
+    // changes what EVERY org member sees, not just the caller's own view.
+    // This endpoint previously had no role check at all -- this test used
+    // to assert that as intended behavior. Any VIEWER could silently clear
+    // the unread flag on a critical alert org-wide. Same role gate as
+    // create/delete now.
+    it('VIEWER cannot mark an alert read — is_read is an org-wide flag, not a per-viewer acknowledgement', async () => {
       mockMembership('VIEWER');
+
+      await expect(
+        alert_service.mark_alert_read_into_db(
+          makeReq({ params: { id: 'a1' }, body: { is_read: true } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.findFirst).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('LIGHT_USER cannot mark an alert read', async () => {
+      mockMembership('LIGHT_USER');
+
+      await expect(
+        alert_service.mark_alert_read_into_db(
+          makeReq({ params: { id: 'a1' }, body: { is_read: true } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can mark an alert read', async () => {
+      mockMembership('ADMIN');
       db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
       db.update.mockResolvedValue({ id: 'a1', is_read: true });
 
@@ -199,7 +231,20 @@ describe('alert service — org scoping and role gating', () => {
       expect(db.update).toHaveBeenCalledWith({ where: { id: 'a1' }, data: { is_read: true } });
     });
 
+    it('LEAD_AUDITOR can mark an alert read', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'a1', is_read: true });
+
+      const result = await alert_service.mark_alert_read_into_db(
+        makeReq({ params: { id: 'a1' }, body: { is_read: true } }),
+      );
+
+      expect(result.is_read).toBe(true);
+    });
+
     it('throws 404 for another org alert', async () => {
+      mockMembership('ADMIN');
       db.findFirst.mockResolvedValue(null);
 
       await expect(
