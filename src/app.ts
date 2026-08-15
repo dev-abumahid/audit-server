@@ -57,7 +57,12 @@ if (isDocsRouteEnabled(configs.env)) {
 // cors middleware
 app.use(
   cors({
-    origin: ['http://localhost:5173', 'https://globalriskcore.com'],
+    origin: [
+      'http://localhost:5173',
+      'https://globalriskcore.com',
+      'https://qiyrix.com',
+      'https://www.qiyrix.com',
+    ],
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'PUT'],
     credentials: true,
   }),
