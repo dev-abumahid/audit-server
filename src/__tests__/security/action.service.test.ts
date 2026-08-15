@@ -218,6 +218,95 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(callArg.where).not.toHaveProperty('auditEngagementId');
     });
 
+    // quality-bar-loop round (Audit Missions efficiency/resilience): the
+    // frontend's batched remediation-status fetch (aexa-frontend#902) now
+    // sends every visible completed engagement's id as one comma-separated
+    // auditEngagementId value instead of firing one request per engagement.
+    it('wraps a comma-separated auditEngagementId list in a Prisma "in" clause', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(
+        makeReq({ query: { auditEngagementId: 'eng-1,eng-2,eng-3' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orgAccountId: ORG_A, auditEngagementId: { in: ['eng-1', 'eng-2', 'eng-3'] } },
+        }),
+      );
+    });
+
+    // The single-id path must stay a plain string match (not wrapped in
+    // `{in: [...]}`) since every other caller of this endpoint still passes
+    // exactly one id -- covered by the plain 'includes auditEngagementId in
+    // the WHERE clause when provided' test above, asserted again here
+    // explicitly against a single-element comma-free value for clarity.
+    it('does not wrap a single auditEngagementId in an "in" clause', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(
+        makeReq({ query: { auditEngagementId: 'eng-1' } }),
+      );
+
+      const callArg = db.findMany.mock.calls[0][0];
+      expect(callArg.where.auditEngagementId).toBe('eng-1');
+    });
+
+    // Review-round regression coverage: a trailing/leading comma used to
+    // fall back to the raw, unfiltered auditEngagementId string (e.g.
+    // "eng-1,") instead of the single parsed id, silently matching zero
+    // rows in the DB instead of the intended engagement.
+    it('resolves to the single parsed id, not the raw string, when the list has a trailing comma', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(
+        makeReq({ query: { auditEngagementId: 'eng-1,' } }),
+      );
+
+      const callArg = db.findMany.mock.calls[0][0];
+      expect(callArg.where.auditEngagementId).toBe('eng-1');
+    });
+
+    it('trims whitespace around each id in a comma-separated list', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(
+        makeReq({ query: { auditEngagementId: 'eng-1, eng-2 ' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orgAccountId: ORG_A, auditEngagementId: { in: ['eng-1', 'eng-2'] } },
+        }),
+      );
+    });
+
+    // Review-round regression coverage: an all-comma/whitespace input left
+    // `ids` empty, so the where clause fell back to `ids[0]` (`undefined`)
+    // -- Prisma treats an undefined field value as "no filter", not "match
+    // nothing", so this silently returned every action in the org instead
+    // of failing closed like every other non-matching value does.
+    it('fails closed (matches nothing) instead of dropping the filter when every id is empty after trimming', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(
+        makeReq({ query: { auditEngagementId: ',, ,' } }),
+      );
+
+      const callArg = db.findMany.mock.calls[0][0];
+      // Pinned to the exact value, not just "not undefined" -- a still-broken
+      // variant that set this to `null` instead would pass a looser check
+      // but be worse than the original bug: for a nullable column, `null`
+      // means Prisma matches "IS NULL", leaking every action with no
+      // engagement at all instead of genuinely matching zero rows.
+      expect(callArg.where.auditEngagementId).toBe('');
+    });
+
     // Issue #162 (follow-up to #126): the list endpoint used to spread the
     // full MESSAGES_INCLUDE (message bodies + sender account/profile) on
     // every row just so aexa-frontend's list badge could show a count.

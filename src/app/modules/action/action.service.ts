@@ -128,7 +128,31 @@ const get_all_action_from_db = async (req: Request) => {
     whereCondition.inspectionId = inspectionId;
   }
   if (auditEngagementId) {
-    whereCondition.auditEngagementId = auditEngagementId;
+    // quality-bar-loop round (Audit Missions efficiency, fresh-panel
+    // regression finding): the frontend's per-completed-engagement
+    // remediation-status strip (aexa-frontend#902) originally fired one
+    // GET /action per row on mount -- an N+1 pattern that fanned out to
+    // ~100 simultaneous requests when the page's status filter narrowed
+    // to "Completed". Accepting a comma-separated list here (still a
+    // single, unchanged code path for the single-id case every other
+    // caller uses) lets the frontend fetch every visible completed
+    // engagement's findings in ONE request instead, keyed by
+    // auditEngagementId client-side after the fact.
+    const ids = auditEngagementId
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean);
+    // Review-round finding: an all-comma/whitespace input (e.g. ",,") left
+    // `ids` empty, so `ids[0]` was `undefined` -- Prisma treats an
+    // `undefined` where-clause value as "no filter" (not "match nothing"),
+    // which silently fell through to every action in the org instead of
+    // failing closed. Match the pre-batching contract (a non-matching value
+    // returns zero rows) by matching a value that can never equal a real id.
+    if (ids.length === 0) {
+      whereCondition.auditEngagementId = '';
+    } else {
+      whereCondition.auditEngagementId = ids.length > 1 ? { in: ids } : ids[0];
+    }
   }
 
   // Role scoping (issue #55 slice 3+4): Lead Auditor / scoped Viewer see
