@@ -1,16 +1,4 @@
 services:
-  # risk-management-server:
-  #   image: techzaa/risk-management-server:latest
-  #   container_name: risk-management-server
-  #   restart: unless-stopped
-  #   ports:
-  #     - '5002:5002'
-  #   depends_on:
-  #     - postgres
-  #     - redis
-  #   env_file:
-  #     - .env
-
   postgres:
     image: postgres:16
     container_name: server_database
