@@ -104,6 +104,7 @@ const get_all_action_from_db = async (req: Request) => {
   const searchTerm = (req.query.searchTerm as string) || '';
   const siteId = (req.query.siteId as string) || '';
   const inspectionId = (req.query.inspectionId as string) || '';
+  const auditEngagementId = (req.query.auditEngagementId as string) || '';
 
   const pagination = paginationHelper({
     page: req.query.page as string,
@@ -125,6 +126,9 @@ const get_all_action_from_db = async (req: Request) => {
   }
   if (inspectionId) {
     whereCondition.inspectionId = inspectionId;
+  }
+  if (auditEngagementId) {
+    whereCondition.auditEngagementId = auditEngagementId;
   }
 
   // Role scoping (issue #55 slice 3+4): Lead Auditor / scoped Viewer see

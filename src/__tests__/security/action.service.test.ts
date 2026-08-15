@@ -193,6 +193,31 @@ describe('action service — org scoping (ticket #6)', () => {
       expect(callArg.where).not.toHaveProperty('inspectionId');
     });
 
+    it('includes auditEngagementId in the WHERE clause when provided', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(
+        makeReq({ query: { auditEngagementId: 'eng-1' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orgAccountId: ORG_A, auditEngagementId: 'eng-1' },
+        }),
+      );
+    });
+
+    it('does not filter by auditEngagementId when not provided', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await action_service.get_all_action_from_db(makeReq());
+
+      const callArg = db.findMany.mock.calls[0][0];
+      expect(callArg.where).not.toHaveProperty('auditEngagementId');
+    });
+
     // Issue #162 (follow-up to #126): the list endpoint used to spread the
     // full MESSAGES_INCLUDE (message bodies + sender account/profile) on
     // every row just so aexa-frontend's list badge could show a count.

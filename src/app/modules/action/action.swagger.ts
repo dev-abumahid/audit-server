@@ -61,6 +61,12 @@ export const actionSwaggerDocs = {
           schema: { type: 'string' },
         },
         {
+          name: 'auditEngagementId',
+          in: 'query',
+          required: false,
+          schema: { type: 'string' },
+        },
+        {
           name: 'page',
           in: 'query',
           required: false,
