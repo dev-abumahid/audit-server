@@ -63,7 +63,7 @@ jobs:
             echo "IS_GOOGLE_LOGIN=true" >> .env
             echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}" >> .env
             echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}" >> .env
-            echo "GOOGLE_CALLBACK_URL=https://api.globalriskcore.com/api/auth/social/google/callback" >> .env
+            echo "GOOGLE_CALLBACK_URL=https://api.qiyrix.com/api/auth/social/google/callback" >> .env
 
             echo "Pulling latest image..."
             docker compose pull
