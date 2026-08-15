@@ -76,20 +76,37 @@ const create_compliance = z.object({
   line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
 });
 
-// On UPDATE, `site_id` needs three-way handling that create's "'' -> undefined"
-// normalization can't express:
+// On UPDATE, `site_id`/`regulation_reference`/`recurrence` need three-way
+// handling that create's "'' -> undefined" normalization can't express:
 //   - undefined (field absent from the PATCH body) -> leave the column
 //     unchanged (Prisma treats `undefined` as "don't touch").
-//   - null or "" (the frontend edit form sends null when the user picks
-//     "Org-wide") -> clear the scope, i.e. write NULL.
-//   - a real string -> re-scope to that site.
-// The create schema coerced null/"" to undefined, which made "leave unchanged"
-// and "make org-wide" indistinguishable — so a site-scoped obligation could
-// never be reset to org-wide (the PATCH reported success but silently kept the
-// old site). Override site_id here so an explicit null/"" reaches Prisma as
-// null. See aexa-server#204.
+//   - null or "" (the frontend edit form sends null for a field the user
+//     left blank) -> clear it, i.e. write NULL.
+//   - a real string -> set/re-scope to that value.
+// The create schema coerced null/"" to undefined, which made "leave
+// unchanged" and "clear this field" indistinguishable on UPDATE — see
+// aexa-server#204 for site_id's own version of this bug (a site-scoped
+// obligation could never be reset to org-wide; the PATCH reported success
+// but silently kept the old site).
+//
+// regulation_reference/recurrence had the same gap, but manifesting worse:
+// since create_compliance.partial() only widens `z.string().optional()` to
+// itself (still non-nullable), ANY edit to an obligation whose
+// regulation_reference/recurrence were already unset -- not just an attempt
+// to clear a previously-set value -- 400'd outright, because the frontend's
+// edit form always resends the current (possibly blank -> null) value for
+// every field on every save, not just the fields actually being changed.
+// Found live-verifying the edit-history feature (aexa-frontend PR
+// feat/compliance-edit-history-ui). The service layer already anticipated
+// `null` here (computeNextReviewDate's own signature is
+// `string | null | undefined`) — only this schema was blocking it.
 const update_compliance = create_compliance.partial().extend({
   site_id: z.preprocess((v) => (v === '' ? null : v), z.string().nullable().optional()),
+  regulation_reference: z.preprocess(
+    (v) => (v === '' ? null : v),
+    z.string().nullable().optional(),
+  ),
+  recurrence: z.preprocess((v) => (v === '' ? null : v), z.string().nullable().optional()),
 });
 
 // aexa-server#250: re-attestation submission — just an optional note, since

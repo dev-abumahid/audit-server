@@ -1862,6 +1862,91 @@ describe('compliance validation schemas', () => {
     });
   });
 
+  // Found live-verifying the edit-history feature (aexa-frontend PR
+  // feat/compliance-edit-history-ui): the frontend edit form always resends
+  // regulation_reference/recurrence as `null` when they're blank, on EVERY
+  // save, not just when the user is actively clearing a previously-set
+  // value. Before this fix, update_compliance inherited
+  // `z.string().optional()` unchanged from create_compliance.partial() —
+  // non-nullable — so ANY edit to an obligation whose regulation_reference
+  // or recurrence were already unset 400'd outright with "Invalid input:
+  // expected string, received null", even when the user wasn't touching
+  // those fields at all. Same fix as site_id (issue #204): three-way
+  // undefined/null-or-''/string handling.
+  describe('update_compliance — regulation_reference/recurrence clearing (found live-verifying feat/compliance-edit-history-ui)', () => {
+    it('passes an explicit null through as null for regulation_reference (clear the field)', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        regulation_reference: null,
+      });
+      expect(parsed).toHaveProperty('regulation_reference', null);
+    });
+
+    it('normalizes "" to null for regulation_reference', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        regulation_reference: '',
+      });
+      expect(parsed).toHaveProperty('regulation_reference', null);
+    });
+
+    it('leaves regulation_reference absent (undefined) when the field is not sent — "do not touch"', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({ title: 'x' });
+      expect('regulation_reference' in parsed).toBe(false);
+    });
+
+    it('keeps a real regulation_reference string intact', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        regulation_reference: 'GDPR Art. 30(1)',
+      });
+      expect(parsed).toHaveProperty('regulation_reference', 'GDPR Art. 30(1)');
+    });
+
+    it('passes an explicit null through as null for recurrence (clear the field)', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        recurrence: null,
+      });
+      expect(parsed).toHaveProperty('recurrence', null);
+    });
+
+    it('normalizes "" to null for recurrence', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        recurrence: '',
+      });
+      expect(parsed).toHaveProperty('recurrence', null);
+    });
+
+    it('leaves recurrence absent (undefined) when the field is not sent — "do not touch"', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({ title: 'x' });
+      expect('recurrence' in parsed).toBe(false);
+    });
+
+    it('keeps a real recurrence string intact', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        recurrence: 'annual',
+      });
+      expect(parsed).toHaveProperty('recurrence', 'annual');
+    });
+
+    // The actual reported bug: an edit that doesn't touch either field but
+    // whose current value is already blank must not 400 just because the
+    // frontend resends null for it.
+    it('accepts a full PATCH body with both fields null, unrelated to whether they were previously set', async () => {
+      const parsed = await compliance_validations.update_compliance.parseAsync({
+        title: 'Updated title',
+        description: 'Updated description',
+        domain: 'Financial',
+        status: 'pending',
+        owner: 'Jane Doe',
+        regulation_reference: null,
+        recurrence: null,
+      });
+      expect(parsed).toMatchObject({
+        title: 'Updated title',
+        regulation_reference: null,
+        recurrence: null,
+      });
+    });
+  });
+
   describe('attachments URL/scheme allowlist (issue #206)', () => {
     it('rejects a javascript: URL', async () => {
       await expect(
