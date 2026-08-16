@@ -59,3 +59,46 @@ module "compute" {
   app_secret_arn    = module.secrets.app_secret_arn
   aws_s3_secret_arn = module.secrets.aws_s3_secret_arn
 }
+
+# ---------------------------------------------------------------------------
+# RDS alarms (plan step 11) -- kept at root level, not inside module.data,
+# to avoid a circular module dependency (they need module.compute's SNS
+# topic, and module.compute already depends on module.data via the secrets
+# module for DB connection details).
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
+  alarm_name          = "${var.project}-rds-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "RDS CPU above 80% for 15+ minutes."
+  dimensions = {
+    DBInstanceIdentifier = module.data.db_instance_id
+  }
+  alarm_actions = [module.compute.ops_alerts_topic_arn]
+  ok_actions    = [module.compute.ops_alerts_topic_arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_connections" {
+  alarm_name          = "${var.project}-rds-connections"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "DatabaseConnections"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  # db.t4g.micro's practical connection ceiling is in the low hundreds --
+  # this is an early-warning threshold, not the actual limit.
+  threshold         = 50
+  alarm_description = "RDS connection count above 50 for 10+ minutes -- possible connection leak."
+  dimensions = {
+    DBInstanceIdentifier = module.data.db_instance_id
+  }
+  alarm_actions = [module.compute.ops_alerts_topic_arn]
+  ok_actions    = [module.compute.ops_alerts_topic_arn]
+}

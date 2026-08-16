@@ -10,6 +10,14 @@ output "service_name" {
   value = aws_ecs_service.app.name
 }
 
+output "ops_alerts_topic_arn" {
+  value = aws_sns_topic.ops_alerts.arn
+}
+
+output "db_dumps_bucket" {
+  value = aws_s3_bucket.db_dumps.id
+}
+
 output "acm_certificate_arn" {
   value = aws_acm_certificate.main.arn
 }

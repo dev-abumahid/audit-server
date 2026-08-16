@@ -99,6 +99,47 @@ resource "aws_iam_role" "task" {
   assume_role_policy = data.aws_iam_policy_document.ecs_task_assume.json
 }
 
+# ---------------------------------------------------------------------------
+# DB dump archive bucket -- doubles as the cutover restore transfer path
+# (upload the final pg_dump here, an ECS task downloads and restores it
+# into RDS) and the plan's own post-cutover requirement to keep the final
+# dump in a private encrypted bucket rather than leaving a copy on the VPS.
+# ---------------------------------------------------------------------------
+
+resource "aws_s3_bucket" "db_dumps" {
+  bucket = "${var.project}-db-dumps-${data.aws_caller_identity.current.account_id}"
+}
+
+resource "aws_s3_bucket_public_access_block" "db_dumps" {
+  bucket                  = aws_s3_bucket.db_dumps.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "db_dumps" {
+  bucket = aws_s3_bucket.db_dumps.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+data "aws_iam_policy_document" "task_db_dumps" {
+  statement {
+    actions   = ["s3:GetObject", "s3:PutObject"]
+    resources = ["${aws_s3_bucket.db_dumps.arn}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "task_db_dumps" {
+  name   = "${var.project}-db-dumps"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_db_dumps.json
+}
+
 data "aws_iam_policy_document" "task_exec_ssm" {
   statement {
     actions = [
@@ -312,4 +353,59 @@ resource "aws_ecs_service" "app" {
     aws_iam_role_policy.task_execution_secrets,
     aws_iam_role_policy.task_exec_ssm,
   ]
+}
+
+# ---------------------------------------------------------------------------
+# Post-cutover monitoring (plan step 11): real alarms instead of manually
+# polling CloudWatch for 24-48h. Covers the two signals the plan itself
+# names as most likely to reveal a missed env var or SG misconfiguration
+# under real traffic (ALB 5xx rate, RDS connection count), plus ECS task
+# health as a third.
+# ---------------------------------------------------------------------------
+
+resource "aws_sns_topic" "ops_alerts" {
+  name = "${var.project}-ops-alerts"
+}
+
+resource "aws_sns_topic_subscription" "ops_alerts_email" {
+  topic_arn = aws_sns_topic.ops_alerts.arn
+  protocol  = "email"
+  endpoint  = var.ops_alert_email
+}
+
+resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
+  alarm_name          = "${var.project}-alb-5xx"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods   = 1
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  namespace           = "AWS/ApplicationELB"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 5
+  treat_missing_data  = "notBreaching"
+  alarm_description   = "More than 5 upstream 5xx responses in 5 minutes."
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+  }
+  alarm_actions = [aws_sns_topic.ops_alerts.arn]
+  ok_actions    = [aws_sns_topic.ops_alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_running_tasks_low" {
+  alarm_name          = "${var.project}-ecs-running-tasks-low"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods   = 2
+  metric_name         = "RunningTaskCount"
+  namespace           = "ECS/ContainerInsights"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 1
+  treat_missing_data  = "breaching" # no data at all is itself a bad sign for a service that should always report
+  alarm_description   = "Fewer than the desired task count has been running for 2+ consecutive minutes."
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.app.name
+  }
+  alarm_actions = [aws_sns_topic.ops_alerts.arn]
+  ok_actions    = [aws_sns_topic.ops_alerts.arn]
 }
