@@ -51,6 +51,7 @@ jobs:
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            set -e
             cd /root/risk-management
 
             sed -i '/^SESSION_SECRET=/d; /^AI_INTERNAL_SECRET=/d; /^IS_GOOGLE_LOGIN=/d; /^GOOGLE_CLIENT_ID=/d; /^GOOGLE_CLIENT_SECRET=/d; /^GOOGLE_CALLBACK_URL=/d' .env
@@ -67,6 +68,27 @@ jobs:
 
             echo "Pulling latest image..."
             docker compose pull
+
+            # Found live (2026-08-15): two already-merged Prisma migrations
+            # sat unapplied on production for days because nothing in this
+            # pipeline ever actually ran them -- `docker compose pull && up
+            # -d` only swaps the running code, it doesn't touch the schema.
+            # Runs against the freshly-pulled image via the same compose
+            # network/env_file the real service uses (so `DATABASE_URL`'s
+            # `server_database` hostname resolves), *before* swapping the
+            # running container -- `set -e` above means a failed migration
+            # stops the deploy here, leaving the old (still-working)
+            # container in place rather than starting new code against an
+            # unmigrated database.
+            # --name override is required: the risk-management-server service
+            # has a static container_name set on this VPS's compose file, so
+            # `docker compose run` would otherwise reuse that exact name --
+            # colliding with the still-running container from the *previous*
+            # deploy (this step runs before `docker compose up -d` replaces
+            # it, which is the whole point). Caught in review before merge.
+            echo "Applying database migrations..."
+            docker compose run --rm --no-deps --name migrate-$$ risk-management-server \
+              npx prisma migrate deploy --schema=prisma/schema
 
             echo "Restarting containers..."
             docker compose up -d
