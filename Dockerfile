@@ -55,10 +55,16 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true \
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-# Copy Prisma generated client + schema
+# Copy Prisma generated client + schema + CLI config. prisma.config.ts (not
+# just the prisma/ dir) is required at runtime now -- the deploy pipeline
+# runs `prisma migrate deploy` against this same image (see deploy.yml), and
+# Prisma 7's config-first CLI refuses to resolve DATABASE_URL without it
+# (found live: two already-merged migrations sat unapplied on production for
+# days because nothing in the deploy path ever actually ran them).
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 
 # Copy built app
 COPY --from=builder /app/dist ./dist
