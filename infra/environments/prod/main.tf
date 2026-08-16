@@ -32,3 +32,9 @@ module "secrets" {
   aws_s3_access_key_id     = var.aws_s3_access_key_id
   aws_s3_secret_access_key = var.aws_s3_secret_access_key
 }
+
+module "deploy" {
+  source = "../../modules/deploy"
+
+  project = var.project
+}
