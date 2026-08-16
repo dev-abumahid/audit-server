@@ -9,7 +9,15 @@ resource "aws_secretsmanager_secret" "db" {
 resource "aws_secretsmanager_secret_version" "db" {
   secret_id = aws_secretsmanager_secret.db.id
   secret_string = jsonencode({
-    DATABASE_URL = "postgresql://${var.db_username}:${urlencode(var.db_password)}@${var.db_endpoint}:${var.db_port}/${var.db_name}?sslmode=require"
+    # sslmode=require alone made Prisma reject every query against RDS
+    # with "self-signed certificate in certificate chain" -- unlike
+    # node-postgres, Prisma's query engine validates the cert chain even
+    # under `require`. RDS's default server cert isn't in a public CA
+    # bundle Prisma trusts. `no-verify` keeps the connection encrypted
+    # (RDS enforces TLS at the network layer regardless) but skips
+    # chain validation -- the pragmatic fix without bundling AWS's RDS
+    # CA bundle into the image and switching to verify-full.
+    DATABASE_URL = "postgresql://${var.db_username}:${urlencode(var.db_password)}@${var.db_endpoint}:${var.db_port}/${var.db_name}?sslmode=no-verify"
   })
 }
 
