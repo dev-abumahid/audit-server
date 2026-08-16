@@ -140,6 +140,25 @@ data "aws_iam_policy_document" "deploy_permissions" {
   }
 
   statement {
+    # The deploy workflow resolves each secret's CURRENT ARN at deploy time
+    # (guards against the committed task-definition.json's embedded ARN
+    # suffix going stale) -- that needs DescribeSecret on this role, not
+    # just GetSecretValue on the task execution role (a different role;
+    # the deploy role itself never reads secret VALUES, only looks up
+    # ARNs). Confirmed missing by an actual failed run
+    # (AccessDenied-class CalledProcessError) before this was added.
+    sid    = "DescribeSecretArns"
+    effect = "Allow"
+    actions = ["secretsmanager:DescribeSecret"]
+    resources = [
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/db-*",
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/redis-*",
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/app-*",
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/aws-s3-*",
+    ]
+  }
+
+  statement {
     sid    = "PassEcsRoles"
     effect = "Allow"
     actions = ["iam:PassRole"]
