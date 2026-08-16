@@ -1,0 +1,118 @@
+name: AEXA Server Deployment (AWS ECS)
+
+# workflow_dispatch only, deliberately -- this is the new AWS pipeline being
+# built out and validated (migration plan steps 7-9) alongside the existing
+# VPS deploy.yml, which stays the sole automatic path until cutover. Wiring
+# this to `push: main` happens *at* cutover, at the same time the VPS
+# SSH-based steps in deploy.yml are retired -- not before (a window where
+# both paths could fire is a source of confusing double-deploys) and not
+# long after (this pipeline shouldn't sit untested).
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: aexa-server
+  ECS_CLUSTER: aexa-server
+  ECS_SERVICE: aexa-server
+  ECS_TASK_FAMILY: aexa-server
+  CONTAINER_NAME: aexa-server
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=registry,ref=${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-to: type=inline
+
+      - name: Render new task definition (migration variant)
+        id: render-migrate
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: infra/ecs/task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Register migration task definition
+        id: register-migrate
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://<(python3 -c "
+          import json
+          with open('${{ steps.render-migrate.outputs.task-definition }}') as f:
+              d = json.load(f)
+          # Override the container's command to run the migration instead of
+          # starting the server -- this replaces the VPS pipeline's
+          # 'docker compose run --rm --no-deps --name migrate-\$\$ ... prisma
+          # migrate deploy' step with the AWS-native equivalent: a one-off
+          # ECS task on the same image/task-def, not a long-running service.
+          d['containerDefinitions'][0]['command'] = ['npx', 'prisma', 'migrate', 'deploy', '--schema=prisma/schema']
+          print(json.dumps(d))
+          ") \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Run database migration as a one-off ECS task
+        id: run-migration
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition ${{ steps.register-migrate.outputs.task_def_arn }} \
+            --launch-type FARGATE \
+            --network-configuration '{"awsvpcConfiguration":{"subnets":["subnet-070febffc00e34d7f","subnet-0b8fbd27a98401eeb"],"securityGroups":["sg-0ca52c1194cbeebb2"],"assignPublicIp":"DISABLED"}}' \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Migration task: $TASK_ARN"
+          echo "task_arn=$TASK_ARN" >> "$GITHUB_OUTPUT"
+
+          aws ecs wait tasks-stopped --cluster ${{ env.ECS_CLUSTER }} --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          echo "Migration exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration task failed with exit code $EXIT_CODE -- aborting deploy. The still-running old service is untouched."
+            exit 1
+          fi
+
+      - name: Render new task definition (server variant)
+        id: render-server
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: infra/ecs/task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Deploy new task definition to the service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-server.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
