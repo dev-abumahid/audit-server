@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.10" # use_lockfile (native S3 locking) below needs 1.10+
 
   backend "s3" {
     bucket       = "qiyrix-terraform-state-029099142365"

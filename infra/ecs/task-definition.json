@@ -114,6 +114,10 @@
           "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:FACEBOOK_APP_SECRET::"
         },
         {
+          "name": "FACEBOOK_CALLBACK_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:FACEBOOK_CALLBACK_URL::"
+        },
+        {
           "name": "IS_TWITTER_LOGIN",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:IS_TWITTER_LOGIN::"
         },
@@ -126,6 +130,10 @@
           "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:TWITTER_CONSUMER_SECRET::"
         },
         {
+          "name": "TWITTER_CALLBACK_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:TWITTER_CALLBACK_URL::"
+        },
+        {
           "name": "IS_GITHUB_LOGIN",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:IS_GITHUB_LOGIN::"
         },
@@ -136,6 +144,10 @@
         {
           "name": "GITHUB_CLIENT_SECRET",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:GITHUB_CLIENT_SECRET::"
+        },
+        {
+          "name": "GITHUB_CALLBACK_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:029099142365:secret:aexa-server/app-QrCcRH:GITHUB_CALLBACK_URL::"
         },
         {
           "name": "FRONT_END_URL",

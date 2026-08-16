@@ -1,4 +1,5 @@
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 # ---------------------------------------------------------------------------
 # ECR repository
@@ -94,17 +95,48 @@ data "aws_iam_policy_document" "deploy_permissions" {
   }
 
   statement {
-    sid    = "ECSDeploy"
+    sid    = "ECSTaskDefinitions"
     effect = "Allow"
     actions = [
       "ecs:RegisterTaskDefinition",
       "ecs:DescribeTaskDefinition",
-      "ecs:RunTask",
-      "ecs:DescribeTasks",
+    ]
+    resources = ["*"] # neither action supports resource-level scoping
+  }
+
+  # RunTask/DescribeTasks/UpdateService/DescribeServices *do* support
+  # resource-level scoping and are split out from the statement above --
+  # without this, this role (assumable by any workflow run on
+  # repo:${var.github_repo}:ref:refs/heads/${var.github_branch}) could call
+  # UpdateService/RunTask against *any* ECS cluster/service in the account,
+  # not just this project's.
+  statement {
+    sid       = "ECSRunTask"
+    effect    = "Allow"
+    actions   = ["ecs:RunTask"]
+    resources = ["arn:aws:ecs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:task-definition/${var.project}:*"]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = ["arn:aws:ecs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:cluster/${var.project}"]
+    }
+  }
+
+  statement {
+    sid       = "ECSDescribeTasks"
+    effect    = "Allow"
+    actions   = ["ecs:DescribeTasks"]
+    resources = ["arn:aws:ecs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:task/${var.project}/*"]
+  }
+
+  statement {
+    sid    = "ECSUpdateService"
+    effect = "Allow"
+    actions = [
       "ecs:UpdateService",
       "ecs:DescribeServices",
     ]
-    resources = ["*"] # RegisterTaskDefinition/DescribeTaskDefinition do not support resource-level scoping
+    resources = ["arn:aws:ecs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:service/${var.project}/${var.project}"]
   }
 
   statement {

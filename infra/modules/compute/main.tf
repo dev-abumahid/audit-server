@@ -66,11 +66,18 @@ resource "aws_iam_role_policy_attachment" "task_execution_managed" {
 data "aws_iam_policy_document" "task_execution_secrets" {
   statement {
     actions = ["secretsmanager:GetSecretValue"]
+    # Wildcard suffix (not the 4 exact ARNs from module.secrets) so this
+    # policy survives a secret being recreated -- Secrets Manager appends a
+    # random 6-char suffix to the ARN on every create, and the container
+    # definition below references secrets by NAME (not ARN) for the same
+    # reason. This is AWS's own documented pattern for exactly this drift
+    # risk, not a loosening of scope: still fully scoped to this project's
+    # 4 secrets, nothing else in the account.
     resources = [
-      var.db_secret_arn,
-      var.redis_secret_arn,
-      var.app_secret_arn,
-      var.aws_s3_secret_arn,
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/db-*",
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/redis-*",
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/app-*",
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:${var.project}/aws-s3-*",
     ]
   }
 }
@@ -138,6 +145,15 @@ resource "aws_ecs_task_definition" "app" {
         { name = "PORT", value = tostring(var.app_port) },
       ]
 
+      # valueFrom must be the FULL secret ARN when using the ":KEY::" JSON-key
+      # extraction suffix -- a bare secret name here is ambiguous (ECS
+      # misparses it as an SSM Parameter Store reference and rejects it on
+      # character validation, confirmed against the real API). These ARNs
+      # come from live Terraform attribute references (module.secrets
+      # outputs), not literal strings, so they self-correct on every apply
+      # if a secret is ever recreated -- only the CI-committed
+      # infra/ecs/task-definition.json snapshot needs a separate mechanism
+      # to stay in sync (resolved at runtime in the deploy workflow).
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.db_secret_arn}:DATABASE_URL::" },
         { name = "HOSTED_REDIS_CONNECTION", valueFrom = "${var.redis_secret_arn}:HOSTED_REDIS_CONNECTION::" },
@@ -162,12 +178,15 @@ resource "aws_ecs_task_definition" "app" {
         { name = "IS_FACEBOOK_LOGIN", valueFrom = "${var.app_secret_arn}:IS_FACEBOOK_LOGIN::" },
         { name = "FACEBOOK_APP_ID", valueFrom = "${var.app_secret_arn}:FACEBOOK_APP_ID::" },
         { name = "FACEBOOK_APP_SECRET", valueFrom = "${var.app_secret_arn}:FACEBOOK_APP_SECRET::" },
+        { name = "FACEBOOK_CALLBACK_URL", valueFrom = "${var.app_secret_arn}:FACEBOOK_CALLBACK_URL::" },
         { name = "IS_TWITTER_LOGIN", valueFrom = "${var.app_secret_arn}:IS_TWITTER_LOGIN::" },
         { name = "TWITTER_CONSUMER_KEY", valueFrom = "${var.app_secret_arn}:TWITTER_CONSUMER_KEY::" },
         { name = "TWITTER_CONSUMER_SECRET", valueFrom = "${var.app_secret_arn}:TWITTER_CONSUMER_SECRET::" },
+        { name = "TWITTER_CALLBACK_URL", valueFrom = "${var.app_secret_arn}:TWITTER_CALLBACK_URL::" },
         { name = "IS_GITHUB_LOGIN", valueFrom = "${var.app_secret_arn}:IS_GITHUB_LOGIN::" },
         { name = "GITHUB_CLIENT_ID", valueFrom = "${var.app_secret_arn}:GITHUB_CLIENT_ID::" },
         { name = "GITHUB_CLIENT_SECRET", valueFrom = "${var.app_secret_arn}:GITHUB_CLIENT_SECRET::" },
+        { name = "GITHUB_CALLBACK_URL", valueFrom = "${var.app_secret_arn}:GITHUB_CALLBACK_URL::" },
         { name = "FRONT_END_URL", valueFrom = "${var.app_secret_arn}:FRONT_END_URL::" },
         { name = "AWS_BUCKET", valueFrom = "${var.app_secret_arn}:AWS_BUCKET::" },
         { name = "AWS_REGION", valueFrom = "${var.app_secret_arn}:AWS_REGION::" },
@@ -279,5 +298,18 @@ resource "aws_ecs_service" "app" {
     rollback = true
   }
 
-  depends_on = [aws_lb_listener.https]
+  # Explicit, not just implicit-via-attribute-reference: the task execution
+  # role's ECR-pull/logs and Secrets Manager permissions aren't referenced
+  # by ARN anywhere the task definition or service would pick up an
+  # implicit dependency, so without this a from-scratch apply can create
+  # the role, task definition, and service in parallel with the policy
+  # attachment/inline policy -- ECS can then try to launch the first task
+  # before those permissions have propagated (ResourceInitializationError
+  # on secrets/ECR pull).
+  depends_on = [
+    aws_lb_listener.https,
+    aws_iam_role_policy_attachment.task_execution_managed,
+    aws_iam_role_policy.task_execution_secrets,
+    aws_iam_role_policy.task_exec_ssm,
+  ]
 }
