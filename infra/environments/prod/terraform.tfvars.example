@@ -1,0 +1,29 @@
+# Copy to terraform.auto.tfvars (gitignored) and fill in real values.
+# Never commit the real file -- these are live production secrets.
+
+aws_s3_access_key_id     = ""
+aws_s3_secret_access_key = ""
+
+# Every key the app reads from Secrets Manager's aexa-server/app secret.
+# Keep this in sync with .env.example's non-DB/non-Redis/non-S3 vars.
+app_secrets = {
+  SESSION_SECRET      = ""
+  AI_INTERNAL_SECRET  = "" # must match aexa-ai's own INTERNAL_SECRET
+  ACCESS_TOKEN        = ""
+  ACCESS_EXPIRES      = ""
+  REFRESH_TOKEN       = ""
+  REFRESH_EXPIRES     = ""
+  RESET_SECRET        = ""
+  RESET_EXPIRES       = ""
+  VERIFIED_TOKEN      = ""
+  APP_USER_EMAIL      = ""
+  APP_PASSWORD        = ""
+  IS_GOOGLE_LOGIN     = "true"
+  GOOGLE_CLIENT_ID    = ""
+  GOOGLE_CLIENT_SECRET = ""
+  GOOGLE_CALLBACK_URL = "https://api.qiyrix.com/api/auth/social/google/callback"
+  IS_FACEBOOK_LOGIN   = "false"
+  IS_TWITTER_LOGIN    = "false"
+  IS_GITHUB_LOGIN     = "false"
+  FRONT_END_URL       = "https://www.qiyrix.com"
+}
