@@ -1,0 +1,47 @@
+# Copy to terraform.auto.tfvars (gitignored) and fill in real values.
+# Never commit the real file -- these are live production secrets.
+#
+# Every key here must exist for the real app_secrets map: compute/main.tf
+# references each one by exact JSON key inside the aexa-server/app Secrets
+# Manager secret ("${var.app_secret_arn}:KEY::"). A missing key here is a
+# hard ECS task-launch failure (ResourceNotFoundException resolving that
+# JSON path), not a missing/undefined env var -- keep this file's key list
+# in sync with compute/main.tf's `secrets` block, not just .env.example.
+
+aws_s3_access_key_id     = ""
+aws_s3_secret_access_key = ""
+
+app_secrets = {
+  SESSION_SECRET          = ""
+  AI_INTERNAL_SECRET      = "" # must match aexa-ai's own INTERNAL_SECRET
+  ACCESS_TOKEN             = ""
+  ACCESS_EXPIRES           = ""
+  REFRESH_TOKEN            = ""
+  REFRESH_EXPIRES          = ""
+  RESET_SECRET             = ""
+  RESET_EXPIRES            = ""
+  VERIFIED_TOKEN           = ""
+  APP_USER_EMAIL           = ""
+  APP_PASSWORD             = ""
+  IS_GOOGLE_LOGIN          = "true"
+  GOOGLE_CLIENT_ID         = ""
+  GOOGLE_CLIENT_SECRET     = ""
+  GOOGLE_CALLBACK_URL      = "https://api.qiyrix.com/api/auth/social/google/callback"
+  IS_FACEBOOK_LOGIN        = "false"
+  FACEBOOK_APP_ID          = ""
+  FACEBOOK_APP_SECRET      = ""
+  FACEBOOK_CALLBACK_URL    = "https://api.qiyrix.com/api/auth/social/facebook/callback"
+  IS_TWITTER_LOGIN         = "false"
+  TWITTER_CONSUMER_KEY     = ""
+  TWITTER_CONSUMER_SECRET  = ""
+  TWITTER_CALLBACK_URL     = "https://api.qiyrix.com/api/auth/social/twitter/callback"
+  IS_GITHUB_LOGIN          = "false"
+  GITHUB_CLIENT_ID         = ""
+  GITHUB_CLIENT_SECRET     = ""
+  GITHUB_CALLBACK_URL      = "https://api.qiyrix.com/api/auth/social/github/callback"
+  FRONT_END_URL            = "https://www.qiyrix.com"
+  AWS_BUCKET               = ""
+  AWS_REGION               = ""
+  PRODUCTION_BASE_URL      = "https://api.qiyrix.com"
+  AI_SERVER_ENDPOINT       = ""
+}
