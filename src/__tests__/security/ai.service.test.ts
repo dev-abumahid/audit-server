@@ -353,6 +353,51 @@ describe('ai service — AI response error handling', () => {
       expect(result).toEqual([riskItem]);
     });
 
+    // Issue #917: aexa-ai's /risk_analysis endpoint 400s on a blank
+    // site_primary_activity, which this function used to re-throw as an
+    // opaque "AI service error: 400". The frontend now requires Activity on
+    // new/edited sites, but sites created before that fix can still have a
+    // blank one -- this guard catches it here with an actionable message
+    // and never calls out to aexa-ai for a site it already knows will fail.
+    it('throws a 400 AppError with an actionable message and never calls aexa-ai when the site has no activity', async () => {
+      siteDb.findUnique.mockResolvedValue({
+        id: 'site-1',
+        name: 'Lyon Plant',
+        location: 'Lyon',
+        country: 'France',
+        activity: null,
+        revenue: 5000000,
+        employees_count: 250,
+        site_type: 'production',
+      });
+
+      await expect(
+        ai_service.analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } })),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining('primary activity'),
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('throws a 400 AppError when the site activity is whitespace-only', async () => {
+      siteDb.findUnique.mockResolvedValue({
+        id: 'site-1',
+        name: 'Lyon Plant',
+        location: 'Lyon',
+        country: 'France',
+        activity: '   ',
+        revenue: 5000000,
+        employees_count: 250,
+        site_type: 'production',
+      });
+
+      await expect(
+        ai_service.analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } })),
+      ).rejects.toMatchObject({ statusCode: 400 });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
     it('throws when the AI response does not match the expected shape', async () => {
       siteDb.findUnique.mockResolvedValue({
         id: 'site-1',

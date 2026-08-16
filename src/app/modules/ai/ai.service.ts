@@ -308,6 +308,20 @@ const analyze_site_risks_with_ai = async (req: Request) => {
       throw new AppError('Site not found', 404);
     }
 
+    // aexa-ai's /risk_analysis endpoint rejects a blank site_primary_activity
+    // with a 400, which this function then re-threw as an opaque
+    // "AI service error: 400" (issue #917) -- the frontend now requires
+    // Activity on the site form going forward, but existing sites created
+    // before that fix can still have a blank one. Catch it here with a
+    // client-actionable message instead of forwarding the AI service round
+    // trip just to get the same generic 502 back.
+    if (!site.activity?.trim()) {
+      throw new AppError(
+        'This site is missing a primary activity. Add one before running AI risk analysis.',
+        400,
+      );
+    }
+
     // Deliberately not including a system_prompt field — see the comment on
     // ai_validations.analyze_site_risks. site_legal_entity has no analog on
     // the Site model yet, so it's sent empty rather than guessed.

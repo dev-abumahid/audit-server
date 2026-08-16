@@ -1,0 +1,180 @@
+name: AEXA Server Deployment (AWS ECS)
+
+# workflow_dispatch only, deliberately -- this is the new AWS pipeline being
+# built out and validated (migration plan steps 7-9) alongside the existing
+# VPS deploy.yml, which stays the sole automatic path until cutover. Wiring
+# this to `push: main` happens *at* cutover, at the same time the VPS
+# SSH-based steps in deploy.yml are retired -- not before (a window where
+# both paths could fire is a source of confusing double-deploys) and not
+# long after (this pipeline shouldn't sit untested).
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: aexa-server
+  ECS_CLUSTER: aexa-server
+  ECS_SERVICE: aexa-server
+  CONTAINER_NAME: aexa-server
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Required for cache-to: type=gha below -- the default "docker"
+      # buildx driver doesn't support cache export at all
+      # ("Cache export is not supported for the docker driver", confirmed
+      # by an actual failed run). This switches to the docker-container
+      # driver, which does.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Only the SHA tag is pushed -- the ECR repo is image_tag_mutability =
+      # "IMMUTABLE" (infra/modules/deploy/main.tf), so re-pushing a ":latest"
+      # tag on every run would fail with ImageTagAlreadyExistsException from
+      # the second run onward. Build cache uses GitHub Actions' own cache
+      # instead of a registry tag, so it doesn't need a mutable reference.
+      - name: Build and push image to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # infra/ecs/task-definition.json is a point-in-time export from
+      # Terraform (see its own git history) and its "secrets" valueFrom
+      # ARNs embed each secret's random suffix as a literal string.
+      # Secrets Manager assigns a NEW suffix any time a secret is
+      # recreated (Terraform replace, manual recreation, etc.), which
+      # would silently desync this committed file from reality with no
+      # plan-time warning. Re-resolve each secret's CURRENT ARN here
+      # instead of trusting the committed one, so this pipeline can't be
+      # broken by that class of drift.
+      - name: Resolve current secret ARNs
+        id: resolve-secrets
+        run: |
+          python3 -c "
+          import json, re, subprocess
+
+          with open('infra/ecs/task-definition.json') as f:
+              d = json.load(f)
+
+          def current_arn(secret_name):
+              return subprocess.run(
+                  ['aws', 'secretsmanager', 'describe-secret', '--secret-id', secret_name,
+                   '--query', 'ARN', '--output', 'text'],
+                  check=True, capture_output=True, text=True,
+              ).stdout.strip()
+
+          arn_cache = {}
+          for secret in d['containerDefinitions'][0]['secrets']:
+              # valueFrom is 'arn:...:secret:aexa-server/<group>-XXXXXX:KEY::'
+              # -- extract the '<group>' part to look up the live secret by
+              # its stable NAME (aexa-server/<group>), not the embedded ARN.
+              m = re.match(r'^arn:aws:secretsmanager:[^:]+:[^:]+:secret:([^:]+?)-[A-Za-z0-9]+:', secret['valueFrom'])
+              group_name = m.group(1)
+              if group_name not in arn_cache:
+                  arn_cache[group_name] = current_arn(group_name)
+              suffix = secret['valueFrom'].split(':', 7)[7]  # 'KEY::' part after the ARN
+              secret['valueFrom'] = f\"{arn_cache[group_name]}:{suffix}\"
+
+          with open('/tmp/task-definition-resolved.json', 'w') as f:
+              json.dump(d, f)
+          "
+
+      - name: Render task definition with new image
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: /tmp/task-definition-resolved.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Register migration task definition
+        id: register-migrate
+        run: |
+          # Written to a real temp file, not piped through `file://<(...)`:
+          # AWS CLI reads a --cli-input-json file:// path TWICE internally
+          # (once via the generic paramfile handler, once via
+          # CliInputJSONArgument), and a process-substitution fd is a
+          # one-shot pipe -- the second read gets an empty string and the
+          # command fails with "Invalid JSON received" on every run.
+          python3 -c "
+          import json
+          with open('${{ steps.render.outputs.task-definition }}') as f:
+              d = json.load(f)
+          # Override the container's command to run the migration instead of
+          # starting the server -- this replaces the VPS pipeline's
+          # 'docker compose run --rm --no-deps --name migrate-\$\$ ... prisma
+          # migrate deploy' step with the AWS-native equivalent: a one-off
+          # ECS task on the same image/task-def, not a long-running service.
+          d['containerDefinitions'][0]['command'] = ['npx', 'prisma', 'migrate', 'deploy', '--schema=prisma/schema']
+          with open('/tmp/migrate-task-def.json', 'w') as f:
+              json.dump(d, f)
+          "
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/migrate-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Run database migration as a one-off ECS task
+        id: run-migration
+        run: |
+          # Subnets/SG sourced from repo variables (set from Terraform
+          # output, infra/modules/networking/main.tf's private subnets +
+          # app-sg), not hardcoded literals -- if these are ever replaced by
+          # a future `terraform apply`, update the repo variables rather
+          # than hand-editing this file.
+          SUBNETS_JSON=$(echo "${{ vars.ECS_PRIVATE_SUBNETS }}" | jq -R -c 'split(",")')
+          NETWORK_CONFIG=$(jq -n -c \
+            --argjson subnets "$SUBNETS_JSON" \
+            --arg sg "${{ vars.ECS_APP_SG }}" \
+            '{awsvpcConfiguration:{subnets:$subnets,securityGroups:[$sg],assignPublicIp:"DISABLED"}}')
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition ${{ steps.register-migrate.outputs.task_def_arn }} \
+            --launch-type FARGATE \
+            --network-configuration "$NETWORK_CONFIG" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Migration task: $TASK_ARN"
+          echo "task_arn=$TASK_ARN" >> "$GITHUB_OUTPUT"
+
+          aws ecs wait tasks-stopped --cluster ${{ env.ECS_CLUSTER }} --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          echo "Migration exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration task failed with exit code $EXIT_CODE -- aborting deploy. The still-running old service is untouched."
+            exit 1
+          fi
+
+      - name: Deploy new task definition to the service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
