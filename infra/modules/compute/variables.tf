@@ -56,6 +56,12 @@ variable "aws_s3_secret_arn" {
   type = string
 }
 
+variable "ops_alert_email" {
+  description = "Email subscribed to production ops alarms (ALB 5xx, ECS task health)."
+  type        = string
+  default     = "omartakadoum@gmail.com"
+}
+
 variable "task_cpu" {
   type    = number
   default = 512 # 0.5 vCPU, per plan
