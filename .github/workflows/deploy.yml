@@ -80,8 +80,14 @@ jobs:
             # stops the deploy here, leaving the old (still-working)
             # container in place rather than starting new code against an
             # unmigrated database.
+            # --name override is required: the risk-management-server service
+            # has a static container_name set on this VPS's compose file, so
+            # `docker compose run` would otherwise reuse that exact name --
+            # colliding with the still-running container from the *previous*
+            # deploy (this step runs before `docker compose up -d` replaces
+            # it, which is the whole point). Caught in review before merge.
             echo "Applying database migrations..."
-            docker compose run --rm --no-deps risk-management-server \
+            docker compose run --rm --no-deps --name migrate-$$ risk-management-server \
               npx prisma migrate deploy --schema=prisma/schema
 
             echo "Restarting containers..."
