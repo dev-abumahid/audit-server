@@ -1,6 +1,7 @@
 module "networking" {
-  source  = "../../modules/networking"
-  project = var.project
+  source   = "../../modules/networking"
+  project  = var.project
+  app_port = var.app_port
 }
 
 module "data" {
@@ -37,4 +38,24 @@ module "deploy" {
   source = "../../modules/deploy"
 
   project = var.project
+}
+
+module "compute" {
+  source = "../../modules/compute"
+
+  project            = var.project
+  vpc_id             = module.networking.vpc_id
+  public_subnet_ids  = module.networking.public_subnet_ids
+  private_subnet_ids = module.networking.private_subnet_ids
+  alb_sg_id          = module.networking.alb_sg_id
+  app_sg_id          = module.networking.app_sg_id
+  app_port           = var.app_port
+  alb_logs_bucket    = module.networking.alb_logs_bucket
+  ecr_repository_url = module.deploy.ecr_repository_url
+  domain_name        = var.domain_name
+
+  db_secret_arn     = module.secrets.db_secret_arn
+  redis_secret_arn  = module.secrets.redis_secret_arn
+  app_secret_arn    = module.secrets.app_secret_arn
+  aws_s3_secret_arn = module.secrets.aws_s3_secret_arn
 }

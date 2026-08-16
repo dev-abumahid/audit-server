@@ -24,7 +24,7 @@ variable "private_subnet_cidrs" {
 }
 
 variable "app_port" {
-  description = "Port aexa-server listens on inside the container (PORT env var)."
+  description = "Port aexa-server listens on inside the container (PORT env var). Dockerfile EXPOSEs 5002, and the live VPS .env confirms PORT=5002 -- not the .env.example default of 5000."
   type        = number
-  default     = 5000
+  default     = 5002
 }
