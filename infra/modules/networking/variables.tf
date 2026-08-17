@@ -28,3 +28,9 @@ variable "app_port" {
   type        = number
   default     = 5002
 }
+
+variable "ai_app_port" {
+  description = "Port aexa-ai's uvicorn listens on inside the container. Dockerfile EXPOSEs 8000, CMD binds --port 8000 -- confirmed against the aexa-ai repo, not assumed."
+  type        = number
+  default     = 8000
+}

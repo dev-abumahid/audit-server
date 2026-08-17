@@ -42,9 +42,24 @@ resource "aws_secretsmanager_secret" "app" {
   name = "${var.project}/app"
 }
 
+# Generated here (not hand-typed into terraform.auto.tfvars alongside
+# var.app_secrets) and merged over whatever AI_INTERNAL_SECRET value var.
+# app_secrets might still carry -- the aexa-ai migration regenerates this
+# as a fresh, Terraform-managed value shared with the new aexa-ai/app
+# secret (see modules/ai-compute, which reads it via this module's
+# `ai_internal_secret` output through the environments/prod-ai root
+# module's remote-state lookup), rather than a value that was ever
+# hand-copied between two secret definitions during the infra rewrite.
+resource "random_password" "ai_internal_secret" {
+  length  = 40
+  special = false
+}
+
 resource "aws_secretsmanager_secret_version" "app" {
-  secret_id     = aws_secretsmanager_secret.app.id
-  secret_string = jsonencode(var.app_secrets)
+  secret_id = aws_secretsmanager_secret.app.id
+  secret_string = jsonencode(merge(var.app_secrets, {
+    AI_INTERNAL_SECRET = random_password.ai_internal_secret.result
+  }))
 }
 
 resource "aws_secretsmanager_secret" "aws_s3" {

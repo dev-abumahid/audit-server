@@ -1,0 +1,6 @@
+ai_app_secrets = {
+  OPENAI_API_KEY          = ""
+  PINECONE_API_KEY        = ""
+  CLIENT_PINECONE_API_KEY = "" # optional -- aexa-ai falls back to PINECONE_API_KEY if unset
+  TAVILY_API_KEY          = "" # optional -- web-search feature only
+}

@@ -26,6 +26,14 @@ output "redis_sg_id" {
   value = aws_security_group.redis.id
 }
 
+output "aexa_ai_sg_id" {
+  value = aws_security_group.aexa_ai.id
+}
+
+output "aexa_ai_redis_sg_id" {
+  value = aws_security_group.aexa_ai_redis.id
+}
+
 output "alb_logs_bucket" {
   value = aws_s3_bucket.alb_logs.id
 }

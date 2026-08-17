@@ -135,7 +135,11 @@ resource "aws_security_group" "alb" {
 }
 
 resource "aws_security_group" "app" {
-  name        = "${var.project}-app-sg"
+  name = "${var.project}-app-sg"
+  # NOTE: `description` is ForceNew on aws_security_group (AWS has no
+  # update-in-place API for it) -- left as the original text rather than
+  # updated to mention aexa-ai, since editing it would destroy/recreate
+  # this live, in-use production security group.
   description = "aexa-server ECS tasks -- ingress only from the ALB."
   vpc_id      = aws_vpc.main.id
 
@@ -147,6 +151,17 @@ resource "aws_security_group" "app" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  # review follow-up (PR #343): no direct aexa-ai -> app-sg ingress rule
+  # here. aexa-ai's callback to aexa-server (WEBHOOK_BASE_URL, see
+  # environments/prod-ai) goes through the public ALB domain
+  # (api.qiyrix.com), same as any other external caller -- traffic
+  # arriving at this SG from the ALB always presents the ALB's own SG as
+  # its source (ALB forwards from its own ENI), already covered by the
+  # ingress block above. A direct aexa-ai-sg-to-app-sg rule was added in
+  # an earlier version of this PR on the assumption of a direct in-VPC
+  # call, but nothing actually uses that path -- removed as dead/
+  # misleading rather than left in as an unused `allow`.
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -155,6 +170,74 @@ resource "aws_security_group" "app" {
   }
 
   tags = { Name = "${var.project}-app-sg" }
+}
+
+# ---------------------------------------------------------------------------
+# aexa-ai -- separate ECS service on the same cluster (no ALB, reached via
+# Cloud Map service discovery -- see modules/ai-compute). Its own SG, not
+# folded into app-sg, so its ingress/egress surface stays independently
+# auditable even though both services share this VPC/cluster.
+#
+# No inline `ingress {}` block here (only egress is inline) -- its ingress
+# rule (below, as aws_vpc_security_group_ingress_rule.aexa_ai_from_app) is
+# entirely standalone-managed instead. Mixing would hit the exact
+# inline-vs-standalone conflict described on app-sg above; since THIS SG
+# has zero inline ingress blocks, there's nothing for Terraform to treat
+# as an authoritative "complete" ingress set, so the standalone rule
+# coexists cleanly. This also breaks the app<->aexa-ai mutual-reference
+# cycle: app's inline block depends on aexa_ai.id, but aexa_ai's own
+# resource no longer depends back on app.id (only the separate standalone
+# rule resource does, which isn't part of either SG's own create/update).
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "aexa_ai" {
+  name        = "${var.project}-aexa-ai-sg"
+  description = "aexa-ai ECS tasks -- ingress only from aexa-server app tasks."
+  vpc_id      = aws_vpc.main.id
+
+  # Explicit, not assumed -- Terraform security groups do NOT default to
+  # allow-all egress the way the AWS console default SG does. aexa-ai
+  # calls OpenAI/Pinecone/Tavily over the internet via the existing NAT
+  # Gateway; omitting this would silently break every external LLM call.
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.project}-aexa-ai-sg" }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "aexa_ai_from_app" {
+  security_group_id            = aws_security_group.aexa_ai.id
+  description                  = "aexa-ai app port from aexa-server app-sg only"
+  from_port                    = var.ai_app_port
+  to_port                      = var.ai_app_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.app.id
+}
+
+resource "aws_security_group" "aexa_ai_redis" {
+  name        = "${var.project}-aexa-ai-redis-sg"
+  description = "aexa-ai dedicated ElastiCache Redis node -- ingress only from aexa-ai tasks."
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "Redis from aexa-ai-sg only"
+    from_port       = 6379
+    to_port         = 6379
+    protocol        = "tcp"
+    security_groups = [aws_security_group.aexa_ai.id]
+  }
+
+  # review follow-up (PR #343): no egress rule -- a Redis cache node only
+  # ever serves inbound client connections, it never originates outbound
+  # traffic. Unlike aexa-ai-sg (which genuinely needs internet egress for
+  # OpenAI/Pinecone/Tavily), an allow-all egress here would be pure
+  # unused attack surface with no real traffic ever using it.
+
+  tags = { Name = "${var.project}-aexa-ai-redis-sg" }
 }
 
 resource "aws_security_group" "db" {
