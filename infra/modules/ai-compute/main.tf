@@ -114,10 +114,21 @@ resource "aws_ecs_task_definition" "ai" {
       # aexa-ai's app/main.py) -- deliberately not an unauthenticated
       # bypass route, since there's no ALB forcing one. The healthcheck
       # supplies the secret itself from the container's own env.
+      #
+      # Uses python3 (already in the image -- it's the runtime), not curl:
+      # the aexa-ai image is python:3.12-slim with zero apt-installed
+      # system packages (deliberately minimal, confirmed via its
+      # Dockerfile). A curl-based healthCheck command silently fails with
+      # "command not found" on every single check, forever, regardless of
+      # whether the app itself is healthy -- caught live (task stayed
+      # RUNNING with clean startup logs but healthStatus stuck UNHEALTHY)
+      # rather than in review. Adding curl via apt-get would be the
+      # image's first-ever system package for a single health probe;
+      # reusing the interpreter that's already there avoids that.
       healthCheck = {
         command = [
           "CMD-SHELL",
-          "curl -f -H \"X-Internal-Secret: $INTERNAL_SECRET\" http://localhost:${var.app_port}/health || exit 1"
+          "python3 -c \"import os,sys,urllib.request; req=urllib.request.Request('http://localhost:${var.app_port}/health', headers={'X-Internal-Secret': os.environ['INTERNAL_SECRET']}); sys.exit(0 if urllib.request.urlopen(req, timeout=5).status == 200 else 1)\" || exit 1"
         ]
         interval    = 30
         timeout     = 10
