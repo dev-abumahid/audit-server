@@ -110,6 +110,14 @@ model Risk {
     // here — see intelligence.prisma's created_risk_id/onDelete: SetNull
     // reasoning).
     intelligenceItems IntelligenceItem[]
+    // aexa-server#346: ComplianceObligations optionally linked to this Risk,
+    // either via POST /compliance/obligations/:id/create-risk (promotion,
+    // same shape as intelligenceItems above) or
+    // POST /compliance/obligations/:id/link-risk (attaches an existing
+    // Risk). FK lives on ComplianceObligation (see compliance.prisma's
+    // risk_id/onDelete: SetNull reasoning), so a Risk can have zero or more
+    // linked obligations here.
+    complianceObligations ComplianceObligation[]
     // aexa-frontend#142: risk-to-risk causal links pointing AT this risk by
     // ref (source_ref/target_ref reference Risk.ref, not Risk.id — see
     // RiskLink's own comment for why). No formal Prisma relation is declared

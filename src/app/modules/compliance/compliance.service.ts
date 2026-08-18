@@ -10,6 +10,11 @@ import {
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
+import {
+  computeNextRiskRef,
+  retryTransactionOnRefConflict,
+  SEVERITY_TO_SCORE,
+} from '../risk/risk_ref.js';
 
 // aexa-server#243: due dates previously had zero teeth — an obligation 18
 // months past due_date with no attachments stayed "compliant" in the
@@ -162,6 +167,9 @@ const get_all_compliance_from_db = async (req: Request) => {
         // action already exists, instead of offering to create a
         // duplicate with no way to tell one's already in flight.
         actions: { select: { id: true, actionTitle: true, status: true } },
+        // aexa-server#346: lets the list view show a "View Risk" affordance
+        // once an obligation is linked, same shape as `actions` above.
+        risk: { select: { id: true, ref: true, name: true, status: true } },
       },
     }),
     prisma.complianceObligation.count({
@@ -183,6 +191,9 @@ const get_single_compliance_from_db = async (req: Request) => {
     where: { id, org_account_id: ctx.organizationId },
     include: {
       actions: { select: { id: true, actionTitle: true, status: true } },
+      // aexa-server#346: surface the linked Risk (if any) so the Compliance
+      // detail view can show/link to it without a second round-trip.
+      risk: { select: { id: true, ref: true, name: true, status: true } },
     },
   });
   // Every sibling module's get_single_* throws 404 for a missing/cross-org
@@ -572,6 +583,202 @@ const delete_compliance_from_db = async (req: Request) => {
   return result;
 };
 
+// --------------------------------------------------------------------------
+// aexa-server#346: ComplianceObligation <-> Risk linking
+// --------------------------------------------------------------------------
+// Two entry points, mirroring intelligence.service.ts's single
+// create_risk_from_item_into_db split into its two logical halves (this
+// module needs both, since a caller may want to promote a brand-new Risk
+// OR attach one that already exists in the register):
+//   - create_risk_from_obligation_into_db: spawns a new Risk and links it
+//     (same "promotion" shape as IntelligenceItem.created_risk_id).
+//   - link_risk_to_obligation_into_db: attaches an existing Risk.
+// Both funnel through assertLinkableRisk state / assertCanWriteOrgResource
+// the same way create/update/delete do above -- linking a Risk is a write
+// on the obligation, gated identically.
+
+// Quality-bar-loop review finding: ComplianceObligation.domain
+// (COMPLIANCE_DOMAINS, aexa-frontend's complianceConfig.ts) and Risk.category
+// (RISK_CATEGORIES, aexa-frontend's riskConfig.ts) are two DIFFERENT curated
+// taxonomies that happen to share a similar shape -- they are NOT
+// interchangeable strings. Live-verified: passing obligation.domain straight
+// through as category (the original version of this code) produced a Risk
+// with category "data_protection", which isn't a RISK_CATEGORIES key at
+// all -- it rendered as raw unstyled text in the Risk Register instead of a
+// colored badge, and didn't match any option in the register's own category
+// filter, defeating the whole point of "this obligation now flows into the
+// Risk Register" (aexa-server#346 point 1). Every compliance domain is
+// mapped to its closest Risk category below; anything unmapped falls back to
+// 'regulatory' -- a safe default given every caller of this function is, by
+// definition, promoting a regulatory-compliance obligation into a risk.
+const COMPLIANCE_DOMAIN_TO_RISK_CATEGORY: Record<string, string> = {
+  data_protection: 'regulatory',
+  health_safety: 'ehs',
+  financial: 'financial',
+  environmental: 'environmental',
+  labor_employment: 'hr',
+  anti_corruption: 'regulatory',
+  export_control: 'regulatory',
+  industry_specific: 'regulatory',
+};
+const DEFAULT_RISK_CATEGORY_FOR_OBLIGATION = 'regulatory';
+
+const riskCategoryForObligationDomain = (domain: string): string =>
+  COMPLIANCE_DOMAIN_TO_RISK_CATEGORY[domain] ?? DEFAULT_RISK_CATEGORY_FOR_OBLIGATION;
+
+/**
+ * Loads the caller's obligation (404 if missing/cross-org) and resolves
+ * which Site the linked Risk should attach to, matching
+ * intelligence.service.ts's create_risk_from_item_into_db's intent (an
+ * explicit siteId is validated against the org; otherwise fall back to a
+ * sensible default) with one difference: unlike an IntelligenceItem (never
+ * site-scoped), an obligation is often ALREADY site-scoped, so its own
+ * site_id (when set) is used directly rather than falling further back to
+ * the org's earliest site. Only an org-wide obligation (site_id null) falls
+ * back to the earliest-created Site. No sites at all -> 409, not a 500,
+ * same as the intelligence precedent.
+ */
+const loadObligationAndTargetSite = async (
+  obligationId: string,
+  orgAccountId: string,
+  siteId: string | undefined,
+) => {
+  const obligation = await prisma.complianceObligation.findFirst({
+    where: { id: obligationId, org_account_id: orgAccountId },
+  });
+  if (!obligation) throw new AppError('Compliance obligation not found', 404);
+
+  const site = siteId
+    ? await prisma.site.findFirst({ where: { id: siteId, org_account_id: orgAccountId } })
+    : await prisma.site.findFirst({
+        where: {
+          org_account_id: orgAccountId,
+          ...(obligation.site_id ? { id: obligation.site_id } : {}),
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+  if (!site) {
+    throw new AppError(
+      siteId ? 'Site not found' : 'This organization has no sites to attach the new risk to',
+      siteId ? 404 : 409,
+    );
+  }
+  return { obligation, site };
+};
+
+// POST /compliance/obligations/:id/create-risk
+const create_risk_from_obligation_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  // Same write gate as POST /risk itself (risk.service.ts's
+  // create_risk_into_db) -- promoting an obligation into a Risk produces the
+  // identical side effect (a new org Risk row), so it gets the identical
+  // ADMIN/LEAD_AUDITOR gate, matching intelligence.service.ts's precedent.
+  assertCanWriteOrgResource(ctx);
+  const { id } = req.params as Record<string, string>;
+  const { siteId, severity } = (req.body ?? {}) as { siteId?: string; severity?: string };
+
+  const { obligation, site } = await loadObligationAndTargetSite(id, ctx.organizationId, siteId);
+  if (obligation.risk_id) {
+    throw new AppError('This obligation is already linked to a Risk', 409);
+  }
+
+  // Same TOCTOU-closing conditional claim as intelligence.service.ts's
+  // create_risk_from_item_into_db: two concurrent create-risk calls on the
+  // same obligation would both pass the pre-check above; whichever
+  // updateMany actually matches (risk_id still null) wins the claim, the
+  // loser's transaction throws and its risk.create rolls back with it.
+  const result = await retryTransactionOnRefConflict(() =>
+    prisma.$transaction(async (tx) => {
+      const category = riskCategoryForObligationDomain(obligation.domain);
+      const ref = await computeNextRiskRef(tx, ctx.organizationId, category);
+      const risk = await tx.risk.create({
+        data: {
+          org_account_id: ctx.organizationId,
+          ref,
+          name: obligation.title,
+          description: obligation.description ?? null,
+          category,
+          inherent_score: severity ? SEVERITY_TO_SCORE[severity] : null,
+          residual_score: severity ? SEVERITY_TO_SCORE[severity] : null,
+          status: 'open',
+          ai_generated: false,
+          is_edited: false,
+          site_id: site.id,
+          // Traceable back to the source obligation for anyone reading the
+          // Risk directly, same "where did this come from" purpose
+          // intelligence's source_info (item.source_evidence ?? item.link)
+          // serves for IntelligenceItem-promoted risks.
+          source_info: `Linked from compliance obligation: ${obligation.title}`,
+          line_of_defense: obligation.line_of_defense,
+        },
+      });
+      const claim = await tx.complianceObligation.updateMany({
+        where: { id: obligation.id, risk_id: null },
+        data: { risk_id: risk.id },
+      });
+      if (claim.count === 0) {
+        throw new AppError('This obligation is already linked to a Risk', 409);
+      }
+      return risk;
+    }),
+  );
+
+  return result;
+};
+
+// POST /compliance/obligations/:id/link-risk — attaches an EXISTING Risk.
+// Unlike intelligence's one-time promotion (a scraped article can only ever
+// become one Risk), this link is a plain reference a user can change their
+// mind about, so it's a straightforward set/overwrite rather than a
+// TOCTOU-guarded one-time claim: re-linking to a different existing Risk is
+// a legitimate "actually, this obligation maps to that other risk instead"
+// correction, not a bug to prevent.
+const link_risk_to_obligation_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { id } = req.params as Record<string, string>;
+  const { riskId } = req.body as { riskId: string };
+
+  const obligation = await prisma.complianceObligation.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!obligation) throw new AppError('Compliance obligation not found', 404);
+
+  // Cross-tenant guard, same reasoning as assertSiteBelongsToOrg above — a
+  // caller must not be able to link an obligation to another org's Risk id.
+  const risk = await prisma.risk.findFirst({
+    where: { id: riskId, org_account_id: ctx.organizationId },
+  });
+  if (!risk) throw new AppError('Risk not found', 404);
+
+  const result = await prisma.complianceObligation.update({
+    where: { id: obligation.id },
+    data: { risk_id: risk.id },
+  });
+  return with_overdue(result);
+};
+
+// DELETE /compliance/obligations/:id/link-risk — unlinks, if any.
+const unlink_risk_from_obligation_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { id } = req.params as Record<string, string>;
+
+  const obligation = await prisma.complianceObligation.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!obligation) throw new AppError('Compliance obligation not found', 404);
+
+  const result = await prisma.complianceObligation.update({
+    where: { id: obligation.id },
+    data: { risk_id: null },
+  });
+  return with_overdue(result);
+};
+
 /**
  * Uploads a compliance-evidence attachment to Cloudinary and returns its URL.
  * Two-step flow identical to action.service.ts's upload_action_attachment: the
@@ -770,4 +977,7 @@ export const compliance_service = {
   attest_compliance_into_db,
   get_compliance_attestations_from_db,
   get_compliance_edit_history_from_db,
+  create_risk_from_obligation_into_db,
+  link_risk_to_obligation_into_db,
+  unlink_risk_from_obligation_into_db,
 };

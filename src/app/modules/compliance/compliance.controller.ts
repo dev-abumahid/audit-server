@@ -112,6 +112,39 @@ const get_compliance_edit_history = catchAsync(async (req, res) => {
   });
 });
 
+const create_risk_from_obligation = catchAsync(async (req, res) => {
+  const result = await compliance_service.create_risk_from_obligation_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Risk created and linked to compliance obligation successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const link_risk_to_obligation = catchAsync(async (req, res) => {
+  const result = await compliance_service.link_risk_to_obligation_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Compliance obligation linked to risk successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const unlink_risk_from_obligation = catchAsync(async (req, res) => {
+  const result = await compliance_service.unlink_risk_from_obligation_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Compliance obligation unlinked from risk successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const compliance_controller = {
   get_all_compliance,
   get_single_compliance,
@@ -123,4 +156,7 @@ export const compliance_controller = {
   attest_compliance,
   get_compliance_attestations,
   get_compliance_edit_history,
+  create_risk_from_obligation,
+  link_risk_to_obligation,
+  unlink_risk_from_obligation,
 };

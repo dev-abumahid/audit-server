@@ -13,7 +13,11 @@ import { assertCanWriteOrgResource, resolveCallerOrgContext } from '../../utils/
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import { ALL_RSS_SOURCES } from './rss_sources.js';
 import { dedupeScrapedItems, ScrapedFeedItem, scrapeAllSources } from './rss_scraper.js';
-import { computeNextRiskRef, retryTransactionOnRefConflict } from '../risk/risk_ref.js';
+import {
+  computeNextRiskRef,
+  retryTransactionOnRefConflict,
+  SEVERITY_TO_SCORE,
+} from '../risk/risk_ref.js';
 import { clampPercent } from '../risk/risk_scoring.js';
 
 type OrgContext = { name: string; sector?: string | null; country?: string | null };
@@ -500,12 +504,11 @@ const get_all_runs_from_db = async (req: Request) => {
 // assessed yet for a risk that's only just been promoted from a scraped
 // article -- that assessment is exactly what a human does next, in the
 // existing risk.route.ts PATCH flow.
-const SEVERITY_SCORE: Record<string, number> = {
-  critical: 90,
-  high: 70,
-  medium: 50,
-  low: 30,
-};
+//
+// aexa-server#346 review finding: this mapping is now shared (risk_ref.ts's
+// SEVERITY_TO_SCORE) with compliance.service.ts's create_risk_from_obligation_into_db,
+// the other "promote this record into a Risk" call site that needed the
+// identical translation -- was duplicated verbatim here before.
 
 const create_risk_from_item_into_db = async (req: Request) => {
   const user = req.user as JwtPayloadType;
@@ -572,8 +575,8 @@ const create_risk_from_item_into_db = async (req: Request) => {
           name: item.title,
           description: item.risk_summary ?? item.description ?? null,
           category,
-          inherent_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
-          residual_score: item.severity ? SEVERITY_SCORE[item.severity] : null,
+          inherent_score: item.severity ? SEVERITY_TO_SCORE[item.severity] : null,
+          residual_score: item.severity ? SEVERITY_TO_SCORE[item.severity] : null,
           probability:
             item.relevance_score != null
               ? clampPercent(Math.round(item.relevance_score * 100))

@@ -65,6 +65,21 @@ export function categoryPrefix(category: string): string {
   return fallback.length >= 2 ? fallback : 'GEN';
 }
 
+// Quality-bar-loop review finding (aexa-server#346): this exact
+// critical/high/medium/low -> 90/70/50/30 mapping used to be duplicated
+// verbatim in intelligence.service.ts's create_risk_from_item_into_db and
+// compliance.service.ts's create_risk_from_obligation_into_db -- both
+// "promote this record into a Risk" call sites need the identical
+// severity-label-has-no-direct-Risk-column translation (Risk scores
+// inherent/residual risk numerically, see risk.prisma, not as a severity
+// label), so it's shared here rather than copy-pasted a third time.
+export const SEVERITY_TO_SCORE: Record<string, number> = {
+  critical: 90,
+  high: 70,
+  medium: 50,
+  low: 30,
+};
+
 const REF_PADDING = 3;
 
 // PrismaTxClient-shaped type covering just what this module needs, so it

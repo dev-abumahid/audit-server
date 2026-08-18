@@ -9,8 +9,15 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
       count: vi.fn(),
+    },
+    // aexa-server#346: obligation <-> risk linking (create-risk/link-risk).
+    risk: {
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      create: vi.fn(),
     },
     // aexa-server#250: re-attestation history, and next_review_date
     // advancement, wrapped in a $transaction.
@@ -54,6 +61,7 @@ import { compliance_validations } from '../../app/modules/compliance/compliance.
 import uploadCloud from '../../app/utils/cloudinary.js';
 
 const db = prisma.complianceObligation as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const attestationDb = prisma.complianceAttestation as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
@@ -399,6 +407,7 @@ describe('compliance service — org scoping (issue #93)', () => {
         where: { id: 'c1', org_account_id: ORG_A },
         include: {
           actions: { select: { id: true, actionTitle: true, status: true } },
+          risk: { select: { id: true, ref: true, name: true, status: true } },
         },
       });
     });
@@ -1837,6 +1846,298 @@ describe('compliance service — org scoping (issue #93)', () => {
   });
 });
 
+describe('compliance obligation <-> risk linking (aexa-server#346)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+    txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
+  });
+
+  describe('create_risk_from_obligation_into_db', () => {
+    it('404s when the obligation does not exist', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.create_risk_from_obligation_into_db(
+          makeReq({ params: { id: 'missing' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+
+    it('409s when the obligation is already linked to a Risk', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'obl-1',
+        org_account_id: ORG_A,
+        risk_id: 'risk-already-linked',
+        site_id: null,
+      });
+      siteDb.findFirst.mockResolvedValue({ id: 'site-1' });
+
+      await expect(
+        compliance_service.create_risk_from_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+
+    it('409s when the org has no sites to attach the new risk to', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'obl-1',
+        org_account_id: ORG_A,
+        risk_id: null,
+        site_id: null,
+      });
+      siteDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.create_risk_from_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+
+    it('creates a Risk from an obligation, marks provenance, and links it back', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'obl-1',
+        org_account_id: ORG_A,
+        risk_id: null,
+        site_id: 'site-1',
+        title: 'GDPR Art. 30 record-keeping',
+        description: 'Maintain records of processing activities',
+        // Real ComplianceObligation.domain key (COMPLIANCE_DOMAINS,
+        // aexa-frontend's complianceConfig.ts) -- not the display label.
+        domain: 'data_protection',
+        line_of_defense: 'SECOND',
+      });
+      siteDb.findFirst.mockResolvedValue({ id: 'site-1' });
+      riskDb.findMany.mockResolvedValue([]);
+      riskDb.create.mockResolvedValue({ id: 'risk-1', name: 'GDPR Art. 30 record-keeping' });
+      db.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await compliance_service.create_risk_from_obligation_into_db(
+        makeReq({ params: { id: 'obl-1' } }),
+      );
+
+      expect(riskDb.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          org_account_id: ORG_A,
+          name: 'GDPR Art. 30 record-keeping',
+          // Mapped to a real RISK_CATEGORIES key (riskConfig.ts), NOT the raw
+          // compliance domain string -- see COMPLIANCE_DOMAIN_TO_RISK_CATEGORY's
+          // own comment for why passing the domain straight through was a bug.
+          category: 'regulatory',
+          site_id: 'site-1',
+          line_of_defense: 'SECOND',
+          source_info: 'Linked from compliance obligation: GDPR Art. 30 record-keeping',
+        }),
+      });
+      expect(db.updateMany).toHaveBeenCalledWith({
+        where: { id: 'obl-1', risk_id: null },
+        data: { risk_id: 'risk-1' },
+      });
+      expect(result.id).toBe('risk-1');
+    });
+
+    // Review finding: obligation.domain (COMPLIANCE_DOMAINS) and Risk.category
+    // (RISK_CATEGORIES) are different taxonomies -- verifies every declared
+    // domain maps to a real RISK_CATEGORIES key, and an unrecognized domain
+    // falls back to 'regulatory' rather than passing an invalid raw string
+    // through (COMPLIANCE_DOMAIN_TO_RISK_CATEGORY's own comment).
+    it.each([
+      ['data_protection', 'regulatory'],
+      ['health_safety', 'ehs'],
+      ['financial', 'financial'],
+      ['environmental', 'environmental'],
+      ['labor_employment', 'hr'],
+      ['anti_corruption', 'regulatory'],
+      ['export_control', 'regulatory'],
+      ['industry_specific', 'regulatory'],
+      ['some_future_domain_not_yet_mapped', 'regulatory'],
+    ])('maps obligation domain %s to Risk category %s', async (domain, expectedCategory) => {
+      db.findFirst.mockResolvedValue({
+        id: 'obl-1',
+        org_account_id: ORG_A,
+        risk_id: null,
+        site_id: 'site-1',
+        title: 'Some obligation',
+        domain,
+      });
+      siteDb.findFirst.mockResolvedValue({ id: 'site-1' });
+      riskDb.findMany.mockResolvedValue([]);
+      riskDb.create.mockResolvedValue({ id: 'risk-1' });
+      db.updateMany.mockResolvedValue({ count: 1 });
+
+      await compliance_service.create_risk_from_obligation_into_db(
+        makeReq({ params: { id: 'obl-1' } }),
+      );
+
+      expect(riskDb.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ category: expectedCategory }),
+      });
+    });
+
+    // Same TOCTOU-closing conditional claim as
+    // intelligence.service.ts's create_risk_from_item_into_db — proves the
+    // race is closed by the updateMany's WHERE clause, not just the earlier
+    // pre-check.
+    it('loses the race when another request linked the obligation first inside the transaction', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'obl-1',
+        org_account_id: ORG_A,
+        risk_id: null,
+        site_id: 'site-1',
+        title: 'GDPR Art. 30',
+        domain: 'Data Protection',
+      });
+      siteDb.findFirst.mockResolvedValue({ id: 'site-1' });
+      riskDb.findMany.mockResolvedValue([]);
+      riskDb.create.mockResolvedValue({ id: 'risk-1' });
+      db.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        compliance_service.create_risk_from_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('VIEWER cannot promote an obligation to a Risk', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        compliance_service.create_risk_from_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(db.findFirst).not.toHaveBeenCalled();
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('link_risk_to_obligation_into_db', () => {
+    it('404s when the obligation does not exist', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.link_risk_to_obligation_into_db(
+          makeReq({ params: { id: 'missing' }, body: { riskId: 'risk-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    // Cross-tenant guard: a caller must not be able to link an obligation to
+    // another org's Risk id, same reasoning as assertSiteBelongsToOrg.
+    it('404s when the riskId does not belong to the caller org', async () => {
+      db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: null });
+      riskDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.link_risk_to_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' }, body: { riskId: 'other-org-risk' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('links the obligation to an existing risk in the same org', async () => {
+      db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: null });
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({
+        id: 'obl-1',
+        risk_id: 'risk-1',
+        due_date: null,
+        status: 'compliant',
+      });
+
+      const result = await compliance_service.link_risk_to_obligation_into_db(
+        makeReq({ params: { id: 'obl-1' }, body: { riskId: 'risk-1' } }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith({
+        where: { id: 'obl-1' },
+        data: { risk_id: 'risk-1' },
+      });
+      expect(result.risk_id).toBe('risk-1');
+    });
+
+    it('re-linking overwrites a previous link rather than being blocked', async () => {
+      db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: 'risk-old' });
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-new', org_account_id: ORG_A });
+      db.update.mockResolvedValue({
+        id: 'obl-1',
+        risk_id: 'risk-new',
+        due_date: null,
+        status: 'compliant',
+      });
+
+      const result = await compliance_service.link_risk_to_obligation_into_db(
+        makeReq({ params: { id: 'obl-1' }, body: { riskId: 'risk-new' } }),
+      );
+
+      expect(result.risk_id).toBe('risk-new');
+    });
+
+    it('VIEWER cannot link an obligation to a risk', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        compliance_service.link_risk_to_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' }, body: { riskId: 'risk-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(db.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unlink_risk_from_obligation_into_db', () => {
+    it('404s when the obligation does not exist', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        compliance_service.unlink_risk_from_obligation_into_db(
+          makeReq({ params: { id: 'missing' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('clears risk_id on the obligation', async () => {
+      db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: 'risk-1' });
+      db.update.mockResolvedValue({
+        id: 'obl-1',
+        risk_id: null,
+        due_date: null,
+        status: 'compliant',
+      });
+
+      const result = await compliance_service.unlink_risk_from_obligation_into_db(
+        makeReq({ params: { id: 'obl-1' } }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith({
+        where: { id: 'obl-1' },
+        data: { risk_id: null },
+      });
+      expect(result.risk_id).toBeNull();
+    });
+
+    it('VIEWER cannot unlink an obligation from its risk', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        compliance_service.unlink_risk_from_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(db.findFirst).not.toHaveBeenCalled();
+    });
+  });
+});
+
 describe('compliance validation schemas', () => {
   describe('update_compliance — site_id clearing (issue #204)', () => {
     it('passes an explicit null through as null (clear to org-wide)', async () => {
@@ -2051,6 +2352,44 @@ describe('compliance validation schemas', () => {
       await expect(
         compliance_validations.attest_compliance.parseAsync({ note: 'x'.repeat(2001) }),
       ).rejects.toBeTruthy();
+    });
+  });
+
+  describe('create_risk_from_obligation (aexa-server#346)', () => {
+    it('allows an empty body — siteId/severity are both optional', async () => {
+      const parsed = await compliance_validations.create_risk_from_obligation.parseAsync({});
+      expect(parsed).toEqual({});
+    });
+
+    it('accepts a valid severity', async () => {
+      const parsed = await compliance_validations.create_risk_from_obligation.parseAsync({
+        severity: 'high',
+      });
+      expect(parsed.severity).toBe('high');
+    });
+
+    it('rejects an invalid severity', async () => {
+      await expect(
+        compliance_validations.create_risk_from_obligation.parseAsync({ severity: 'extreme' }),
+      ).rejects.toBeTruthy();
+    });
+  });
+
+  describe('link_risk_to_obligation (aexa-server#346)', () => {
+    it('requires a non-empty riskId', async () => {
+      await expect(
+        compliance_validations.link_risk_to_obligation.parseAsync({}),
+      ).rejects.toBeTruthy();
+      await expect(
+        compliance_validations.link_risk_to_obligation.parseAsync({ riskId: '' }),
+      ).rejects.toBeTruthy();
+    });
+
+    it('accepts a riskId', async () => {
+      const parsed = await compliance_validations.link_risk_to_obligation.parseAsync({
+        riskId: 'risk-1',
+      });
+      expect(parsed.riskId).toBe('risk-1');
     });
   });
 });

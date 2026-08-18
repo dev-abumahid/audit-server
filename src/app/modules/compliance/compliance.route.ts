@@ -48,5 +48,25 @@ router.get(
   auth('ORGANIZATION'),
   compliance_controller.get_compliance_edit_history,
 );
+// aexa-server#346: obligation <-> risk linking. POST create-risk promotes a
+// brand-new Risk (same shape as POST /intelligence/items/:id/create-risk);
+// POST/DELETE link-risk attach/detach an existing one.
+router.post(
+  '/:id/create-risk',
+  auth('ORGANIZATION'),
+  RequestValidator(compliance_validations.create_risk_from_obligation),
+  compliance_controller.create_risk_from_obligation,
+);
+router.post(
+  '/:id/link-risk',
+  auth('ORGANIZATION'),
+  RequestValidator(compliance_validations.link_risk_to_obligation),
+  compliance_controller.link_risk_to_obligation,
+);
+router.delete(
+  '/:id/link-risk',
+  auth('ORGANIZATION'),
+  compliance_controller.unlink_risk_from_obligation,
+);
 
 export default router;

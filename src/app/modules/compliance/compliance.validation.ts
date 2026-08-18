@@ -116,8 +116,25 @@ const attest_compliance = z.object({
   note: z.string().max(2000).optional(),
 });
 
+// aexa-server#346: siteId/severity are both optional -- see
+// compliance.service.ts's loadObligationAndTargetSite / risk_ref.ts's
+// SEVERITY_TO_SCORE for the fallback behavior when omitted. severity mirrors
+// intelligence.validation.ts's analyzed-item shape (critical/high/medium/low),
+// the only other place this codebase maps a severity label onto a Risk
+// score.
+const create_risk_from_obligation = z.object({
+  siteId: z.string().optional(),
+  severity: z.enum(['critical', 'high', 'medium', 'low']).optional(),
+});
+
+const link_risk_to_obligation = z.object({
+  riskId: z.string().min(1, 'riskId is required'),
+});
+
 export const compliance_validations = {
   create_compliance,
   update_compliance,
   attest_compliance,
+  create_risk_from_obligation,
+  link_risk_to_obligation,
 };

@@ -16,6 +16,57 @@ model ComplianceObligation {
     site_id String?
     site    Site?   @relation(fields: [site_id], references: [id], onDelete: SetNull)
 
+    // aexa-server#346: optional link from a regulatory obligation to the Risk
+    // it represents in the Risk Register. Deliberately OPTIONAL and NOT
+    // automatic (an obligation does not always constitute a distinct risk in
+    // its own right, per CEO feedback on #346) -- set explicitly via
+    // POST /compliance/obligations/:id/create-risk (spawns a brand-new Risk,
+    // mirrors intelligence.service.ts's create_risk_from_item_into_db /
+    // IntelligenceItem.created_risk_id "promotion" pattern almost exactly)
+    // or POST /compliance/obligations/:id/link-risk (attaches an existing
+    // Risk). See compliance.service.ts for both.
+    //
+    // FK direction and shape follow this schema's own two existing
+    // cross-domain-link precedents rather than inventing a third shape:
+    // Action.complianceObligationId (action.prisma) puts the FK on the
+    // "referencing" side with onDelete: SetNull, and
+    // IntelligenceItem.created_risk_id (intelligence.prisma) is the exact
+    // same "promote this record into a Risk" shape this is modeled on. A
+    // single nullable FK (not a many-to-many join table) also matches both
+    // of those precedents.
+    //
+    // Public docs for comparable platforms (AuditBoard's RegComply --
+    // "map new requirements to risks in the risk register" -- and
+    // ServiceNow GRC's risk-task m2m tables) confirm real GRC tools treat
+    // obligation<->risk as an explicit mapping, not an automatic 1:1
+    // creation, which corroborates the "optional link" product decision
+    // here; several of them model it many-to-many (one obligation can map
+    // to several risks). This first version deliberately stays one-obligation
+    // to-one-risk, matching this codebase's existing single-FK precedent --
+    // many obligations CAN still point at the same shared Risk (e.g. a
+    // broad "regulatory non-compliance" risk fed by several obligations),
+    // just not the reverse. If one obligation genuinely needs multiple
+    // linked risks later, RiskLink (risk.prisma) is this schema's existing
+    // precedent for a dedicated many-to-many join table -- scoped out here
+    // as a bigger, separate change rather than guessed at.
+    //
+    // Review finding (worth recording, deliberately not acted on): onDelete:
+    // SetNull here means deleting a Risk that has linked obligations silently
+    // unlinks them, with no count added to risk.service.ts's delete_risk_from_db
+    // in-use guard -- unlike that guard's AuditEngagementRisk case, which IS
+    // blocking because "which audits touch this risk" is treated as
+    // immutable audit-trail history. This link is different in kind: it's a
+    // live, user-editable pointer (the UI lets an obligation be re-linked or
+    // unlinked freely -- see link_risk_to_obligation_into_db/
+    // unlink_risk_from_obligation_into_db), not a historical fact being
+    // erased, so it's modeled like Action.complianceObligationId and
+    // IntelligenceItem.created_risk_id (both also SetNull, also not
+    // delete-guarded) rather than AuditEngagementRisk. Revisit only if a
+    // real workflow surfaces where silently losing this pointer on Risk
+    // deletion causes a genuine audit-trail gap in practice.
+    risk_id String?
+    risk    Risk?   @relation(fields: [risk_id], references: [id], onDelete: SetNull)
+
     title       String
     description String?
     // Scorecard grouping axis. Free-text string paired with a curated frontend
@@ -99,6 +150,7 @@ model ComplianceObligation {
 
     @@index([org_account_id])
     @@index([site_id])
+    @@index([risk_id])
 }
 
 // aexa-server#250: a permanent record of "this obligation was reconfirmed
