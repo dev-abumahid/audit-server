@@ -34,6 +34,15 @@ router.post(
   risk_correlation_controller.create_action_from_bucket,
 );
 
+// aexa-server#347: fixed sub-path, not a risk id — must be registered
+// before the `/:id` routes below, same reasoning as correlation-matrix/
+// root-cause-bucketing above.
+router.get(
+  '/ebitda-at-risk-summary',
+  auth('ORGANIZATION'),
+  risk_controller.get_ebitda_at_risk_summary,
+);
+
 router.get('/', auth('ORGANIZATION'), risk_controller.get_all_risk);
 router.post(
   '/',

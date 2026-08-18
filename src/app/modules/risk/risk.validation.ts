@@ -49,6 +49,14 @@ const create_risk = z.object({
   // known).
   inherent_override: z.boolean().optional(),
   inherent_override_reason: z.string().min(1).optional(),
+
+  // aexa-server#347: same opt-in-override shape as residual/inherent above,
+  // for the EBITDA-at-risk benchmark margin (see ebitda_risk.ts). The
+  // override targets the 0-1 margin fraction, not the final at-risk
+  // currency amount — see that file's header comment for why.
+  ebitda_override: z.boolean().optional(),
+  ebitda_override_margin: z.number().min(0).max(1).optional(),
+  ebitda_override_reason: z.string().min(1).optional(),
 });
 const update_risk = create_risk.partial();
 

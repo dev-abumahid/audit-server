@@ -68,3 +68,50 @@ describe('risk_validations.update_risk — 0-100 bounded fields (partial)', () =
     expect(result.success).toBe(false);
   });
 });
+
+// aexa-server#347: ebitda_override_margin is a 0-1 fraction, not a 0-100
+// percentage like the fields above — kept in its own describe block so the
+// scale distinction is explicit rather than accidentally lumped into the
+// 0-100 table.
+describe('risk_validations.create_risk — ebitda_override_margin (0-1 fraction)', () => {
+  it('accepts an in-range fraction', () => {
+    const result = risk_validations.create_risk.safeParse({
+      ...BASE,
+      ebitda_override: true,
+      ebitda_override_margin: 0.15,
+      ebitda_override_reason: 'Audited figure',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts the boundary values 0 and 1', () => {
+    for (const value of [0, 1]) {
+      const result = risk_validations.create_risk.safeParse({
+        ...BASE,
+        ebitda_override_margin: value,
+      });
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it('rejects a margin above 1 (a common mistake: passing 15 instead of 0.15)', () => {
+    const result = risk_validations.create_risk.safeParse({
+      ...BASE,
+      ebitda_override_margin: 15,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a negative margin', () => {
+    const result = risk_validations.create_risk.safeParse({
+      ...BASE,
+      ebitda_override_margin: -0.1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('allows omitting ebitda_override entirely (auto-computed path)', () => {
+    const result = risk_validations.create_risk.safeParse(BASE);
+    expect(result.success).toBe(true);
+  });
+});

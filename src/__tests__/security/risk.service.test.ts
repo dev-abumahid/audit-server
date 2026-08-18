@@ -31,6 +31,10 @@ vi.mock('../../app/lib/prisma.js', () => ({
     riskLink: {
       deleteMany: vi.fn(),
     },
+    site: {
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -65,6 +69,7 @@ const auditEngagementRiskDb = prisma.auditEngagementRisk as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 const riskLinkDb = prisma.riskLink as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const txFn = (prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }).$transaction;
@@ -111,6 +116,14 @@ describe('risk service — org scoping (ticket #6)', () => {
     // aexa-frontend#25 dangling-link cleanup on delete is a no-op unless a
     // test overrides it.
     riskLinkDb.deleteMany.mockResolvedValue({ count: 0 });
+    // Default (aexa-server#347): a plausible site for EBITDA-at-risk
+    // resolution so tests unrelated to that feature don't have to know
+    // about it. Individual ebitda tests override this per-case.
+    siteDb.findFirst.mockResolvedValue({
+      id: 'site-1',
+      revenue: 1000000,
+      activity: 'Industrial chemical manufacturing and storage',
+    });
     // Default $transaction impl (aexa-server#203): run the interactive callback
     // immediately with the same mocked prisma as the tx client, and propagate
     // any error the callback throws (so a mid-transaction failure rejects,
@@ -180,6 +193,57 @@ describe('risk service — org scoping (ticket #6)', () => {
 
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data.org_account_id).toBe(ORG_A);
+    });
+  });
+
+  describe('get_ebitda_at_risk_summary (#347)', () => {
+    it('scopes both the risk and site reads to the caller org', async () => {
+      db.findMany.mockResolvedValue([]);
+      siteDb.findMany.mockResolvedValue([]);
+
+      await risk_service.get_ebitda_at_risk_summary(makeReq());
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { org_account_id: ORG_A } }),
+      );
+      expect(siteDb.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { org_account_id: ORG_A } }),
+      );
+    });
+
+    it('filters out risks with no computed ebitda_at_risk (missing probability/impact) from the distribution', async () => {
+      db.findMany.mockResolvedValue([
+        { ebitda_at_risk: 1000 },
+        { ebitda_at_risk: null },
+        { ebitda_at_risk: 2000 },
+      ]);
+      siteDb.findMany.mockResolvedValue([]);
+
+      const result = await risk_service.get_ebitda_at_risk_summary(makeReq());
+
+      expect(result.risksTotal).toBe(3);
+      expect(result.risksWithData).toBe(2);
+    });
+
+    it("sums each site's own estimated EBITDA (revenue x its matched sector margin) into totalEstimatedEbitda", async () => {
+      db.findMany.mockResolvedValue([]);
+      siteDb.findMany.mockResolvedValue([
+        { revenue: 1_000_000, activity: 'Industrial chemical manufacturing and storage' }, // CHEMICAL_BASIC 0.1234
+        { revenue: 2_000_000, activity: 'Hospital and clinic operations' }, // HOSPITALS_HEALTHCARE 0.158
+      ]);
+
+      const result = await risk_service.get_ebitda_at_risk_summary(makeReq());
+
+      expect(result.totalEstimatedEbitda).toBe(1_000_000 * 0.1234 + 2_000_000 * 0.158);
+    });
+
+    it('treats a site with no revenue as contributing 0, not throwing', async () => {
+      db.findMany.mockResolvedValue([]);
+      siteDb.findMany.mockResolvedValue([{ revenue: 0, activity: 'Chemical plant' }]);
+
+      const result = await risk_service.get_ebitda_at_risk_summary(makeReq());
+
+      expect(result.totalEstimatedEbitda).toBe(0);
     });
   });
 
@@ -524,6 +588,88 @@ describe('risk service — org scoping (ticket #6)', () => {
         expect(db.create).not.toHaveBeenCalled();
       });
     });
+
+    // aexa-server#347: EBITDA-at-risk is derived from the risk's Site
+    // (revenue/activity) + probability/impact on create, per the CEO's
+    // formula.
+    describe('EBITDA-at-risk derivation (#347)', () => {
+      it('looks up the site scoped to the caller org and derives ebitda_at_risk + benchmark fields', async () => {
+        siteDb.findFirst.mockResolvedValue({
+          id: 'site-1',
+          revenue: 2_000_000,
+          activity: 'Hospital and clinic operations',
+        });
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({
+            body: {
+              name: 'Compliance risk',
+              category: 'Compliance',
+              site_id: 'site-1',
+              probability: 50,
+              impact: 80,
+            },
+          }),
+        );
+
+        expect(siteDb.findFirst).toHaveBeenCalledWith({
+          where: { id: 'site-1', org_account_id: ORG_A },
+        });
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.ebitda_benchmark_sector).toBe('HOSPITALS_HEALTHCARE');
+        expect(callArg.data.ebitda_at_risk).toBe(Math.round(2_000_000 * 0.158 * 0.5 * 0.8));
+        expect(callArg.data.ebitda_is_override).toBe(false);
+      });
+
+      it('throws 404 when the referenced site does not belong to the caller org (never trusts a cross-org site_id)', async () => {
+        siteDb.findFirst.mockResolvedValue(null);
+
+        await expect(
+          risk_service.create_risk_into_db(
+            makeReq({ body: { name: 'Risk', category: 'Cyber', site_id: 'other-org-site' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 404 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+
+      it('honors a valid ebitda_override on create', async () => {
+        db.create.mockResolvedValue({});
+
+        await risk_service.create_risk_into_db(
+          makeReq({
+            body: {
+              name: 'Risk',
+              category: 'Cyber',
+              probability: 50,
+              impact: 80,
+              ebitda_override: true,
+              ebitda_override_margin: 0.25,
+              ebitda_override_reason: 'Real audited EBITDA margin',
+            },
+          }),
+        );
+
+        const callArg = db.create.mock.calls[0][0];
+        expect(callArg.data.ebitda_is_override).toBe(true);
+        expect(callArg.data.ebitda_benchmark_margin).toBe(0.25);
+        expect(callArg.data.ebitda_override).toBeUndefined();
+        expect(callArg.data.ebitda_override_margin).toBeUndefined();
+      });
+
+      it('rejects an invalid ebitda_override request with 400 and does not create the risk', async () => {
+        await expect(
+          risk_service.create_risk_into_db(
+            makeReq({
+              body: { name: 'Risk', category: 'Cyber', ebitda_override: true },
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 400 });
+
+        expect(db.create).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('update_risk_into_db', () => {
@@ -853,6 +999,131 @@ describe('risk service — org scoping (ticket #6)', () => {
             params: { id: 'r1' },
             body: { inherent_override: true, inherent_score: 90 },
           }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update_risk_into_db — EBITDA-at-risk derivation (#347)', () => {
+    beforeEach(() => {
+      siteDb.findFirst.mockResolvedValue({
+        id: 'site-1',
+        revenue: 1_000_000,
+        activity: 'Industrial chemical manufacturing and storage',
+      });
+    });
+
+    it('re-reads the effective site inside the transaction and recomputes ebitda_at_risk', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        site_id: 'site-1',
+        probability: 40,
+        impact: 60,
+        ebitda_is_override: false,
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { probability: 90 } }),
+      );
+
+      expect(siteDb.findFirst).toHaveBeenCalledWith({
+        where: { id: 'site-1', org_account_id: ORG_A },
+      });
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.ebitda_at_risk).toBe(Math.round(1_000_000 * 0.1234 * 0.9 * 0.6));
+      expect(callArg.data.ebitda_benchmark_sector).toBe('CHEMICAL_BASIC');
+    });
+
+    it("throws 404 when the risk's site no longer resolves within the caller org", async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        site_id: 'deleted-site',
+        probability: 40,
+        impact: 60,
+      });
+      siteDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        risk_service.update_risk_into_db(
+          makeReq({ params: { id: 'r1' }, body: { probability: 90 } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('leaves an existing ebitda override untouched when the edit does not change its tracked inputs', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        site_id: 'site-1',
+        probability: 40,
+        impact: 60,
+        ebitda_at_risk: Math.round(1_000_000 * 0.3 * 0.4 * 0.6),
+        ebitda_benchmark_sector: 'CHEMICAL_BASIC',
+        ebitda_benchmark_margin: 0.3,
+        ebitda_is_override: true,
+        ebitda_override_reason: 'audited',
+        ebitda_overridden_by: 'someone-else',
+        ebitda_overridden_at: new Date('2026-01-01'),
+        ebitda_override_stale: false,
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { name: 'Renamed risk' } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.ebitda_is_override).toBe(true);
+      expect(callArg.data.ebitda_benchmark_margin).toBe(0.3);
+      expect(callArg.data.ebitda_override_stale).toBe(false);
+    });
+
+    it('flags an existing ebitda override stale when probability changes without re-confirming it', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        site_id: 'site-1',
+        probability: 40,
+        impact: 60,
+        ebitda_at_risk: Math.round(1_000_000 * 0.3 * 0.4 * 0.6),
+        ebitda_benchmark_sector: 'CHEMICAL_BASIC',
+        ebitda_benchmark_margin: 0.3,
+        ebitda_is_override: true,
+        ebitda_override_reason: 'audited',
+        ebitda_overridden_by: 'someone-else',
+        ebitda_overridden_at: new Date('2026-01-01'),
+        ebitda_override_stale: false,
+      });
+      db.update.mockResolvedValue({ id: 'r1' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { probability: 95 } }),
+      );
+
+      const callArg = db.update.mock.calls[0][0];
+      expect(callArg.data.ebitda_is_override).toBe(true);
+      expect(callArg.data.ebitda_override_stale).toBe(true);
+    });
+
+    it('rejects an invalid ebitda_override update with 400 and does not write', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        site_id: 'site-1',
+        probability: 40,
+        impact: 60,
+      });
+
+      await expect(
+        risk_service.update_risk_into_db(
+          makeReq({ params: { id: 'r1' }, body: { ebitda_override: true } }),
         ),
       ).rejects.toMatchObject({ statusCode: 400 });
 

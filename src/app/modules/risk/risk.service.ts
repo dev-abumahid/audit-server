@@ -11,6 +11,9 @@ import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHel
 import { deriveApprovalState, risk_approval_service } from './risk.approval.service.js';
 import { createRiskWithGeneratedRef } from './risk_ref.js';
 import { resolveInherentFields, resolveResidualFields } from './risk_scoring.js';
+import { computeEbitdaEstimate, resolveEbitdaFields } from './ebitda_risk.js';
+import { computeEbitdaSummary } from './ebitda_summary.js';
+import { mapActivityToSector } from './sector_mapper.js';
 
 const get_all_risk_from_db = async (req: Request) => {
   const { searchTerm, siteId, category } = req.query as Record<string, string>;
@@ -166,6 +169,34 @@ const create_risk_into_db = async (req: Request) => {
   Object.assign(payload, residual.fields);
   delete payload.residual_override;
 
+  // aexa-server#347: EBITDA-at-risk needs the site's revenue/activity, which
+  // don't live on the Risk payload itself — look the site up scoped to this
+  // org (never trust a site_id belonging to another org; same org-scoping
+  // requirement as every other cross-model lookup in this file).
+  const site = await prisma.site.findFirst({
+    where: { id: payload.site_id, org_account_id: ctx.organizationId },
+  });
+  if (!site) throw new AppError('Site not found', 404);
+  const ebitda = resolveEbitdaFields(
+    {
+      site_revenue: site.revenue,
+      site_activity: site.activity,
+      probability: payload.probability,
+      impact: payload.impact,
+    },
+    {
+      ebitda_override: payload.ebitda_override,
+      ebitda_override_margin: payload.ebitda_override_margin,
+      ebitda_override_reason: payload.ebitda_override_reason,
+    },
+    user.accountId,
+    null,
+  );
+  if (!ebitda.ok) throw new AppError(ebitda.message, 400);
+  Object.assign(payload, ebitda.fields);
+  delete payload.ebitda_override;
+  delete payload.ebitda_override_margin;
+
   // aexa-frontend#142: `ref` is generated server-side (category-derived
   // prefix + per-org-per-category sequence), never accepted from the
   // client — see risk_ref.ts for the scheme and its retry-on-conflict
@@ -279,6 +310,47 @@ const update_risk_into_db = async (req: Request) => {
     Object.assign(safeBody, residual.fields);
     delete safeBody.residual_override;
 
+    // aexa-server#347: re-read the effective site INSIDE the transaction,
+    // same in-transaction-freshness rationale as #241/#247 above — a site's
+    // revenue/activity can change independently of this risk's own edits,
+    // and reusing a snapshot fetched before the transaction opened would
+    // let a concurrent site update be computed from stale inputs.
+    const effectiveSiteId = safeBody.site_id ?? current.site_id;
+    const site = await tx.site.findFirst({
+      where: { id: effectiveSiteId, org_account_id: ctx.organizationId },
+    });
+    if (!site) throw new AppError('Site not found', 404);
+    const ebitda = resolveEbitdaFields(
+      {
+        site_revenue: site.revenue,
+        site_activity: site.activity,
+        probability: safeBody.probability ?? current.probability,
+        impact: safeBody.impact ?? current.impact,
+      },
+      {
+        ebitda_override: safeBody.ebitda_override,
+        ebitda_override_margin: safeBody.ebitda_override_margin,
+        ebitda_override_reason: safeBody.ebitda_override_reason,
+      },
+      user.accountId,
+      {
+        probability: current.probability,
+        impact: current.impact,
+        ebitda_at_risk: current.ebitda_at_risk,
+        ebitda_benchmark_sector: current.ebitda_benchmark_sector,
+        ebitda_benchmark_margin: current.ebitda_benchmark_margin,
+        ebitda_is_override: current.ebitda_is_override,
+        ebitda_override_reason: current.ebitda_override_reason,
+        ebitda_overridden_by: current.ebitda_overridden_by,
+        ebitda_overridden_at: current.ebitda_overridden_at,
+        ebitda_override_stale: current.ebitda_override_stale,
+      },
+    );
+    if (!ebitda.ok) throw new AppError(ebitda.message, 400);
+    Object.assign(safeBody, ebitda.fields);
+    delete safeBody.ebitda_override;
+    delete safeBody.ebitda_override_margin;
+
     const updated = await tx.risk.update({
       where: { id },
       data: { ...safeBody, org_account_id: ctx.organizationId },
@@ -372,10 +444,52 @@ const delete_risk_from_db = async (req: Request) => {
   return result;
 };
 
+/**
+ * aexa-server#347 — org-scoped EBITDA-at-risk distribution for the
+ * dashboard chart. Reads the already-persisted `ebitda_at_risk` values
+ * (computed/kept fresh by create/update above, including any per-risk
+ * override) rather than recomputing live per request — cheap, and matches
+ * "what the risk detail page shows for this risk" exactly, no drift
+ * between the two views.
+ */
+const get_ebitda_at_risk_summary = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+
+  const [risks, sites] = await Promise.all([
+    prisma.risk.findMany({
+      where: { org_account_id: ctx.organizationId },
+      select: { ebitda_at_risk: true },
+    }),
+    prisma.site.findMany({
+      where: { org_account_id: ctx.organizationId },
+      select: { revenue: true, activity: true },
+    }),
+  ]);
+
+  const ebitdaAtRiskValues = risks
+    .map((r) => r.ebitda_at_risk)
+    .filter((v): v is number => v != null);
+
+  // "Budget" baseline: sum of each site's OWN estimated EBITDA (revenue x
+  // its matched sector margin) -- deliberately independent of any risk's
+  // probability/impact, since this represents total resource at stake, not
+  // an at-risk figure. A site contributes 0 here (not excluded) when its
+  // revenue is missing/non-positive, matching computeEbitdaEstimate's own
+  // null-for-no-revenue convention collapsed to 0 for a sum.
+  const totalEstimatedEbitda = sites.reduce((sum, site) => {
+    const sector = mapActivityToSector(site.activity);
+    return sum + (computeEbitdaEstimate(site.revenue, sector.margin) ?? 0);
+  }, 0);
+
+  return computeEbitdaSummary(ebitdaAtRiskValues, totalEstimatedEbitda, risks.length);
+};
+
 export const risk_service = {
   get_all_risk_from_db,
   get_single_risk_from_db,
   create_risk_into_db,
   update_risk_into_db,
   delete_risk_from_db,
+  get_ebitda_at_risk_summary,
 };

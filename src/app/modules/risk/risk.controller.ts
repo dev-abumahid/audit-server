@@ -2,6 +2,17 @@ import catchAsync from '../../utils/catch_async.js';
 import manageResponse from '../../utils/manage_response.js';
 import { risk_service } from './risk.service.js';
 
+const get_ebitda_at_risk_summary = catchAsync(async (req, res) => {
+  const result = await risk_service.get_ebitda_at_risk_summary(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'EBITDA-at-risk summary fetched successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 const get_all_risk = catchAsync(async (req, res) => {
   const result = await risk_service.get_all_risk_from_db(req);
   manageResponse(res, {
@@ -58,6 +69,7 @@ const delete_risk = catchAsync(async (req, res) => {
 });
 
 export const risk_controller = {
+  get_ebitda_at_risk_summary,
   get_all_risk,
   get_single_risk,
   create_risk,

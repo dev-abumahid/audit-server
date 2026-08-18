@@ -91,6 +91,24 @@ model Risk {
     // line (operational/management-owned), matching Fullbloom's per-entity
     // fallback.
     line_of_defense       LineOfDefense @default(FIRST)
+    // aexa-server#347: EBITDA-at-risk, per the CEO's proposed methodology
+    // (CA du site x Marge EBITDA benchmark x Probabilite x Severite -- see
+    // ebitda_risk.ts for the full formula/mapping writeup). Same
+    // derived-with-override-and-staleness shape as inherent/residual_score
+    // above: auto-computed from Site.revenue/activity + probability/impact
+    // by default, but the benchmark margin is user-overridable (becomes the
+    // org's "real" EBITDA margin per the ticket's "devient l'EBITDA reel").
+    // ebitda_benchmark_sector stores the matched sector_benchmarks.ts key
+    // (or the sector the override was made FROM); ebitda_benchmark_margin
+    // is the 0-1 fraction actually used (benchmark or overridden).
+    ebitda_at_risk           Int?
+    ebitda_benchmark_sector  String?
+    ebitda_benchmark_margin  Float?
+    ebitda_is_override       Boolean   @default(false)
+    ebitda_override_reason   String?
+    ebitda_overridden_by     String?
+    ebitda_overridden_at     DateTime?
+    ebitda_override_stale    Boolean   @default(false)
     createdAt             DateTime @default(now())
     updatedAt             DateTime @updatedAt
 
