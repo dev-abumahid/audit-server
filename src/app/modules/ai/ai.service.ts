@@ -284,6 +284,18 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
   }
 };
 
+// aexa-server#345: aexa-ai's /risk_analysis RiskAnalysisRequest.existing_risks
+// (added alongside this change) is capped at 200 items / 200-char title /
+// 100-char category and rejects extra fields (`extra="forbid"`). Mirroring
+// the caps here means an org with a very large risk register gets a
+// silently-truncated dedup hint instead of a 422 "extra_forbidden"-style
+// rejection from aexa-ai — this endpoint already tolerates skipping dedup
+// awareness (see the comment below), so failing open by truncating is the
+// right behavior, not failing the whole analysis.
+const MAX_EXISTING_RISKS_FOR_DEDUP = 200;
+const MAX_EXISTING_RISK_TITLE_LENGTH = 200;
+const MAX_EXISTING_RISK_CATEGORY_LENGTH = 100;
+
 // Generates candidate risks for a site from aexa-ai's /risk_analysis
 // endpoint. Unlike the other AI proxies above, this one does not persist
 // anything — it returns the raw suggestions so the caller can review and
@@ -322,6 +334,27 @@ const analyze_site_risks_with_ai = async (req: Request) => {
       );
     }
 
+    // Issue #345: a repeat AI risk analysis on the same site was
+    // re-suggesting risks already imported into the register (e.g. two
+    // near-identical physical-security risks, SEC-001/SEC-002) because
+    // aexa-ai's prompt had no visibility into what already exists here.
+    // Fetch a lightweight title/category summary of the site's currently
+    // registered risks and forward it via the new optional
+    // `existing_risks` field so the LLM can avoid re-proposing
+    // near-duplicates. Org-scoped by (site_id, org_account_id) — same
+    // scoping shape as every other Risk query in this codebase.
+    const existingRisks = await prisma.risk.findMany({
+      where: {
+        site_id: siteId,
+        org_account_id: ctx.organizationId,
+      },
+      select: {
+        name: true,
+        category: true,
+      },
+      take: MAX_EXISTING_RISKS_FOR_DEDUP,
+    });
+
     // Deliberately not including a system_prompt field — see the comment on
     // ai_validations.analyze_site_risks. site_legal_entity has no analog on
     // the Site model yet, so it's sent empty rather than guessed.
@@ -342,6 +375,19 @@ const analyze_site_risks_with_ai = async (req: Request) => {
           site_revenue: String(site.revenue),
           site_employees: String(site.employees_count),
           site_type: site.site_type,
+          // Omitted entirely (rather than sent as an empty array) when the
+          // site has no registered risks yet — matches aexa-ai's
+          // Optional[List[...]] = None default, so a site with nothing
+          // registered gets byte-identical request behavior to before this
+          // change.
+          ...(existingRisks.length > 0
+            ? {
+                existing_risks: existingRisks.map((risk) => ({
+                  title: risk.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH),
+                  category: risk.category.slice(0, MAX_EXISTING_RISK_CATEGORY_LENGTH),
+                })),
+              }
+            : {}),
         }),
       },
       LLM_CALL_TIMEOUT_MS,

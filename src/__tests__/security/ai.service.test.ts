@@ -26,7 +26,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findFirst: vi.fn(),
       count: vi.fn(),
     },
-    risk: { findUnique: vi.fn() },
+    risk: { findUnique: vi.fn(), findMany: vi.fn() },
     site: { findUnique: vi.fn() },
     inspection: { findFirst: vi.fn() },
     orgMember: { findUnique: vi.fn() },
@@ -88,6 +88,12 @@ describe('ai service — AI response error handling', () => {
     // caller's own accountId), same as every other org-anchor-scoped
     // service's test file in this repo.
     orgMemberDb.findUnique.mockResolvedValue(null);
+    // Issue #345: analyze_site_risks_with_ai now queries existing risks for
+    // the site before calling aexa-ai. Defaulting to an empty array here
+    // keeps every pre-existing test in this file (which doesn't care about
+    // dedup) exercising the same "no existing_risks in the request body"
+    // path it always has -- individual tests below override this.
+    riskDb.findMany.mockResolvedValue([]);
   });
 
   describe('generate_template_with_prompt_with_ai', () => {
@@ -351,6 +357,86 @@ describe('ai service — AI response error handling', () => {
       );
 
       expect(result).toEqual([riskItem]);
+    });
+
+    // Issue #345: a repeat AI risk analysis on a site re-suggested risks
+    // already imported into the register because aexa-ai's prompt had no
+    // visibility into what already exists. These tests cover the new
+    // existing-risks lookup and forwarding.
+    describe('existing-risks dedup forwarding (issue #345)', () => {
+      const mockSite = () =>
+        siteDb.findUnique.mockResolvedValue({
+          id: 'site-1',
+          name: 'Lyon Plant',
+          location: 'Lyon',
+          country: 'France',
+          activity: 'Manufacturing',
+          revenue: 5000000,
+          employees_count: 250,
+          site_type: 'production',
+        });
+
+      const mockSuccessfulAiCall = () =>
+        (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ risks: [] }),
+        });
+
+      it('queries the site risks scoped by siteId and the caller org before calling aexa-ai', async () => {
+        mockSite();
+        mockSuccessfulAiCall();
+
+        await ai_service.analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } }));
+
+        expect(riskDb.findMany).toHaveBeenCalledWith({
+          where: { site_id: 'site-1', org_account_id: ORG_A },
+          select: { name: true, category: true },
+          take: 200,
+        });
+      });
+
+      it('omits existing_risks entirely from the aexa-ai request body when the site has no registered risks', async () => {
+        mockSite();
+        riskDb.findMany.mockResolvedValue([]);
+        mockSuccessfulAiCall();
+
+        await ai_service.analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } }));
+
+        const [, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+        const sentBody = JSON.parse(options.body);
+        expect(sentBody).not.toHaveProperty('existing_risks');
+      });
+
+      it('forwards a title/category-only summary of existing risks when the site has some registered', async () => {
+        mockSite();
+        riskDb.findMany.mockResolvedValue([
+          { name: 'Unauthorized site access (SEC-001)', category: 'Physical Security' },
+          { name: 'Perimeter breach (SEC-002)', category: 'Physical Security' },
+        ]);
+        mockSuccessfulAiCall();
+
+        await ai_service.analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } }));
+
+        const [, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+        const sentBody = JSON.parse(options.body);
+        expect(sentBody.existing_risks).toEqual([
+          { title: 'Unauthorized site access (SEC-001)', category: 'Physical Security' },
+          { title: 'Perimeter breach (SEC-002)', category: 'Physical Security' },
+        ]);
+      });
+
+      it("truncates an existing risk title/category to aexa-ai's per-field caps before forwarding", async () => {
+        mockSite();
+        riskDb.findMany.mockResolvedValue([{ name: 'x'.repeat(250), category: 'y'.repeat(150) }]);
+        mockSuccessfulAiCall();
+
+        await ai_service.analyze_site_risks_with_ai(makeReq({ body: { siteId: 'site-1' } }));
+
+        const [, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+        const sentBody = JSON.parse(options.body);
+        expect(sentBody.existing_risks[0].title).toHaveLength(200);
+        expect(sentBody.existing_risks[0].category).toHaveLength(100);
+      });
     });
 
     // Issue #917: aexa-ai's /risk_analysis endpoint 400s on a blank
