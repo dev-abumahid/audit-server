@@ -1521,20 +1521,57 @@ describe('risk_service — POST /risk/suggest-fields (mocked aexa-ai call)', () 
     });
   });
 
-  it('returns the aexa-ai suggestions object on success', async () => {
+  it('returns the aexa-ai suggestions and rationale on success', async () => {
     siteDb.findUnique.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
     db.findMany.mockResolvedValue([]);
     const suggestions = { probability: 65, velocity: 'high' };
+    const rationale = { probability: 'Cyber risks at this site type are common.' };
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
-      json: async () => ({ suggestions }),
+      json: async () => ({ suggestions, rationale }),
     });
 
     const result = await risk_service.suggest_risk_fields_with_ai(
       makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
     );
 
-    expect(result).toEqual(suggestions);
+    expect(result).toEqual({ suggestions, rationale });
+  });
+
+  it('defaults rationale to an empty object when aexa-ai omits it', async () => {
+    siteDb.findUnique.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ suggestions: { probability: 65 } }),
+    });
+
+    const result = await risk_service.suggest_risk_fields_with_ai(
+      makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+    );
+
+    expect(result).toEqual({ suggestions: { probability: 65 }, rationale: {} });
+  });
+
+  it('defaults rationale to an empty object when aexa-ai returns a non-object value for it', async () => {
+    // Review finding: `data.rationale ?? {}` alone only falls back on
+    // null/undefined -- a truthy non-object (string/array/number) would
+    // otherwise flow straight through to the client unfiltered.
+    siteDb.findUnique.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+
+    for (const malformed of ['not an object', ['a', 'list'], 42]) {
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: async () => ({ suggestions: { probability: 65 }, rationale: malformed }),
+      });
+
+      const result = await risk_service.suggest_risk_fields_with_ai(
+        makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+      );
+
+      expect(result).toEqual({ suggestions: { probability: 65 }, rationale: {} });
+    }
   });
 
   it('wraps a non-ok aexa-ai response as a 502', async () => {

@@ -503,7 +503,23 @@ type RiskFieldSuggestionAiResponse = {
     financial_impact_min?: number;
     financial_impact_max?: number;
   };
+  // quality-bar-loop round 5: one-sentence reason per SUGGESTED field,
+  // keyed by field name -- aexa-ai's own _normalize only includes an entry
+  // here for a field that also made it into `suggestions`. Optional --
+  // aexa-ai's own fallback path (LLM call produced nothing parseable)
+  // returns just `{"suggestions": {}}` with no `rationale` key at all.
+  rationale?: Record<string, string>;
 };
+
+// Review finding: `data.rationale ?? {}` alone only falls back on
+// null/undefined -- a non-object truthy value (aexa-ai returning a string
+// or array for `rationale`, however unlikely given aexa-ai's own
+// _normalize_rationale already guards against that) would otherwise flow
+// straight through to the client unfiltered, unlike `suggestions` which
+// has no such gap since it's always assigned from a dict literal in
+// _normalize.
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 // POST /risk/suggest-fields — pure proxy to aexa-ai's /risk/suggest-fields,
 // same non-persisting "return raw suggestions for client-side review"
@@ -578,7 +594,15 @@ const suggest_risk_fields_with_ai = async (req: Request) => {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }
     const data = (await aiResponse.json()) as RiskFieldSuggestionAiResponse;
-    return data.suggestions ?? {};
+    // quality-bar-loop round 5: the response shape grew from a flat
+    // suggestions object to {suggestions, rationale} -- an internal,
+    // same-deploy API with no external consumers, so this ships as a
+    // coordinated change across aexa-ai/aexa-server/aexa-frontend rather
+    // than needing a versioned/backwards-compatible transition.
+    return {
+      suggestions: data.suggestions ?? {},
+      rationale: isPlainObject(data.rationale) ? (data.rationale as Record<string, string>) : {},
+    };
   } catch (error) {
     return wrapAiServiceError(error, 'Failed to generate risk field suggestions');
   }
