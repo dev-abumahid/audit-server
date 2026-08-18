@@ -1,0 +1,56 @@
+enum AiSuggestionStatus {
+  DISMISSED
+  IMPORTED
+}
+
+// aexa-frontend#922: tracks user decisions (dismiss / import) made on
+// AI-suggested risks, so that:
+//  1. A dismissed suggestion can be shown in a per-site "dismissed history" view.
+//  2. If a later analysis run resuggests the same (or renamed-but-identical)
+//     risk, the frontend can mark it "previously dismissed" instead of
+//     presenting it as fresh.
+// Suggestions the user hasn't acted on yet are NOT persisted here at all —
+// only dismissed/imported ones get a row. risk_id from aexa-ai is NOT a
+// stable identity across analysis runs (regenerated every call), so identity
+// is a fingerprint of (siteId, normalized title, normalized category)
+// instead — see aiSuggestion.service.ts's buildSuggestionFingerprint.
+model AiSuggestionState {
+  id           String  @id @default(uuid())
+  siteId       String
+  site         Site    @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  orgAccountId String
+  account      Account @relation(fields: [orgAccountId], references: [id], onDelete: Cascade)
+
+  // Stable identity for this suggestion within this site — lowercased/
+  // trimmed/whitespace-collapsed `${title}::${category}` string, computed
+  // server-side by buildSuggestionFingerprint (aiSuggestion.service.ts). Plain string,
+  // not a hash — the inputs are already short and non-sensitive, so a hash
+  // buys nothing but debuggability loss.
+  fingerprint String
+
+  // Snapshot fields kept for display in the dismissed-history view without
+  // needing to re-run analysis. title/category double as the fingerprint's
+  // inputs (kept in sync, never re-derived from the JSON blob).
+  title      String
+  category   String
+  // Full original suggestion payload (all RiskSuggestion fields) as JSON, so
+  // the history view can show inherent/residual score etc. without a schema
+  // migration every time the AI response shape gains a field.
+  suggestion Json
+
+  status    AiSuggestionStatus
+  // accountId of the org member who dismissed/imported this suggestion.
+  // Plain string, mirroring RiskApproval.submittedById /
+  // FindingAssignment.assignedById (not an Account FK) — this repo's
+  // dominant pattern for "who acted" columns, and it avoids a second real
+  // relation onto Account for what is purely an audit-trail value.
+  actedById String
+  actedAt   DateTime           @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([siteId, fingerprint])
+  @@index([orgAccountId])
+  @@index([siteId, status])
+}
