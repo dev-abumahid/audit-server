@@ -60,7 +60,35 @@ const create_risk = z.object({
 });
 const update_risk = create_risk.partial();
 
+// POST /risk/suggest-fields — matches RiskFormModal's AI-suggestable field
+// set exactly (probability/impact/velocity/trend/control_design_eff/
+// control_operating_eff/financial_impact_min/financial_impact_max).
+// inherent_score/residual_score/pagerank_score are deliberately excluded --
+// all three are server-derived (see create_risk's own comments above), so
+// suggesting them directly would be silently discarded on save unless the
+// override toggle is also set, which this feature doesn't do.
+const RISK_FIELD_NAMES = z.enum([
+  'probability',
+  'impact',
+  'velocity',
+  'trend',
+  'control_design_eff',
+  'control_operating_eff',
+  'financial_impact_min',
+  'financial_impact_max',
+]);
+
+const suggest_fields = z.object({
+  name: z.string().min(1, 'Name is required'),
+  category: z.string().min(1, 'Category is required'),
+  site_id: z.string().min(1, 'Site is required'),
+  // Omitted/undefined = suggest all fields (the bulk pre-fill path). A
+  // single-element array is the per-field "suggest just this one" path.
+  fields: z.array(RISK_FIELD_NAMES).min(1).optional(),
+});
+
 export const risk_validations = {
   create_risk,
   update_risk,
+  suggest_fields,
 };

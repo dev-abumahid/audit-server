@@ -68,6 +68,17 @@ const delete_risk = catchAsync(async (req, res) => {
   });
 });
 
+const suggest_fields = catchAsync(async (req, res) => {
+  const result = await risk_service.suggest_risk_fields_with_ai(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Risk field suggestions generated successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const risk_controller = {
   get_ebitda_at_risk_summary,
   get_all_risk,
@@ -75,4 +86,5 @@ export const risk_controller = {
   create_risk,
   update_risk,
   delete_risk,
+  suggest_fields,
 };

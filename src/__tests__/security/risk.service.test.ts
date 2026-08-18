@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, ORG_B, makeReq } from '../helpers/makeReq.js';
 
 vi.mock('../../app/lib/prisma.js', () => ({
@@ -34,6 +34,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     site: {
       findFirst: vi.fn(),
       findMany: vi.fn(),
+      findUnique: vi.fn(),
     },
     orgMember: {
       findUnique: vi.fn(),
@@ -1393,6 +1394,173 @@ describe('risk service — org scoping (ticket #6)', () => {
       await expect(
         risk_service.delete_risk_from_db(makeReq({ params: { id: 'r1' } })),
       ).resolves.toEqual({ id: 'r1' });
+    });
+  });
+});
+
+describe('risk_service — POST /risk/suggest-fields (mocked aexa-ai call)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Review finding: every other write-gated risk operation in this file
+  // (create/update/delete_risk, line_of_defense reassignment) has a
+  // VIEWER/LIGHT_USER 403 test using mockMembership -- this suite's own
+  // beforeEach always resolves orgMemberDb.findUnique to null (the
+  // no-membership-row ADMIN-of-self fallback), so without this test the
+  // assertCanWriteOrgResource gate on this new endpoint was never actually
+  // exercised; a regression that silently dropped it would go undetected.
+  it('VIEWER cannot request AI field suggestions', async () => {
+    mockMembership('VIEWER');
+
+    await expect(
+      risk_service.suggest_risk_fields_with_ai(
+        makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(siteDb.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('404s when the site does not belong to (or exist for) the caller org, without calling aexa-ai', async () => {
+    siteDb.findUnique.mockResolvedValue(null);
+
+    await expect(
+      risk_service.suggest_risk_fields_with_ai(
+        makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('scopes the site lookup and the existing-risks context query to the caller org', async () => {
+    siteDb.findUnique.mockResolvedValue({
+      id: 'site-1',
+      name: 'HQ Casablanca',
+      activity: 'Manufacturing',
+    });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ suggestions: {} }),
+    });
+
+    await risk_service.suggest_risk_fields_with_ai(
+      makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+    );
+
+    expect(siteDb.findUnique).toHaveBeenCalledWith({
+      where: { id: 'site-1', org_account_id: ORG_A },
+    });
+    expect(db.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { org_account_id: ORG_A, site_id: 'site-1' } }),
+    );
+  });
+
+  it('sends risk context, site context, and the requested fields subset with the internal-secret header', async () => {
+    siteDb.findUnique.mockResolvedValue({
+      id: 'site-1',
+      name: 'HQ Casablanca',
+      activity: 'Manufacturing',
+    });
+    db.findMany.mockResolvedValue([
+      {
+        name: 'Prior fire risk',
+        category: 'fire',
+        probability: 40,
+        impact: 60,
+        velocity: 'high',
+        trend: 'none',
+      },
+    ]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ suggestions: { velocity: 'critical' } }),
+    });
+
+    await risk_service.suggest_risk_fields_with_ai(
+      makeReq({
+        body: {
+          name: 'Ransomware attack',
+          category: 'cyber',
+          site_id: 'site-1',
+          fields: ['velocity'],
+        },
+      }),
+    );
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain('/risk/suggest-fields');
+    expect(init.method).toBe('POST');
+    expect(init.headers['X-Internal-Secret']).toBeDefined();
+
+    const body = JSON.parse(init.body);
+    expect(body).toEqual({
+      risk_name: 'Ransomware attack',
+      category: 'cyber',
+      site_name: 'HQ Casablanca',
+      site_activity: 'Manufacturing',
+      fields: ['velocity'],
+      existing_risks: [
+        {
+          name: 'Prior fire risk',
+          category: 'fire',
+          probability: 40,
+          impact: 60,
+          velocity: 'high',
+          trend: 'none',
+        },
+      ],
+    });
+  });
+
+  it('returns the aexa-ai suggestions object on success', async () => {
+    siteDb.findUnique.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    const suggestions = { probability: 65, velocity: 'high' };
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ suggestions }),
+    });
+
+    const result = await risk_service.suggest_risk_fields_with_ai(
+      makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+    );
+
+    expect(result).toEqual(suggestions);
+  });
+
+  it('wraps a non-ok aexa-ai response as a 502', async () => {
+    siteDb.findUnique.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 503 });
+
+    await expect(
+      risk_service.suggest_risk_fields_with_ai(
+        makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 502 });
+  });
+
+  it('wraps a network failure as a generic 500, not the raw error', async () => {
+    siteDb.findUnique.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('ECONNREFUSED'));
+
+    await expect(
+      risk_service.suggest_risk_fields_with_ai(
+        makeReq({ body: { name: 'Ransomware attack', category: 'cyber', site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 500,
+      message: 'Failed to generate risk field suggestions',
     });
   });
 });

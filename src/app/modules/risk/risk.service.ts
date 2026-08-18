@@ -1,4 +1,5 @@
 import { Request } from 'express';
+import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
@@ -8,6 +9,12 @@ import {
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
+import {
+  buildAiHeaders,
+  fetchWithTimeout,
+  LLM_CALL_TIMEOUT_MS,
+  wrapAiServiceError,
+} from '../ai/ai.service.js';
 import { deriveApprovalState, risk_approval_service } from './risk.approval.service.js';
 import { createRiskWithGeneratedRef } from './risk_ref.js';
 import { resolveInherentFields, resolveResidualFields } from './risk_scoring.js';
@@ -485,6 +492,98 @@ const get_ebitda_at_risk_summary = async (req: Request) => {
   return computeEbitdaSummary(ebitdaAtRiskValues, totalEstimatedEbitda, risks.length);
 };
 
+type RiskFieldSuggestionAiResponse = {
+  suggestions: {
+    probability?: number;
+    impact?: number;
+    velocity?: string;
+    trend?: string;
+    control_design_eff?: number;
+    control_operating_eff?: number;
+    financial_impact_min?: number;
+    financial_impact_max?: number;
+  };
+};
+
+// POST /risk/suggest-fields — pure proxy to aexa-ai's /risk/suggest-fields,
+// same non-persisting "return raw suggestions for client-side review"
+// convention as analyze_site_risks_with_ai (ai.service.ts). Lives in this
+// module rather than the generic `ai` module, following
+// risk.correlation.service.ts's root-cause-bucketing precedent for
+// risk-domain AI logic.
+const suggest_risk_fields_with_ai = async (req: Request) => {
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
+
+    const { name, category, site_id, fields } = req.body as {
+      name: string;
+      category: string;
+      site_id: string;
+      fields?: string[];
+    };
+
+    const site = await prisma.site.findUnique({
+      where: { id: site_id, org_account_id: ctx.organizationId },
+    });
+    if (!site) {
+      throw new AppError('Site not found', 404);
+    }
+
+    // A few of this org's other risks at the same site, for calibration --
+    // same "give the model real context, not just the one risk's name"
+    // reasoning as run_root_cause_bucketing's risks array.
+    const existingRisks = await prisma.risk.findMany({
+      where: { org_account_id: ctx.organizationId, site_id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: {
+        name: true,
+        category: true,
+        probability: true,
+        impact: true,
+        velocity: true,
+        trend: true,
+      },
+    });
+
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/risk/suggest-fields`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAiHeaders(ctx.organizationId),
+        },
+        body: JSON.stringify({
+          risk_name: name,
+          category,
+          site_name: site.name,
+          site_activity: site.activity || '',
+          fields,
+          existing_risks: existingRisks.map((r) => ({
+            name: r.name,
+            category: r.category,
+            probability: r.probability,
+            impact: r.impact,
+            velocity: r.velocity,
+            trend: r.trend,
+          })),
+        }),
+      },
+      LLM_CALL_TIMEOUT_MS,
+    );
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
+    const data = (await aiResponse.json()) as RiskFieldSuggestionAiResponse;
+    return data.suggestions ?? {};
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to generate risk field suggestions');
+  }
+};
+
 export const risk_service = {
   get_all_risk_from_db,
   get_single_risk_from_db,
@@ -492,4 +591,5 @@ export const risk_service = {
   update_risk_into_db,
   delete_risk_from_db,
   get_ebitda_at_risk_summary,
+  suggest_risk_fields_with_ai,
 };

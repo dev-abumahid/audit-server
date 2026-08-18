@@ -43,6 +43,17 @@ router.get(
   risk_controller.get_ebitda_at_risk_summary,
 );
 
+// Same "fixed sub-path, must come before /:id" reasoning as the routes
+// above. Non-persisting -- returns AI-suggested values for the caller to
+// review/apply client-side (RiskFormModal's AI pre-fill), same convention
+// as POST /ai/analyze-site-risks.
+router.post(
+  '/suggest-fields',
+  auth('ORGANIZATION'),
+  RequestValidator(risk_validations.suggest_fields),
+  risk_controller.suggest_fields,
+);
+
 router.get('/', auth('ORGANIZATION'), risk_controller.get_all_risk);
 router.post(
   '/',
