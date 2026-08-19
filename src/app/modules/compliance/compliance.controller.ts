@@ -145,6 +145,17 @@ const unlink_risk_from_obligation = catchAsync(async (req, res) => {
   });
 });
 
+const suggest_regulatory_sources = catchAsync(async (req, res) => {
+  const result = await compliance_service.suggest_regulatory_sources_with_ai(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Regulatory coverage suggestions generated successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const compliance_controller = {
   get_all_compliance,
   get_single_compliance,
@@ -159,4 +170,5 @@ export const compliance_controller = {
   create_risk_from_obligation,
   link_risk_to_obligation,
   unlink_risk_from_obligation,
+  suggest_regulatory_sources,
 };

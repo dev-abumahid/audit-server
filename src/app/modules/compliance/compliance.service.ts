@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { Request } from 'express';
+import { configs } from '../../configs/index.js';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
@@ -15,6 +16,12 @@ import {
   retryTransactionOnRefConflict,
   SEVERITY_TO_SCORE,
 } from '../risk/risk_ref.js';
+import {
+  buildAiHeaders,
+  fetchWithTimeout,
+  LLM_CALL_TIMEOUT_MS,
+  wrapAiServiceError,
+} from '../ai/ai.service.js';
 
 // aexa-server#243: due dates previously had zero teeth — an obligation 18
 // months past due_date with no attachments stayed "compliant" in the
@@ -966,6 +973,86 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
   };
 };
 
+// --------------------------------------------------------------------------
+// aexa-frontend#939 (CEO feedback follow-up): "how do I know if all
+// regulatory sources are covered" — an AI-suggestion proxy that identifies
+// regulatory sources likely applicable to a site (by activity + country)
+// and NOT already tracked as a ComplianceObligation for that site, so the
+// gap is surfaced instead of left for the user to guess at. Pure proxy, no
+// persistence — mirrors risk.service.ts's suggest_risk_fields_with_ai and
+// analyze_site_risks_with_ai exactly: the caller reviews suggestions and
+// turns any of them into a real obligation via the existing POST
+// /compliance route, same "review and selectively import" shape.
+const MAX_EXISTING_OBLIGATIONS_FOR_DEDUP = 100;
+
+interface RegulatoryCoverageAiResponse {
+  suggestions?: {
+    name: string;
+    domain: string;
+    jurisdiction: string;
+    rationale: string;
+    source_url?: string | null;
+  }[];
+}
+
+const suggest_regulatory_sources_with_ai = async (req: Request) => {
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
+
+    const { site_id } = req.body as { site_id: string };
+
+    const site = await prisma.site.findFirst({
+      where: { id: site_id, org_account_id: ctx.organizationId },
+    });
+    if (!site) {
+      throw new AppError('Site not found', 404);
+    }
+
+    // Same "read existing state before suggesting" rule aexa-server#345
+    // established for risk suggestions — the model must see what's already
+    // tracked for this site so it doesn't re-suggest a covered source.
+    const existingObligations = await prisma.complianceObligation.findMany({
+      where: { org_account_id: ctx.organizationId, site_id },
+      select: { domain: true, regulation_reference: true },
+      take: MAX_EXISTING_OBLIGATIONS_FOR_DEDUP,
+    });
+
+    const aiResponse = await fetchWithTimeout(
+      `${configs.ai_server_end_point}/compliance/suggest-regulatory-sources`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAiHeaders(ctx.organizationId),
+        },
+        body: JSON.stringify({
+          site_name: site.name,
+          site_activity: site.activity || '',
+          site_country: site.country || '',
+          existing_obligations: existingObligations.map((o) => ({
+            domain: o.domain,
+            regulation_reference: o.regulation_reference,
+          })),
+        }),
+      },
+      LLM_CALL_TIMEOUT_MS,
+    );
+    if (!aiResponse.ok) {
+      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
+    }
+    const data = (await aiResponse.json()) as RegulatoryCoverageAiResponse;
+    // Review finding (mirrors risk.service.ts's isPlainObject guard on the
+    // analogous `rationale` field): `?? []` alone only guards null/
+    // undefined -- a truthy non-array (string/object/number) from aexa-ai
+    // would otherwise flow through unfiltered to the client.
+    return { suggestions: Array.isArray(data.suggestions) ? data.suggestions : [] };
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to generate regulatory coverage suggestions');
+  }
+};
+
 export const compliance_service = {
   get_all_compliance_from_db,
   get_single_compliance_from_db,
@@ -980,4 +1067,5 @@ export const compliance_service = {
   create_risk_from_obligation_into_db,
   link_risk_to_obligation_into_db,
   unlink_risk_from_obligation_into_db,
+  suggest_regulatory_sources_with_ai,
 };

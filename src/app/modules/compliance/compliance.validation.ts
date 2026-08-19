@@ -131,10 +131,20 @@ const link_risk_to_obligation = z.object({
   riskId: z.string().min(1, 'riskId is required'),
 });
 
+// POST /compliance/suggest-regulatory-sources — the only client input is
+// which site to check; the site's own activity/country and this org's
+// already-tracked obligations for it are all resolved server-side, matching
+// risk.validation.ts's suggest_fields (site_id in, everything else looked
+// up).
+const suggest_regulatory_sources = z.object({
+  site_id: z.string().min(1, 'site_id is required'),
+});
+
 export const compliance_validations = {
   create_compliance,
   update_compliance,
   attest_compliance,
   create_risk_from_obligation,
   link_risk_to_obligation,
+  suggest_regulatory_sources,
 };

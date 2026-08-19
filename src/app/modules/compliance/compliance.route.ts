@@ -14,8 +14,8 @@ router.post(
   RequestValidator(compliance_validations.create_compliance),
   compliance_controller.create_compliance,
 );
-// Static segments (`/scorecard`, `/attachment`) declared before the dynamic
-// `/:id` route so they're never captured as an id.
+// Static segments (`/scorecard`, `/attachment`, `/suggest-regulatory-sources`)
+// declared before the dynamic `/:id` route so they're never captured as an id.
 router.get('/scorecard', auth('ORGANIZATION'), compliance_controller.get_compliance_scorecard);
 router.post(
   '/attachment',
@@ -23,6 +23,16 @@ router.post(
   uploader.single('file'),
   enforceUploadSizeLimit,
   compliance_controller.upload_compliance_attachment,
+);
+// aexa-frontend#939: AI-suggests regulatory sources likely applicable to a
+// site that aren't already tracked, for the CEO's "how do I know coverage
+// is complete" question. Same review-then-import shape as POST
+// /risk/suggest-fields — no obligation is created here.
+router.post(
+  '/suggest-regulatory-sources',
+  auth('ORGANIZATION'),
+  RequestValidator(compliance_validations.suggest_regulatory_sources),
+  compliance_controller.suggest_regulatory_sources,
 );
 router.get('/:id', auth('ORGANIZATION'), compliance_controller.get_single_compliance);
 router.patch(

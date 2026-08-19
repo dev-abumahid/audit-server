@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ORG_A, makeReq } from '../helpers/makeReq.js';
 
 vi.mock('../../app/lib/prisma.js', () => ({
@@ -2390,6 +2390,210 @@ describe('compliance validation schemas', () => {
         riskId: 'risk-1',
       });
       expect(parsed.riskId).toBe('risk-1');
+    });
+  });
+
+  describe('suggest_regulatory_sources (aexa-frontend#939)', () => {
+    it('requires a non-empty site_id', async () => {
+      await expect(
+        compliance_validations.suggest_regulatory_sources.parseAsync({}),
+      ).rejects.toBeTruthy();
+      await expect(
+        compliance_validations.suggest_regulatory_sources.parseAsync({ site_id: '' }),
+      ).rejects.toBeTruthy();
+    });
+
+    it('accepts a site_id', async () => {
+      const parsed = await compliance_validations.suggest_regulatory_sources.parseAsync({
+        site_id: 'site-1',
+      });
+      expect(parsed.site_id).toBe('site-1');
+    });
+  });
+});
+
+describe('compliance_service — POST /compliance/suggest-regulatory-sources (mocked aexa-ai call)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Same reasoning as risk.service.test.ts's identical VIEWER test on
+  // suggest-fields: this suite's own beforeEach always resolves
+  // orgMemberDb.findUnique to null (the no-membership-row ADMIN-of-self
+  // fallback), so without an explicit VIEWER test the write gate on this
+  // new endpoint would go unexercised.
+  it('VIEWER cannot request regulatory coverage suggestions', async () => {
+    mockMembership('VIEWER');
+
+    await expect(
+      compliance_service.suggest_regulatory_sources_with_ai(
+        makeReq({ body: { site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(siteDb.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('404s when the site does not belong to (or exist for) the caller org, without calling aexa-ai', async () => {
+    siteDb.findFirst.mockResolvedValue(null);
+
+    await expect(
+      compliance_service.suggest_regulatory_sources_with_ai(
+        makeReq({ body: { site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('scopes the site lookup and the existing-obligations context query to the caller org and site', async () => {
+    siteDb.findFirst.mockResolvedValue({
+      id: 'site-1',
+      name: 'HQ Casablanca',
+      activity: 'Manufacturing',
+      country: 'Morocco',
+    });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ suggestions: [] }),
+    });
+
+    await compliance_service.suggest_regulatory_sources_with_ai(
+      makeReq({ body: { site_id: 'site-1' } }),
+    );
+
+    expect(siteDb.findFirst).toHaveBeenCalledWith({
+      where: { id: 'site-1', org_account_id: ORG_A },
+    });
+    expect(db.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { org_account_id: ORG_A, site_id: 'site-1' } }),
+    );
+  });
+
+  it('sends site context and existing-obligation references with the internal-secret header', async () => {
+    siteDb.findFirst.mockResolvedValue({
+      id: 'site-1',
+      name: 'HQ Casablanca',
+      activity: 'Manufacturing',
+      country: 'Morocco',
+    });
+    db.findMany.mockResolvedValue([{ domain: 'data_protection', regulation_reference: 'GDPR' }]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ suggestions: [] }),
+    });
+
+    await compliance_service.suggest_regulatory_sources_with_ai(
+      makeReq({ body: { site_id: 'site-1' } }),
+    );
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain('/compliance/suggest-regulatory-sources');
+    expect(init.method).toBe('POST');
+    expect(init.headers['X-Internal-Secret']).toBeDefined();
+
+    const body = JSON.parse(init.body);
+    expect(body).toEqual({
+      site_name: 'HQ Casablanca',
+      site_activity: 'Manufacturing',
+      site_country: 'Morocco',
+      existing_obligations: [{ domain: 'data_protection', regulation_reference: 'GDPR' }],
+    });
+  });
+
+  it('returns the aexa-ai suggestions on success', async () => {
+    siteDb.findFirst.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    const suggestions = [
+      {
+        name: 'GDPR',
+        domain: 'data_protection',
+        jurisdiction: 'European Union',
+        rationale: 'The site processes EU personal data.',
+        source_url: 'https://example.com/gdpr',
+      },
+    ];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ suggestions }),
+    });
+
+    const result = await compliance_service.suggest_regulatory_sources_with_ai(
+      makeReq({ body: { site_id: 'site-1' } }),
+    );
+
+    expect(result).toEqual({ suggestions });
+  });
+
+  it('defaults suggestions to an empty array when aexa-ai omits them', async () => {
+    siteDb.findFirst.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    });
+
+    const result = await compliance_service.suggest_regulatory_sources_with_ai(
+      makeReq({ body: { site_id: 'site-1' } }),
+    );
+
+    expect(result).toEqual({ suggestions: [] });
+  });
+
+  // Review round 1 finding on PR #354: `?? []` alone only guards null/
+  // undefined -- a truthy non-array (string/object/number) from aexa-ai
+  // would otherwise flow through unfiltered to the client. Mirrors the
+  // analogous isPlainObject test already covering risk.service.ts's
+  // rationale field.
+  it('defaults suggestions to an empty array when aexa-ai returns a non-array value for it', async () => {
+    siteDb.findFirst.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+
+    for (const malformed of ['not an array', { name: 'GDPR' }, 42]) {
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: async () => ({ suggestions: malformed }),
+      });
+
+      const result = await compliance_service.suggest_regulatory_sources_with_ai(
+        makeReq({ body: { site_id: 'site-1' } }),
+      );
+
+      expect(result).toEqual({ suggestions: [] });
+    }
+  });
+
+  it('wraps a non-ok aexa-ai response as a 502', async () => {
+    siteDb.findFirst.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 503 });
+
+    await expect(
+      compliance_service.suggest_regulatory_sources_with_ai(
+        makeReq({ body: { site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 502 });
+  });
+
+  it('wraps a network failure as a generic 500, not the raw error', async () => {
+    siteDb.findFirst.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('ECONNREFUSED'));
+
+    await expect(
+      compliance_service.suggest_regulatory_sources_with_ai(
+        makeReq({ body: { site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 500,
+      message: 'Failed to generate regulatory coverage suggestions',
     });
   });
 });
