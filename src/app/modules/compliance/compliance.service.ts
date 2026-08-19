@@ -1019,26 +1019,44 @@ const suggest_regulatory_sources_with_ai = async (req: Request) => {
       take: MAX_EXISTING_OBLIGATIONS_FOR_DEDUP,
     });
 
-    const aiResponse = await fetchWithTimeout(
-      `${configs.ai_server_end_point}/compliance/suggest-regulatory-sources`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...buildAiHeaders(ctx.organizationId),
+    let aiResponse: Response;
+    try {
+      aiResponse = await fetchWithTimeout(
+        `${configs.ai_server_end_point}/compliance/suggest-regulatory-sources`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...buildAiHeaders(ctx.organizationId),
+          },
+          body: JSON.stringify({
+            site_name: site.name,
+            site_activity: site.activity || '',
+            site_country: site.country || '',
+            existing_obligations: existingObligations.map((o) => ({
+              domain: o.domain,
+              regulation_reference: o.regulation_reference,
+            })),
+          }),
         },
-        body: JSON.stringify({
-          site_name: site.name,
-          site_activity: site.activity || '',
-          site_country: site.country || '',
-          existing_obligations: existingObligations.map((o) => ({
-            domain: o.domain,
-            regulation_reference: o.regulation_reference,
-          })),
-        }),
-      },
-      LLM_CALL_TIMEOUT_MS,
-    );
+        LLM_CALL_TIMEOUT_MS,
+      );
+    } catch (fetchError) {
+      // Round-6 quality-bar-loop review (resilience axis): fetchWithTimeout
+      // aborts via AbortController on LLM_CALL_TIMEOUT_MS, which fetch
+      // surfaces as a DOMException named 'AbortError'. Left uncaught, that
+      // falls into the generic catch below and comes out as the exact same
+      // 500/"Failed to generate..." as a Prisma failure or malformed
+      // response -- indistinguishable to the client. Caught here, scoped to
+      // just this call site (not wrapAiServiceError, which is shared by 8+
+      // other AI proxy functions this feature has no reason to change the
+      // behavior of), so the frontend can tell a slow AI call apart from a
+      // genuine error.
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        throw new AppError('Regulatory coverage check timed out', 504);
+      }
+      throw fetchError;
+    }
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }

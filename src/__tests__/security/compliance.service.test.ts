@@ -2596,4 +2596,28 @@ describe('compliance_service — POST /compliance/suggest-regulatory-sources (mo
       message: 'Failed to generate regulatory coverage suggestions',
     });
   });
+
+  // Round-6 quality-bar-loop review (resilience axis): fetchWithTimeout aborts
+  // via AbortController on LLM_CALL_TIMEOUT_MS, and fetch surfaces that as a
+  // DOMException named 'AbortError' -- left uncaught it would fall into the
+  // same generic-500 path as the ECONNREFUSED case above, indistinguishable
+  // to the client from any other failure. This must come out as its own 504
+  // so the frontend can tell "the AI took too long" apart from "something
+  // went wrong."
+  it('wraps an aborted (timed-out) aexa-ai call as a distinct 504, not the generic 500', async () => {
+    siteDb.findFirst.mockResolvedValue({ id: 'site-1', name: 'HQ Casablanca', activity: '' });
+    db.findMany.mockResolvedValue([]);
+    const abortError = new Error('The operation was aborted');
+    abortError.name = 'AbortError';
+    (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(abortError);
+
+    await expect(
+      compliance_service.suggest_regulatory_sources_with_ai(
+        makeReq({ body: { site_id: 'site-1' } }),
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 504,
+      message: 'Regulatory coverage check timed out',
+    });
+  });
 });
