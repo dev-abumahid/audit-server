@@ -991,6 +991,15 @@ interface RegulatoryCoverageAiResponse {
     domain: string;
     jurisdiction: string;
     rationale: string;
+    // Round-14 quality-bar-loop review (industry-standards axis, aexa-ai#202) --
+    // this route is a pure proxy, so the field already flows through
+    // untouched at runtime; this type just keeps the interface accurate.
+    // Optional, not required: this is an unchecked `as` cast over a real
+    // network response, not runtime-validated -- during a rolling deploy
+    // window where aexa-ai hasn't redeployed #202 yet, the field is
+    // genuinely absent on the wire, and `string` would overstate a
+    // guarantee this contract doesn't actually enforce (review round 1).
+    severity?: string;
     source_url?: string | null;
   }[];
 }
