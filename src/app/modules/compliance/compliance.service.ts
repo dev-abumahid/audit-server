@@ -10,6 +10,12 @@ import {
   assertCanWriteOrgResource,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import {
+  assertCanRecordLineReview,
+  invalidateLiveLineReviews,
+  LineOfDefenseValue,
+  recordLineReview,
+} from '../../utils/line_of_defense_review.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import {
   computeNextRiskRef,
@@ -437,9 +443,47 @@ const update_compliance_into_db = async (req: Request) => {
         },
       });
     }
+    // #97: a review is a fact about the obligation's content AT the time it
+    // was reviewed. An edit here makes every live review stale for the same
+    // reason the history diff above is recorded -- see
+    // line_of_defense_review.ts's invalidateLiveLineReviews.
+    await invalidateLiveLineReviews(tx.complianceObligationLineReview, 'obligationId', id);
     return updated;
   });
   return with_overdue(result);
+};
+
+/**
+ * #97: records that `line` independently reviewed this obligation,
+ * superseding any prior live review for that same line. Kept separate from
+ * update_compliance_into_db (assigning ownership) -- see
+ * line_of_defense_review.ts's file comment for why ownership and review
+ * coverage are different facts, not the same field.
+ */
+const record_compliance_line_review = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id } = req.params as Record<string, string>;
+  const existing = await prisma.complianceObligation.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Compliance obligation not found', 404);
+
+  const { line, notes } = req.body as { line: LineOfDefenseValue; notes?: string };
+  assertCanRecordLineReview(ctx, line);
+  await recordLineReview(
+    prisma.complianceObligationLineReview,
+    'obligationId',
+    id,
+    user.accountId,
+    line,
+    notes,
+  );
+
+  return prisma.complianceObligationLineReview.findMany({
+    where: { obligationId: id, invalidatedAt: null },
+    orderBy: { line: 'asc' },
+  });
 };
 
 /**
@@ -1095,4 +1139,5 @@ export const compliance_service = {
   link_risk_to_obligation_into_db,
   unlink_risk_from_obligation_into_db,
   suggest_regulatory_sources_with_ai,
+  record_compliance_line_review,
 };

@@ -154,6 +154,11 @@ model Action {
     // aexa-server#252: finding closure maker-checker workflow.
     closureApprovals ActionClosureApproval[]
 
+    // Multi-line review coverage -- see line_of_defense_review.prisma's file
+    // comment for why this is separate from the line_of_defense ownership
+    // field above.
+    lineReviews ActionLineReview[]
+
     // "Assigned Responsible" — who's nominally on the hook for this
     // finding. Deliberately NOT FindingAssignment: that model is a real
     // access-control mechanism (Light User sub-assignment, approval-gated,

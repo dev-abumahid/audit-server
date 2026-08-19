@@ -7,6 +7,12 @@ import {
   assertCanWriteOrgResource,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import {
+  assertCanRecordLineReview,
+  invalidateLiveLineReviews,
+  LineOfDefenseValue,
+  recordLineReview,
+} from '../../utils/line_of_defense_review.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 export type KriStatus = 'OK' | 'ALERT' | 'WARNING';
@@ -220,7 +226,41 @@ const update_kri_into_db = async (req: Request) => {
     where: { id },
     data: { ...normalizedBody, org_account_id: ctx.organizationId },
   });
+  // #97: a review is a fact about the KRI's content AT the time it was
+  // reviewed. An edit here makes every live review stale — see
+  // line_of_defense_review.ts's invalidateLiveLineReviews and
+  // risk.service.ts's update_risk_into_db for the identical pattern. This
+  // update isn't wrapped in a $transaction (unlike Risk's), so this call
+  // sits right after the plain prisma.kri.update commits, matching that
+  // same placement.
+  await invalidateLiveLineReviews(prisma.kriLineReview, 'kriId', id);
   return with_status(result);
+};
+
+/**
+ * #97: records that `line` independently reviewed this KRI, superseding any
+ * prior live review for that same line. Kept separate from
+ * update_kri_into_db (assigning ownership) -- see line_of_defense_review.ts's
+ * file comment for why ownership and review coverage are different facts,
+ * not the same field. Mirrors risk.service.ts's record_risk_line_review.
+ */
+const record_kri_line_review = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id } = req.params as Record<string, string>;
+  const existing = await prisma.kri.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('KRI not found', 404);
+
+  const { line, notes } = req.body as { line: LineOfDefenseValue; notes?: string };
+  assertCanRecordLineReview(ctx, line);
+  await recordLineReview(prisma.kriLineReview, 'kriId', id, user.accountId, line, notes);
+
+  return prisma.kriLineReview.findMany({
+    where: { kriId: id, invalidatedAt: null },
+    orderBy: { line: 'asc' },
+  });
 };
 
 /**
@@ -410,4 +450,5 @@ export const kri_service = {
   submit_kri_value_into_db,
   get_kri_readings_from_db,
   delete_kri_from_db,
+  record_kri_line_review,
 };

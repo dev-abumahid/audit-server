@@ -25,6 +25,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
       updateMany: vi.fn(),
       count: vi.fn(),
     },
+    riskLineReview: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
+      create: vi.fn(),
+    },
     auditEngagementRisk: {
       count: vi.fn(),
     },
@@ -65,6 +70,10 @@ const recommendationDb = prisma.recommendation as unknown as Record<
 >;
 const kriDb = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskApprovalDb = prisma.riskApproval as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskLineReviewDb = prisma.riskLineReview as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const auditEngagementRiskDb = prisma.auditEngagementRisk as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
@@ -110,6 +119,9 @@ describe('risk service — org scoping (ticket #6)', () => {
     // Default: no live approval cycle referencing the risk, so the delete
     // in-use guard (aexa-server#202) is a no-op unless a test overrides it.
     riskApprovalDb.count.mockResolvedValue(0);
+    // Default (#97): invalidateLiveLineReviews's updateMany is a no-op call
+    // on every edit unless a specific test asserts on it.
+    riskLineReviewDb.updateMany.mockResolvedValue({ count: 0 });
     // Default: risk is not linked to any audit engagement, so the
     // aexa-frontend#165 audit-link delete guard is a no-op unless overridden.
     auditEngagementRiskDb.count.mockResolvedValue(0);
@@ -1219,6 +1231,113 @@ describe('risk service — org scoping (ticket #6)', () => {
 
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data.line_of_defense).toBe('GOVERNING_BODY');
+    });
+  });
+
+  describe('record_risk_line_review (#97)', () => {
+    it('throws 404 and does not record a review for another org risk', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        risk_service.record_risk_line_review(
+          makeReq({ params: { id: 'org-b-risk' }, body: { line: 'SECOND' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(riskLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR can record a THIRD-line review (audit-line self-check)', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      riskLineReviewDb.create.mockResolvedValue({ id: 'rev-1' });
+      riskLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-1', line: 'THIRD' }]);
+
+      await risk_service.record_risk_line_review(
+        makeReq({ params: { id: 'r1' }, body: { line: 'THIRD' } }),
+      );
+
+      expect(riskLineReviewDb.create).toHaveBeenCalled();
+    });
+
+    // Third-line independence, same split as ownership reassignment
+    // (aexa-frontend#208): a LEAD_AUDITOR may vouch for THIRD-line review,
+    // but not for FIRST/SECOND/GOVERNING_BODY -- those are management-line
+    // judgment calls.
+    it('LEAD_AUDITOR cannot record a SECOND-line review', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+
+      await expect(
+        risk_service.record_risk_line_review(
+          makeReq({ params: { id: 'r1' }, body: { line: 'SECOND' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(riskLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can record a FIRST-line review', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      riskLineReviewDb.create.mockResolvedValue({ id: 'rev-2' });
+      riskLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-2', line: 'FIRST' }]);
+
+      await risk_service.record_risk_line_review(
+        makeReq({ params: { id: 'r1' }, body: { line: 'FIRST' } }),
+      );
+
+      expect(riskLineReviewDb.create).toHaveBeenCalled();
+    });
+
+    it('ADMIN cannot record a THIRD-line review (audit independence -- management cannot vouch for audit)', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+
+      await expect(
+        risk_service.record_risk_line_review(
+          makeReq({ params: { id: 'r1' }, body: { line: 'THIRD' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(riskLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    // A fresh review for the same line supersedes (invalidates) the prior
+    // live one rather than stacking duplicates -- see
+    // line_of_defense_review.ts's recordLineReview.
+    it('invalidates the prior live review for the same line before creating the new one', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      riskLineReviewDb.create.mockResolvedValue({ id: 'rev-3' });
+      riskLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-3', line: 'FIRST' }]);
+
+      await risk_service.record_risk_line_review(
+        makeReq({ params: { id: 'r1' }, body: { line: 'FIRST', notes: 'looks fine' } }),
+      );
+
+      expect(riskLineReviewDb.updateMany).toHaveBeenCalledWith({
+        where: { riskId: 'r1', line: 'FIRST', invalidatedAt: null },
+        data: { invalidatedAt: expect.any(Date) },
+      });
+      expect(riskLineReviewDb.create).toHaveBeenCalledWith({
+        data: { riskId: 'r1', line: 'FIRST', reviewedById: ORG_A, notes: 'looks fine' },
+      });
+    });
+
+    it('editing a risk invalidates every live line review -- the reviewed version is now stale', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'r1', name: 'Renamed' });
+
+      await risk_service.update_risk_into_db(
+        makeReq({ params: { id: 'r1' }, body: { name: 'Renamed' } }),
+      );
+
+      expect(riskLineReviewDb.updateMany).toHaveBeenCalledWith({
+        where: { riskId: 'r1', invalidatedAt: null },
+        data: { invalidatedAt: expect.any(Date) },
+      });
     });
   });
 

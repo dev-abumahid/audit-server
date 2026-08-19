@@ -82,6 +82,18 @@ router.post(
   risk_approval_controller.reject_risk,
 );
 
+// #97: records that `line` independently reviewed this risk (distinct from
+// PATCH /:id's line_of_defense, which reassigns OWNERSHIP -- see
+// line_of_defense_review.ts's file comment). Permission is enforced inside
+// the service (assertCanRecordLineReview), same "role-gated in the service,
+// not the route" convention as the approval endpoints above.
+router.post(
+  '/:id/line-reviews',
+  auth('ORGANIZATION'),
+  RequestValidator(risk_validations.record_line_review),
+  risk_controller.record_line_review,
+);
+
 router.get('/:id', auth('ORGANIZATION'), risk_controller.get_single_risk);
 router.patch(
   '/:id',

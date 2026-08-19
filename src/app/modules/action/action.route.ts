@@ -22,6 +22,19 @@ router.post(
   enforceUploadSizeLimit,
   action_controller.upload_action_attachment,
 );
+// #97: records that `line` independently reviewed this action (distinct from
+// PATCH /:id's line_of_defense, which reassigns OWNERSHIP -- see
+// line_of_defense_review.ts's file comment). Permission is enforced inside
+// the service (assertCanRecordLineReview), same "role-gated in the service,
+// not the route" convention as risk.route.ts's identical endpoint. Fixed
+// sub-path, must be registered before /:id below.
+router.post(
+  '/:id/line-reviews',
+  auth('ORGANIZATION'),
+  RequestValidator(action_validations.record_line_review),
+  action_controller.record_line_review,
+);
+
 router.get('/:id', auth('ORGANIZATION'), action_controller.get_single_action);
 router.patch(
   '/:id',

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { recordLineReviewBody } from '../../utils/line_of_defense_review.js';
 
 // #97: Three Lines of Defense classification. Not required on create — Risk
 // has a sensible schema-level default (FIRST, see risk.prisma), unlike
@@ -91,4 +92,5 @@ export const risk_validations = {
   create_risk,
   update_risk,
   suggest_fields,
+  record_line_review: recordLineReviewBody,
 };

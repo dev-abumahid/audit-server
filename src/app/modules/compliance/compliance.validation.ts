@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { recordLineReviewBody } from '../../utils/line_of_defense_review.js';
 
 // #97: Three Lines of Defense classification. Not required on create —
 // ComplianceObligation has a sensible schema-level default (SECOND, see
@@ -147,4 +148,5 @@ export const compliance_validations = {
   create_risk_from_obligation,
   link_risk_to_obligation,
   suggest_regulatory_sources,
+  record_line_review: recordLineReviewBody,
 };

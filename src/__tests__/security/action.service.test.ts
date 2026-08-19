@@ -58,6 +58,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
       create: vi.fn(),
       updateMany: vi.fn(),
     },
+    actionLineReview: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
+      create: vi.fn(),
+    },
     orgAuditLog: {
       create: vi.fn(),
     },
@@ -91,6 +96,10 @@ const dbAuditEngagement = prisma.auditEngagement as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 const closureDb = prisma.actionClosureApproval as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
+const actionLineReviewDb = prisma.actionLineReview as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
@@ -141,6 +150,9 @@ describe('action service — org scoping (ticket #6)', () => {
     // closure cycle (the common case) unless a test overrides it.
     txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
     closureDb.findMany.mockResolvedValue([]);
+    // Default (#97): invalidateLiveLineReviews's updateMany is a no-op call
+    // on every edit unless a specific test asserts on it.
+    actionLineReviewDb.updateMany.mockResolvedValue({ count: 0 });
   });
 
   // ── getAll ───────────────────────────────────────────────────────────────
@@ -2065,6 +2077,113 @@ describe('action service — org scoping (ticket #6)', () => {
       });
     });
 
+    describe('record_action_line_review (#97)', () => {
+      it('throws 404 and does not record a review for another org action', async () => {
+        db.findFirst.mockResolvedValue(null);
+
+        await expect(
+          action_service.record_action_line_review(
+            makeReq({ params: { id: 'org-b-action' }, body: { line: 'SECOND' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 404 });
+
+        expect(actionLineReviewDb.create).not.toHaveBeenCalled();
+      });
+
+      it('LEAD_AUDITOR can record a THIRD-line review (audit-line self-check)', async () => {
+        mockMembership('LEAD_AUDITOR');
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ANCHOR });
+        actionLineReviewDb.create.mockResolvedValue({ id: 'rev-1' });
+        actionLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-1', line: 'THIRD' }]);
+
+        await action_service.record_action_line_review(
+          makeReq({ params: { id: 'a1' }, body: { line: 'THIRD' } }),
+        );
+
+        expect(actionLineReviewDb.create).toHaveBeenCalled();
+      });
+
+      // Third-line independence, same split as ownership reassignment
+      // (aexa-frontend#208): a LEAD_AUDITOR may vouch for THIRD-line review,
+      // but not for FIRST/SECOND/GOVERNING_BODY -- those are management-line
+      // judgment calls.
+      it('LEAD_AUDITOR cannot record a SECOND-line review', async () => {
+        mockMembership('LEAD_AUDITOR');
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ANCHOR });
+
+        await expect(
+          action_service.record_action_line_review(
+            makeReq({ params: { id: 'a1' }, body: { line: 'SECOND' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(actionLineReviewDb.create).not.toHaveBeenCalled();
+      });
+
+      it('ADMIN can record a FIRST-line review', async () => {
+        mockMembership('ADMIN');
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ANCHOR });
+        actionLineReviewDb.create.mockResolvedValue({ id: 'rev-2' });
+        actionLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-2', line: 'FIRST' }]);
+
+        await action_service.record_action_line_review(
+          makeReq({ params: { id: 'a1' }, body: { line: 'FIRST' } }),
+        );
+
+        expect(actionLineReviewDb.create).toHaveBeenCalled();
+      });
+
+      it('ADMIN cannot record a THIRD-line review (audit independence -- management cannot vouch for audit)', async () => {
+        mockMembership('ADMIN');
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ANCHOR });
+
+        await expect(
+          action_service.record_action_line_review(
+            makeReq({ params: { id: 'a1' }, body: { line: 'THIRD' } }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 403 });
+
+        expect(actionLineReviewDb.create).not.toHaveBeenCalled();
+      });
+
+      // A fresh review for the same line supersedes (invalidates) the prior
+      // live one rather than stacking duplicates -- see
+      // line_of_defense_review.ts's recordLineReview.
+      it('invalidates the prior live review for the same line before creating the new one', async () => {
+        mockMembership('ADMIN');
+        db.findFirst.mockResolvedValue({ id: 'a1', orgAccountId: ANCHOR });
+        actionLineReviewDb.create.mockResolvedValue({ id: 'rev-3' });
+        actionLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-3', line: 'FIRST' }]);
+
+        await action_service.record_action_line_review(
+          makeReq({ params: { id: 'a1' }, body: { line: 'FIRST', notes: 'looks fine' } }),
+        );
+
+        expect(actionLineReviewDb.updateMany).toHaveBeenCalledWith({
+          where: { actionId: 'a1', line: 'FIRST', invalidatedAt: null },
+          data: { invalidatedAt: expect.any(Date) },
+        });
+        expect(actionLineReviewDb.create).toHaveBeenCalledWith({
+          data: { actionId: 'a1', line: 'FIRST', reviewedById: ORG_A, notes: 'looks fine' },
+        });
+      });
+
+      it('editing an action invalidates every live line review -- the reviewed version is now stale', async () => {
+        mockMembership('ADMIN');
+        db.findFirst.mockResolvedValue({ id: 'a1', inspectionId: 'insp-1', orgAccountId: ANCHOR });
+        db.update.mockResolvedValue({ id: 'a1', actionTitle: 'Renamed' });
+
+        await action_service.update_action_into_db(
+          makeReq({ params: { id: 'a1' }, body: { actionTitle: 'Renamed' } }),
+        );
+
+        expect(actionLineReviewDb.updateMany).toHaveBeenCalledWith({
+          where: { actionId: 'a1', invalidatedAt: null },
+          data: { invalidatedAt: expect.any(Date) },
+        });
+      });
+    });
+
     describe('message visibility (issue #311)', () => {
       it('LIGHT_USER reading a finding only gets CLIENT_VISIBLE messages, not INTERNAL', async () => {
         mockMembership('LIGHT_USER');
@@ -3280,6 +3399,9 @@ describe('action service — external Light User sub-assignment (issue #55 slice
     // update + closure-invalidation-on-edit hook in a $transaction too.
     txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
     closureDb.findMany.mockResolvedValue([]);
+    // Default (#97): invalidateLiveLineReviews's updateMany is a no-op call
+    // on every edit unless a specific test asserts on it.
+    actionLineReviewDb.updateMany.mockResolvedValue({ count: 0 });
   });
 
   describe('assign_light_user_to_action (externalOrgMemberId)', () => {

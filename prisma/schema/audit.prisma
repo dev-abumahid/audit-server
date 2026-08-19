@@ -34,6 +34,11 @@ model AuditEngagement {
     // this relation's real count instead.
     findings Action[]
 
+    // Multi-line review coverage -- see line_of_defense_review.prisma's file
+    // comment for why this is separate from the line_of_defense ownership
+    // field above.
+    lineReviews AuditEngagementLineReview[]
+
     @@index([org_account_id])
 }
 

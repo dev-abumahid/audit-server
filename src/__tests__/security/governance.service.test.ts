@@ -154,6 +154,51 @@ describe('governance service — GET /governance/three-lines-of-defense (#97)', 
     ]);
   });
 
+  // #97: line_reviews is a SEPARATE fact from line_of_defense (ownership) --
+  // see line_of_defense_review.ts's file comment. A risk can be owned by
+  // FIRST line and independently reviewed by SECOND and THIRD at the same
+  // time; the board must surface both facts, not collapse them into one.
+  it('surfaces line_reviews (coverage) alongside line_of_defense (ownership) as two separate facts', async () => {
+    riskDb.findMany.mockResolvedValue([
+      {
+        id: 'r1',
+        name: 'Vendor risk',
+        category: 'Financial',
+        status: 'open',
+        line_of_defense: 'FIRST',
+        lineReviews: [
+          { line: 'SECOND', reviewedById: 'acct-2', reviewedAt: new Date('2026-08-01') },
+          { line: 'THIRD', reviewedById: 'acct-3', reviewedAt: new Date('2026-08-10') },
+        ],
+      },
+    ]);
+
+    const result = await governance_service.get_three_lines_of_defense_from_db(makeReq());
+
+    expect(result.risks[0].line_of_defense).toBe('FIRST');
+    expect(result.risks[0].line_reviews).toEqual([
+      { line: 'SECOND', reviewedById: 'acct-2', reviewedAt: new Date('2026-08-01') },
+      { line: 'THIRD', reviewedById: 'acct-3', reviewedAt: new Date('2026-08-10') },
+    ]);
+  });
+
+  it('a risk with no live reviews yet surfaces an empty line_reviews array, not undefined/null', async () => {
+    riskDb.findMany.mockResolvedValue([
+      {
+        id: 'r1',
+        name: 'Fresh risk',
+        category: 'Operational',
+        status: 'open',
+        line_of_defense: 'FIRST',
+        lineReviews: [],
+      },
+    ]);
+
+    const result = await governance_service.get_three_lines_of_defense_from_db(makeReq());
+
+    expect(result.risks[0].line_reviews).toEqual([]);
+  });
+
   it('surfaces an unclassified (null line_of_defense) Action as null, not defaulted to any line', async () => {
     actionDb.findMany.mockResolvedValue([
       {

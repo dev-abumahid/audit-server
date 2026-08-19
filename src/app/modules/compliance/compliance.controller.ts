@@ -145,6 +145,17 @@ const unlink_risk_from_obligation = catchAsync(async (req, res) => {
   });
 });
 
+const record_line_review = catchAsync(async (req, res) => {
+  const result = await compliance_service.record_compliance_line_review(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Line of defense review recorded successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 const suggest_regulatory_sources = catchAsync(async (req, res) => {
   const result = await compliance_service.suggest_regulatory_sources_with_ai(req);
   manageResponse(res, {
@@ -171,4 +182,5 @@ export const compliance_controller = {
   link_risk_to_obligation,
   unlink_risk_from_obligation,
   suggest_regulatory_sources,
+  record_line_review,
 };

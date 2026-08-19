@@ -21,6 +21,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
     action: {
       groupBy: vi.fn(),
     },
+    auditEngagementLineReview: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
+      create: vi.fn(),
+    },
     orgMember: {
       findUnique: vi.fn(),
     },
@@ -42,6 +47,10 @@ const uploadCloudMock = uploadCloud as unknown as ReturnType<typeof vi.fn>;
 const db = prisma.auditEngagement as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const actionDb = prisma.action as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const auditEngagementLineReviewDb = prisma.auditEngagementLineReview as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -71,6 +80,9 @@ describe('audit service — org scoping (issue #92)', () => {
     // Default: no linked findings, so findings_count computes to 0 unless a
     // test overrides it.
     actionDb.groupBy.mockResolvedValue([]);
+    // Default (#97): invalidateLiveLineReviews's updateMany is a no-op call
+    // on every edit unless a specific test asserts on it.
+    auditEngagementLineReviewDb.updateMany.mockResolvedValue({ count: 0 });
   });
 
   describe('write-path role scoping (issue #55 slice 3)', () => {
@@ -423,6 +435,116 @@ describe('audit service — org scoping (issue #92)', () => {
 
       const callArg = db.update.mock.calls[0][0];
       expect(callArg.data.line_of_defense).toBe('SECOND');
+    });
+  });
+
+  describe('record_audit_engagement_line_review (#97)', () => {
+    it('throws 404 and does not record a review for another org engagement', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        audit_service.record_audit_engagement_line_review(
+          makeReq({ params: { id: 'org-b-audit' }, body: { line: 'SECOND' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(auditEngagementLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR can record a THIRD-line review (audit-line self-check)', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      auditEngagementLineReviewDb.create.mockResolvedValue({ id: 'rev-1' });
+      auditEngagementLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-1', line: 'THIRD' }]);
+
+      await audit_service.record_audit_engagement_line_review(
+        makeReq({ params: { id: 'a1' }, body: { line: 'THIRD' } }),
+      );
+
+      expect(auditEngagementLineReviewDb.create).toHaveBeenCalled();
+    });
+
+    // Third-line independence, same split as ownership reassignment
+    // (aexa-frontend#208): a LEAD_AUDITOR may vouch for THIRD-line review,
+    // but not for FIRST/SECOND/GOVERNING_BODY -- those are management-line
+    // judgment calls.
+    it('LEAD_AUDITOR cannot record a SECOND-line review', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+
+      await expect(
+        audit_service.record_audit_engagement_line_review(
+          makeReq({ params: { id: 'a1' }, body: { line: 'SECOND' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(auditEngagementLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    // Less common than the LEAD_AUDITOR/THIRD case above, but still valid:
+    // an ADMIN (management line) can record a FIRST-line review of an audit
+    // engagement -- e.g. governing body sign-off on the engagement's scope.
+    it('ADMIN can record a FIRST-line review', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      auditEngagementLineReviewDb.create.mockResolvedValue({ id: 'rev-2' });
+      auditEngagementLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-2', line: 'FIRST' }]);
+
+      await audit_service.record_audit_engagement_line_review(
+        makeReq({ params: { id: 'a1' }, body: { line: 'FIRST' } }),
+      );
+
+      expect(auditEngagementLineReviewDb.create).toHaveBeenCalled();
+    });
+
+    it('ADMIN cannot record a THIRD-line review (audit independence -- management cannot vouch for audit)', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+
+      await expect(
+        audit_service.record_audit_engagement_line_review(
+          makeReq({ params: { id: 'a1' }, body: { line: 'THIRD' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(auditEngagementLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    // A fresh review for the same line supersedes (invalidates) the prior
+    // live one rather than stacking duplicates -- see
+    // line_of_defense_review.ts's recordLineReview.
+    it('invalidates the prior live review for the same line before creating the new one', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      auditEngagementLineReviewDb.create.mockResolvedValue({ id: 'rev-3' });
+      auditEngagementLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-3', line: 'FIRST' }]);
+
+      await audit_service.record_audit_engagement_line_review(
+        makeReq({ params: { id: 'a1' }, body: { line: 'FIRST', notes: 'looks fine' } }),
+      );
+
+      expect(auditEngagementLineReviewDb.updateMany).toHaveBeenCalledWith({
+        where: { auditEngagementId: 'a1', line: 'FIRST', invalidatedAt: null },
+        data: { invalidatedAt: expect.any(Date) },
+      });
+      expect(auditEngagementLineReviewDb.create).toHaveBeenCalledWith({
+        data: { auditEngagementId: 'a1', line: 'FIRST', reviewedById: ORG_A, notes: 'looks fine' },
+      });
+    });
+
+    it('editing an audit engagement invalidates every live line review -- the reviewed version is now stale', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
+      db.update.mockResolvedValue({ id: 'a1', title: 'Renamed' });
+
+      await audit_service.update_audit_into_db(
+        makeReq({ params: { id: 'a1' }, body: { title: 'Renamed' } }),
+      );
+
+      expect(auditEngagementLineReviewDb.updateMany).toHaveBeenCalledWith({
+        where: { auditEngagementId: 'a1', invalidatedAt: null },
+        data: { invalidatedAt: expect.any(Date) },
+      });
     });
   });
 

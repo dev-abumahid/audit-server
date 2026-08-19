@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { recordLineReviewBody } from '../../utils/line_of_defense_review.js';
 
 // #97: Three Lines of Defense classification. Not required on create —
 // AuditEngagement has a sensible schema-level default (THIRD, see
@@ -84,4 +85,5 @@ const update_audit = create_audit.partial().extend({
 export const audit_validations = {
   create_audit,
   update_audit,
+  record_line_review: recordLineReviewBody,
 };

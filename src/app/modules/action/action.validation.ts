@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { recordLineReviewBody } from '../../utils/line_of_defense_review.js';
 
 // z.string().url() alone accepts any URL the WHATWG URL constructor parses,
 // which includes javascript:/data: schemes — not just http(s). Attachment
@@ -181,4 +182,5 @@ export const action_validations = {
   update_action_messages,
   submit_action_closure,
   reject_action_closure,
+  record_line_review: recordLineReviewBody,
 };

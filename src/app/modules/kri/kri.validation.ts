@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { recordLineReviewBody } from '../../utils/line_of_defense_review.js';
 
 // #97: Three Lines of Defense classification. Not required on create — Kri
 // has a sensible schema-level default (SECOND, see kri.prisma). Reassignment
@@ -58,4 +59,5 @@ export const kri_validations = {
   create_kri,
   update_kri,
   submit_value,
+  record_line_review: recordLineReviewBody,
 };

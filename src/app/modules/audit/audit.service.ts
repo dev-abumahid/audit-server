@@ -9,6 +9,12 @@ import {
   assertCanWriteOrgResource,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import {
+  assertCanRecordLineReview,
+  invalidateLiveLineReviews,
+  LineOfDefenseValue,
+  recordLineReview,
+} from '../../utils/line_of_defense_review.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 
 // aexa-frontend#165: shape used everywhere an engagement is returned so the UI
@@ -250,8 +256,46 @@ const update_audit_into_db = async (req: Request) => {
     data: { ...safeBody, org_account_id: ctx.organizationId, ...riskRelationWrite },
     include: auditRiskInclude,
   });
+  // #97: a review is a fact about the engagement's content AT the time it was
+  // reviewed. An edit here makes every live review stale for the same reason
+  // risk.service.ts's update_risk_into_db invalidates its own live reviews —
+  // see line_of_defense_review.ts's invalidateLiveLineReviews.
+  await invalidateLiveLineReviews(prisma.auditEngagementLineReview, 'auditEngagementId', id);
   const [withCount] = await attachFindingsCounts([flattenLinkedRisks(result)], ctx.organizationId);
   return withCount;
+};
+
+/**
+ * #97: records that `line` independently reviewed this audit engagement,
+ * superseding any prior live review for that same line. Kept separate from
+ * update_audit_into_db (assigning ownership/classification) -- see
+ * line_of_defense_review.ts's file comment for why ownership and review
+ * coverage are different facts, not the same field.
+ */
+const record_audit_engagement_line_review = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const id = req.params.id as string;
+  const existing = await prisma.auditEngagement.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Audit engagement not found', 404);
+
+  const { line, notes } = req.body as { line: LineOfDefenseValue; notes?: string };
+  assertCanRecordLineReview(ctx, line);
+  await recordLineReview(
+    prisma.auditEngagementLineReview,
+    'auditEngagementId',
+    id,
+    user.accountId,
+    line,
+    notes,
+  );
+
+  return prisma.auditEngagementLineReview.findMany({
+    where: { auditEngagementId: id, invalidatedAt: null },
+    orderBy: { line: 'asc' },
+  });
 };
 
 const delete_audit_from_db = async (req: Request) => {
@@ -311,4 +355,5 @@ export const audit_service = {
   update_audit_into_db,
   delete_audit_from_db,
   upload_audit_report_into_storage,
+  record_audit_engagement_line_review,
 };

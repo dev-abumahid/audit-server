@@ -4,6 +4,12 @@ import { prisma } from '../../lib/prisma.js';
 import { JwtPayloadType } from '../../utils/JWT.js';
 import { AppError } from '../../utils/app_error.js';
 import uploadCloud from '../../utils/cloudinary.js';
+import {
+  assertCanRecordLineReview,
+  invalidateLiveLineReviews,
+  LineOfDefenseValue,
+  recordLineReview,
+} from '../../utils/line_of_defense_review.js';
 import { action_closure_service, isClosureTerminalStatus } from './action.closure.service.js';
 import {
   applyActionScope,
@@ -487,9 +493,40 @@ const update_action_into_db = async (req: Request) => {
       tx,
       req.body.status !== undefined,
     );
+    // #97: a review is a fact about the action's content AT the time it was
+    // reviewed. An edit here makes every live review stale for the same
+    // reason invalidateLiveClosureApprovalsOnEdit above invalidates the
+    // closure cycle -- see line_of_defense_review.ts's invalidateLiveLineReviews.
+    await invalidateLiveLineReviews(tx.actionLineReview, 'actionId', id);
     return updated;
   });
   return shapeResponsibleAssignees(result);
+};
+
+/**
+ * #97: records that `line` independently reviewed this action, superseding
+ * any prior live review for that same line. Kept separate from
+ * update_action_into_db (assigning ownership) -- see
+ * line_of_defense_review.ts's file comment for why ownership and review
+ * coverage are different facts, not the same field.
+ */
+const record_action_line_review = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id } = req.params as Record<string, string>;
+  const existing = await prisma.action.findFirst({
+    where: { id, orgAccountId: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Action not found', 404);
+
+  const { line, notes } = req.body as { line: LineOfDefenseValue; notes?: string };
+  assertCanRecordLineReview(ctx, line);
+  await recordLineReview(prisma.actionLineReview, 'actionId', id, user.accountId, line, notes);
+
+  return prisma.actionLineReview.findMany({
+    where: { actionId: id, invalidatedAt: null },
+    orderBy: { line: 'asc' },
+  });
 };
 
 /**
@@ -1222,4 +1259,5 @@ export const action_service = {
   get_single_action_for_external_member,
   update_action_for_external_member,
   update_action_messages_into_db,
+  record_action_line_review,
 };

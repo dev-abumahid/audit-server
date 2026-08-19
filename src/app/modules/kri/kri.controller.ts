@@ -79,6 +79,17 @@ const delete_kri = catchAsync(async (req, res) => {
   });
 });
 
+const record_line_review = catchAsync(async (req, res) => {
+  const result = await kri_service.record_kri_line_review(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Line of defense review recorded successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const kri_controller = {
   get_all_kri,
   get_single_kri,
@@ -87,4 +98,5 @@ export const kri_controller = {
   submit_kri_value,
   get_kri_readings,
   delete_kri,
+  record_line_review,
 };

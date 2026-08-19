@@ -68,6 +68,17 @@ const upload_audit_report = catchAsync(async (req, res) => {
   });
 });
 
+const record_line_review = catchAsync(async (req, res) => {
+  const result = await audit_service.record_audit_engagement_line_review(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Line of defense review recorded successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const audit_controller = {
   get_all_audit,
   get_single_audit,
@@ -75,4 +86,5 @@ export const audit_controller = {
   update_audit,
   delete_audit,
   upload_audit_report,
+  record_line_review,
 };

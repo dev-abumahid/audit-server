@@ -79,6 +79,17 @@ const suggest_fields = catchAsync(async (req, res) => {
   });
 });
 
+const record_line_review = catchAsync(async (req, res) => {
+  const result = await risk_service.record_risk_line_review(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Line of defense review recorded successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const risk_controller = {
   get_ebitda_at_risk_summary,
   get_all_risk,
@@ -87,4 +98,5 @@ export const risk_controller = {
   update_risk,
   delete_risk,
   suggest_fields,
+  record_line_review,
 };

@@ -8,6 +8,12 @@ import {
   assertCanWriteOrgResource,
   resolveCallerOrgContext,
 } from '../../utils/org_scope.js';
+import {
+  assertCanRecordLineReview,
+  invalidateLiveLineReviews,
+  LineOfDefenseValue,
+  recordLineReview,
+} from '../../utils/line_of_defense_review.js';
 import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHelper.js';
 import {
   buildAiHeaders,
@@ -363,10 +369,41 @@ const update_risk_into_db = async (req: Request) => {
       data: { ...safeBody, org_account_id: ctx.organizationId },
     });
     await risk_approval_service.invalidateLiveApprovalsOnEdit(id, ctx, user.accountId, tx);
+    // #97: a review is a fact about the risk's content AT the time it was
+    // reviewed. An edit here makes every live review stale for the same
+    // reason invalidateLiveApprovalsOnEdit above invalidates the approval
+    // cycle -- see line_of_defense_review.ts's invalidateLiveLineReviews.
+    await invalidateLiveLineReviews(tx.riskLineReview, 'riskId', id);
     return updated;
   });
 
   return result;
+};
+
+/**
+ * #97: records that `line` independently reviewed this risk, superseding
+ * any prior live review for that same line. Kept separate from
+ * update_risk_into_db (assigning ownership) -- see
+ * line_of_defense_review.ts's file comment for why ownership and review
+ * coverage are different facts, not the same field.
+ */
+const record_risk_line_review = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  const { id } = req.params as Record<string, string>;
+  const existing = await prisma.risk.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Risk not found', 404);
+
+  const { line, notes } = req.body as { line: LineOfDefenseValue; notes?: string };
+  assertCanRecordLineReview(ctx, line);
+  await recordLineReview(prisma.riskLineReview, 'riskId', id, user.accountId, line, notes);
+
+  return prisma.riskLineReview.findMany({
+    where: { riskId: id, invalidatedAt: null },
+    orderBy: { line: 'asc' },
+  });
 };
 
 const delete_risk_from_db = async (req: Request) => {
@@ -616,4 +653,5 @@ export const risk_service = {
   delete_risk_from_db,
   get_ebitda_at_risk_summary,
   suggest_risk_fields_with_ai,
+  record_risk_line_review,
 };

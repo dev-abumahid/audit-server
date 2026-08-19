@@ -34,6 +34,10 @@ model Kri {
 
     alerts   Alert[]
     readings KriReading[]
+    // Multi-line review coverage -- see line_of_defense_review.prisma's file
+    // comment for why this is separate from the line_of_defense ownership
+    // field above.
+    lineReviews KriLineReview[]
 
     @@index([org_account_id])
     @@index([risk_id])

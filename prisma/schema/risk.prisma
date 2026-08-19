@@ -118,6 +118,10 @@ model Risk {
     recommendations Recommendation[]
     kris            Kri[]
     approvals       RiskApproval[]
+    // Multi-line review coverage -- see line_of_defense_review.prisma's file
+    // comment for why this is separate from the line_of_defense ownership
+    // field above.
+    lineReviews     RiskLineReview[]
     // aexa-frontend#165: engagements that cover this risk (explicit M2M join,
     // AuditEngagementRisk in audit.prisma). A risk with live links here is
     // blocked from deletion by the in-use guard in risk.service.ts.

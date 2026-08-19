@@ -145,6 +145,11 @@ model ComplianceObligation {
     // below.
     edits ComplianceObligationEdit[]
 
+    // Multi-line review coverage -- see line_of_defense_review.prisma's file
+    // comment for why this is separate from the line_of_defense ownership
+    // field above.
+    lineReviews ComplianceObligationLineReview[]
+
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 

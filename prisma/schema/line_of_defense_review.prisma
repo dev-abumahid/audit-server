@@ -1,0 +1,135 @@
+// Real multi-line coverage tracking for the Three Lines of Defense board.
+// `line_of_defense` on each of the 5 entities below (Risk, Action, Kri,
+// ComplianceObligation, AuditEngagement) records OWNERSHIP -- which single
+// line is responsible for this item -- and is unchanged by this file; it
+// still answers "who owns this" and still gates reassignment via
+// assertCanReassignLineOfDefense exactly as before.
+//
+// What was missing: the real IIA model expects the SAME item to be
+// independently reviewed at multiple lines over time (1st line manages it,
+// 2nd line monitors it, 3rd line periodically audits it) -- three
+// independent review facts per item, not a single ownership tag. Nothing in
+// the schema could represent "2nd line reviewed this on this date" without
+// overwriting the ownership field, which is what the frontend's Coverage
+// Overview was doing before this change -- it conflated ownership with
+// review coverage because there was nowhere else to record a review.
+//
+// One review table per entity, not a shared polymorphic table -- matches
+// this schema's established preference for real per-entity relations over
+// a generic engine (see action.prisma's complianceObligationId/
+// auditEngagementId comments). Each mirrors RiskApproval/
+// ActionClosureApproval's maker-checker shape where it fits (a real actor,
+// a real timestamp, soft-supersede-on-edit) but simpler: a review isn't a
+// pending/approved/rejected decision cycle, it's a fact ("line X reviewed
+// this on date Y"), so there's no status enum -- only invalidatedAt, set
+// automatically when the underlying item is edited after a line reviewed
+// it (same "the reviewed version is stale" reasoning as RiskApproval, but
+// system-triggered rather than an explicit revoke).
+//
+// A live (non-invalidated) review per (item, line) is unique -- a fresh
+// review for the same line supersedes the old one rather than stacking
+// duplicates (enforced by a partial unique index, no Prisma DSL
+// equivalent -- see this feature's migration). Historical reviews are
+// preserved, never deleted, same append-only-history precedent as
+// KriReading/ComplianceAttestation.
+
+model RiskLineReview {
+    id     String @id @default(uuid())
+    riskId String
+    risk   Risk   @relation(fields: [riskId], references: [id], onDelete: Cascade)
+
+    line LineOfDefense
+    // accountId of whoever performed this line's review, same lightweight
+    // "who did this" precedent as AuditEngagement.lead_auditor /
+    // ComplianceAttestation.attested_by (not an Account FK).
+    reviewedById String
+    reviewedAt   DateTime @default(now())
+    notes        String?
+
+    // Set automatically (not by a person) when the risk is edited after
+    // this review was recorded. A stale review no longer reflects the
+    // current item and must not count as live coverage.
+    invalidatedAt DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([riskId])
+    @@index([line])
+}
+
+model ActionLineReview {
+    id       String @id @default(uuid())
+    actionId String
+    action   Action @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+    line         LineOfDefense
+    reviewedById String
+    reviewedAt   DateTime @default(now())
+    notes        String?
+
+    invalidatedAt DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([actionId])
+    @@index([line])
+}
+
+model KriLineReview {
+    id    String @id @default(uuid())
+    kriId String
+    kri   Kri    @relation(fields: [kriId], references: [id], onDelete: Cascade)
+
+    line         LineOfDefense
+    reviewedById String
+    reviewedAt   DateTime @default(now())
+    notes        String?
+
+    invalidatedAt DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([kriId])
+    @@index([line])
+}
+
+model ComplianceObligationLineReview {
+    id            String               @id @default(uuid())
+    obligationId  String
+    obligation    ComplianceObligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+
+    line         LineOfDefense
+    reviewedById String
+    reviewedAt   DateTime @default(now())
+    notes        String?
+
+    invalidatedAt DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([obligationId])
+    @@index([line])
+}
+
+model AuditEngagementLineReview {
+    id                String          @id @default(uuid())
+    auditEngagementId String
+    auditEngagement   AuditEngagement @relation(fields: [auditEngagementId], references: [id], onDelete: Cascade)
+
+    line         LineOfDefense
+    reviewedById String
+    reviewedAt   DateTime @default(now())
+    notes        String?
+
+    invalidatedAt DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([auditEngagementId])
+    @@index([line])
+}

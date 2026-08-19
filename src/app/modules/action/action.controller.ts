@@ -235,6 +235,17 @@ const get_action_closure_state = catchAsync(async (req, res) => {
   });
 });
 
+const record_line_review = catchAsync(async (req, res) => {
+  const result = await action_service.record_action_line_review(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Line of defense review recorded successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const action_controller = {
   get_all_action,
   get_single_action,
@@ -257,4 +268,5 @@ export const action_controller = {
   approve_action_closure,
   reject_action_closure,
   get_action_closure_state,
+  record_line_review,
 };

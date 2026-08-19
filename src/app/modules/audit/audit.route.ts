@@ -25,6 +25,20 @@ router.post(
   enforceUploadSizeLimit,
   audit_controller.upload_audit_report,
 );
+// #97: records that `line` independently reviewed this audit engagement
+// (distinct from PATCH /:id's line_of_defense, which reassigns/reclassifies
+// ownership -- see line_of_defense_review.ts's file comment). Permission is
+// enforced inside the service (assertCanRecordLineReview), same "role-gated
+// in the service, not the route" convention risk.route.ts uses. Fixed
+// sub-path, so it's registered before the `/:id` routes below, same
+// reasoning as `/attachment` above.
+router.post(
+  '/:id/line-reviews',
+  auth('ORGANIZATION'),
+  RequestValidator(audit_validations.record_line_review),
+  audit_controller.record_line_review,
+);
+
 router.get('/:id', auth('ORGANIZATION'), audit_controller.get_single_audit);
 router.patch(
   '/:id',

@@ -18,6 +18,11 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findMany: vi.fn(),
       count: vi.fn(),
     },
+    kriLineReview: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
+      create: vi.fn(),
+    },
     risk: {
       findFirst: vi.fn(),
     },
@@ -48,6 +53,7 @@ import { kri_validations } from '../../app/modules/kri/kri.validation.js';
 
 const db = prisma.kri as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const kriReadingDb = prisma.kriReading as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const kriLineReviewDb = prisma.kriLineReview as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const alertDb = prisma.alert as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -143,6 +149,9 @@ describe('kri service — org scoping and role gating', () => {
     vi.clearAllMocks();
     orgMemberDb.findUnique.mockResolvedValue(null);
     txFn.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
+    // Default (#97): invalidateLiveLineReviews's updateMany is a no-op call
+    // on every edit unless a specific test asserts on it.
+    kriLineReviewDb.updateMany.mockResolvedValue({ count: 0 });
   });
 
   describe('get_all_kri_from_db', () => {
@@ -560,6 +569,118 @@ describe('kri service — org scoping and role gating', () => {
       );
 
       expect(db.update).toHaveBeenCalled();
+    });
+  });
+
+  describe('record_kri_line_review (#97)', () => {
+    it('throws 404 and does not record a review for another org KRI', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        kri_service.record_kri_line_review(
+          makeReq({ params: { id: 'org-b-kri' }, body: { line: 'SECOND' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(kriLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    it('LEAD_AUDITOR can record a THIRD-line review (audit-line self-check)', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'k1', org_account_id: ORG_A });
+      kriLineReviewDb.create.mockResolvedValue({ id: 'rev-1' });
+      kriLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-1', line: 'THIRD' }]);
+
+      await kri_service.record_kri_line_review(
+        makeReq({ params: { id: 'k1' }, body: { line: 'THIRD' } }),
+      );
+
+      expect(kriLineReviewDb.create).toHaveBeenCalled();
+    });
+
+    // Third-line independence, same split as ownership reassignment
+    // (aexa-frontend#208): a LEAD_AUDITOR may vouch for THIRD-line review,
+    // but not for FIRST/SECOND/GOVERNING_BODY -- those are management-line
+    // judgment calls.
+    it('LEAD_AUDITOR cannot record a SECOND-line review', async () => {
+      mockMembership('LEAD_AUDITOR');
+      db.findFirst.mockResolvedValue({ id: 'k1', org_account_id: ORG_A });
+
+      await expect(
+        kri_service.record_kri_line_review(
+          makeReq({ params: { id: 'k1' }, body: { line: 'SECOND' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(kriLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN can record a FIRST-line review', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'k1', org_account_id: ORG_A });
+      kriLineReviewDb.create.mockResolvedValue({ id: 'rev-2' });
+      kriLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-2', line: 'FIRST' }]);
+
+      await kri_service.record_kri_line_review(
+        makeReq({ params: { id: 'k1' }, body: { line: 'FIRST' } }),
+      );
+
+      expect(kriLineReviewDb.create).toHaveBeenCalled();
+    });
+
+    it('ADMIN cannot record a THIRD-line review (audit independence -- management cannot vouch for audit)', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'k1', org_account_id: ORG_A });
+
+      await expect(
+        kri_service.record_kri_line_review(
+          makeReq({ params: { id: 'k1' }, body: { line: 'THIRD' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(kriLineReviewDb.create).not.toHaveBeenCalled();
+    });
+
+    // A fresh review for the same line supersedes (invalidates) the prior
+    // live one rather than stacking duplicates -- see
+    // line_of_defense_review.ts's recordLineReview.
+    it('invalidates the prior live review for the same line before creating the new one', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 'k1', org_account_id: ORG_A });
+      kriLineReviewDb.create.mockResolvedValue({ id: 'rev-3' });
+      kriLineReviewDb.findMany.mockResolvedValue([{ id: 'rev-3', line: 'FIRST' }]);
+
+      await kri_service.record_kri_line_review(
+        makeReq({ params: { id: 'k1' }, body: { line: 'FIRST', notes: 'looks fine' } }),
+      );
+
+      expect(kriLineReviewDb.updateMany).toHaveBeenCalledWith({
+        where: { kriId: 'k1', line: 'FIRST', invalidatedAt: null },
+        data: { invalidatedAt: expect.any(Date) },
+      });
+      expect(kriLineReviewDb.create).toHaveBeenCalledWith({
+        data: { kriId: 'k1', line: 'FIRST', reviewedById: ORG_A, notes: 'looks fine' },
+      });
+    });
+
+    it('editing a KRI invalidates every live line review -- the reviewed version is now stale', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({
+        id: 'k1',
+        org_account_id: ORG_A,
+        alert_threshold: 30,
+        target_value: 20,
+      });
+      db.update.mockResolvedValue({ id: 'k1', name: 'Renamed' });
+
+      await kri_service.update_kri_into_db(
+        makeReq({ params: { id: 'k1' }, body: { name: 'Renamed' } }),
+      );
+
+      expect(kriLineReviewDb.updateMany).toHaveBeenCalledWith({
+        where: { kriId: 'k1', invalidatedAt: null },
+        data: { invalidatedAt: expect.any(Date) },
+      });
     });
   });
 

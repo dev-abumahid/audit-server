@@ -34,6 +34,19 @@ router.post(
   RequestValidator(compliance_validations.suggest_regulatory_sources),
   compliance_controller.suggest_regulatory_sources,
 );
+// #97: records that `line` independently reviewed this obligation (distinct
+// from PATCH /:id's line_of_defense, which reassigns OWNERSHIP -- see
+// line_of_defense_review.ts's file comment). Permission is enforced inside
+// the service (assertCanRecordLineReview), same "role-gated in the service,
+// not the route" convention as risk.route.ts's identical endpoint. Fixed
+// sub-path, must come before /:id below.
+router.post(
+  '/:id/line-reviews',
+  auth('ORGANIZATION'),
+  RequestValidator(compliance_validations.record_line_review),
+  compliance_controller.record_line_review,
+);
+
 router.get('/:id', auth('ORGANIZATION'), compliance_controller.get_single_compliance);
 router.patch(
   '/:id',
