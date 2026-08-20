@@ -116,9 +116,16 @@ const get_single_template_from_db = async (req: Request) => {
       orgAccountId: ctx.organizationId,
     },
     include: {
+      // Postgres/Prisma give no ordering guarantee on a relation without an
+      // explicit orderBy -- pageIndex/index exist specifically to define
+      // display order (the frontend reorders by writing these), but nothing
+      // sorted by them on read, so a migration or query-planner change
+      // could silently scramble section/question order in the editor and
+      // the PDF report.
       pages: {
+        orderBy: { pageIndex: 'asc' },
         include: {
-          questions: true,
+          questions: { orderBy: { index: 'asc' } },
         },
       },
       access: true,
@@ -223,7 +230,12 @@ const duplicate_template_into_db = async (req: Request) => {
 
   const source = await prisma.template.findFirst({
     where: { id, orgAccountId: ctx.organizationId },
-    include: { pages: { include: { questions: true } } },
+    include: {
+      pages: {
+        orderBy: { pageIndex: 'asc' },
+        include: { questions: { orderBy: { index: 'asc' } } },
+      },
+    },
   });
   if (!source) throw new AppError('Template not found', 404);
 
@@ -264,7 +276,12 @@ const duplicate_template_into_db = async (req: Request) => {
         })),
       },
     },
-    include: { pages: { include: { questions: true } } },
+    include: {
+      pages: {
+        orderBy: { pageIndex: 'asc' },
+        include: { questions: { orderBy: { index: 'asc' } } },
+      },
+    },
   });
   return result;
 };

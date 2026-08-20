@@ -742,7 +742,12 @@ describe('template service — duplicate_template_into_db (aexa-frontend quality
 
     expect(templateDb.findFirst).toHaveBeenCalledWith({
       where: { id: 't1', orgAccountId: ORG_A },
-      include: { pages: { include: { questions: true } } },
+      include: {
+        pages: {
+          orderBy: { pageIndex: 'asc' },
+          include: { questions: { orderBy: { index: 'asc' } } },
+        },
+      },
     });
     const callArg = templateDb.create.mock.calls[0][0];
     expect(callArg.data.orgAccountId).toBe(ORG_A);
