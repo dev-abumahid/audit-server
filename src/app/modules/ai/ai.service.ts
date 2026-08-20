@@ -15,7 +15,6 @@ import { mintOrgToken, ORG_TOKEN_HEADER } from '../../utils/org_token.js';
 import { recommendation_validations } from '../recommendation/recommendation.validation.js';
 import { mapTemplateData } from '../template/template.utils.js';
 import { template_validations } from '../template/template.validation.js';
-import { ai_validations } from './ai.validation.js';
 
 // Every outbound call to aexa-ai must carry this — the AI service enforces
 // it as a global app-level auth dependency and rejects requests without it.
@@ -292,119 +291,6 @@ const generate_template_with_risk_with_ai = async (req: Request) => {
 // rejection from aexa-ai — this endpoint already tolerates skipping dedup
 // awareness (see the comment below), so failing open by truncating is the
 // right behavior, not failing the whole analysis.
-const MAX_EXISTING_RISKS_FOR_DEDUP = 200;
-const MAX_EXISTING_RISK_TITLE_LENGTH = 200;
-const MAX_EXISTING_RISK_CATEGORY_LENGTH = 100;
-
-// Generates candidate risks for a site from aexa-ai's /risk_analysis
-// endpoint. Unlike the other AI proxies above, this one does not persist
-// anything — it returns the raw suggestions so the caller can review and
-// selectively import them via the existing POST /risk route (same pattern
-// SitesEntities.tsx's manual "add risk" flow already uses), rather than
-// auto-creating Risk rows the user never asked for.
-const analyze_site_risks_with_ai = async (req: Request) => {
-  try {
-    const user = req.user as JwtPayloadType;
-    const ctx = await resolveCallerOrgContext(user.accountId);
-    assertCanWriteOrgResource(ctx);
-    const siteId = req?.body?.siteId as string;
-
-    const site = await prisma.site.findUnique({
-      where: {
-        id: siteId,
-        org_account_id: ctx.organizationId,
-      },
-    });
-
-    if (!site) {
-      throw new AppError('Site not found', 404);
-    }
-
-    // aexa-ai's /risk_analysis endpoint rejects a blank site_primary_activity
-    // with a 400, which this function then re-threw as an opaque
-    // "AI service error: 400" (issue #917) -- the frontend now requires
-    // Activity on the site form going forward, but existing sites created
-    // before that fix can still have a blank one. Catch it here with a
-    // client-actionable message instead of forwarding the AI service round
-    // trip just to get the same generic 502 back.
-    if (!site.activity?.trim()) {
-      throw new AppError(
-        'This site is missing a primary activity. Add one before running AI risk analysis.',
-        400,
-      );
-    }
-
-    // Issue #345: a repeat AI risk analysis on the same site was
-    // re-suggesting risks already imported into the register (e.g. two
-    // near-identical physical-security risks, SEC-001/SEC-002) because
-    // aexa-ai's prompt had no visibility into what already exists here.
-    // Fetch a lightweight title/category summary of the site's currently
-    // registered risks and forward it via the new optional
-    // `existing_risks` field so the LLM can avoid re-proposing
-    // near-duplicates. Org-scoped by (site_id, org_account_id) — same
-    // scoping shape as every other Risk query in this codebase.
-    const existingRisks = await prisma.risk.findMany({
-      where: {
-        site_id: siteId,
-        org_account_id: ctx.organizationId,
-      },
-      select: {
-        name: true,
-        category: true,
-      },
-      take: MAX_EXISTING_RISKS_FOR_DEDUP,
-    });
-
-    // Deliberately not including a system_prompt field — see the comment on
-    // ai_validations.analyze_site_risks. site_legal_entity has no analog on
-    // the Site model yet, so it's sent empty rather than guessed.
-    const aiResponse = await fetchWithTimeout(
-      `${configs.ai_server_end_point}/risk_analysis`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...buildAiHeaders(ctx.organizationId),
-        },
-        body: JSON.stringify({
-          site_name: site.name,
-          site_location: site.location || '',
-          site_legal_entity: '',
-          site_primary_activity: site.activity || '',
-          site_country: site.country || '',
-          site_revenue: String(site.revenue),
-          site_employees: String(site.employees_count),
-          site_type: site.site_type,
-          // Omitted entirely (rather than sent as an empty array) when the
-          // site has no registered risks yet — matches aexa-ai's
-          // Optional[List[...]] = None default, so a site with nothing
-          // registered gets byte-identical request behavior to before this
-          // change.
-          ...(existingRisks.length > 0
-            ? {
-                existing_risks: existingRisks.map((risk) => ({
-                  title: risk.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH),
-                  category: risk.category.slice(0, MAX_EXISTING_RISK_CATEGORY_LENGTH),
-                })),
-              }
-            : {}),
-        }),
-      },
-      LLM_CALL_TIMEOUT_MS,
-    );
-
-    if (!aiResponse.ok) {
-      throw new AppError(`AI service error: ${aiResponse.status}`, 502);
-    }
-    const data = await aiResponse.json();
-    const parsed = await ai_validations.risk_analysis_response.parseAsync(data);
-
-    return parsed.risks;
-  } catch (error) {
-    return wrapAiServiceError(error, 'Failed to analyze site risks');
-  }
-};
-
 const generate_recommendation_with_inspection_from_ai = async (req: Request) => {
   // Issue #134 follow-up: the org/inspection lookups below used to run
   // outside this try block, so a raw Prisma error from them bypassed
@@ -726,7 +612,6 @@ export const ai_service = {
   generate_template_with_pdf_with_ai,
   generate_template_with_risk_with_ai,
   generate_recommendation_with_inspection_from_ai,
-  analyze_site_risks_with_ai,
   upload_pdf_into_pinecone_via_ai,
   check_upload_file_status_from_ai,
   get_all_pinecone_data_from_database,

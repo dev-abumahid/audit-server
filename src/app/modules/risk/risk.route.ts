@@ -45,8 +45,7 @@ router.get(
 
 // Same "fixed sub-path, must come before /:id" reasoning as the routes
 // above. Non-persisting -- returns AI-suggested values for the caller to
-// review/apply client-side (RiskFormModal's AI pre-fill), same convention
-// as POST /ai/analyze-site-risks.
+// review/apply client-side (RiskFormModal's AI pre-fill).
 router.post(
   '/suggest-fields',
   auth('ORGANIZATION'),

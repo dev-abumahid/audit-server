@@ -1023,10 +1023,10 @@ const get_compliance_scorecard_from_db = async (req: Request) => {
 // regulatory sources likely applicable to a site (by activity + country)
 // and NOT already tracked as a ComplianceObligation for that site, so the
 // gap is surfaced instead of left for the user to guess at. Pure proxy, no
-// persistence — mirrors risk.service.ts's suggest_risk_fields_with_ai and
-// analyze_site_risks_with_ai exactly: the caller reviews suggestions and
-// turns any of them into a real obligation via the existing POST
-// /compliance route, same "review and selectively import" shape.
+// persistence — mirrors risk.service.ts's suggest_risk_fields_with_ai
+// exactly: the caller reviews suggestions and turns any of them into a
+// real obligation via the existing POST /compliance route, same "review
+// and selectively import" shape.
 const MAX_EXISTING_OBLIGATIONS_FOR_DEDUP = 100;
 
 interface RegulatoryCoverageAiResponse {

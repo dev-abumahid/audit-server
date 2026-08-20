@@ -559,11 +559,10 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 // POST /risk/suggest-fields — pure proxy to aexa-ai's /risk/suggest-fields,
-// same non-persisting "return raw suggestions for client-side review"
-// convention as analyze_site_risks_with_ai (ai.service.ts). Lives in this
-// module rather than the generic `ai` module, following
-// risk.correlation.service.ts's root-cause-bucketing precedent for
-// risk-domain AI logic.
+// non-persisting: returns raw suggestions for client-side review rather
+// than writing anything. Lives in this module rather than the generic
+// `ai` module, following risk.correlation.service.ts's root-cause-bucketing
+// precedent for risk-domain AI logic.
 const suggest_risk_fields_with_ai = async (req: Request) => {
   try {
     const user = req.user as JwtPayloadType;

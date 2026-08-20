@@ -35,8 +35,7 @@ const from_file = z.object({
 // and_save_into_db — without this, any unexpected key the AI returns (a
 // renamed/added field, an `id`, a `createdAt`) would flow straight into
 // prisma.note.create, becoming either a client-influenced field or an
-// unhandled PrismaClientValidationError (#276). Same pattern as
-// ai_validations.risk_analysis_response.
+// unhandled PrismaClientValidationError (#276).
 const extract_text_response = z.object({
   title: z.string(),
   extracted_text: z.string(),
