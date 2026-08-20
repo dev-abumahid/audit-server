@@ -3,7 +3,6 @@ import accountRouter from './app/modules/account/account.route.js';
 import actionRoute from './app/modules/action/action.route.js';
 import aiRoute from './app/modules/ai/ai.route.js';
 import aiRiskAnalysisRoute from './app/modules/aiRiskAnalysis/aiRiskAnalysis.route.js';
-import aiSuggestionRoute from './app/modules/aiSuggestion/aiSuggestion.route.js';
 import alertRoute from './app/modules/alert/alert.route.js';
 import auditRoute from './app/modules/audit/audit.route.js';
 import complianceRoute from './app/modules/compliance/compliance.route.js';
@@ -32,15 +31,11 @@ const moduleRoutes = [
   { path: '/recommendation', route: recommendationRoute },
   { path: '/inspection', route: inspectionRoute },
   { path: '/ai', route: aiRoute },
-  // aexa-frontend#922: AI-suggestion dismiss/import lifecycle -- see
-  // aiSuggestion.route.ts's comment for why this is a separate module
-  // mounted as its own sub-prefix under /ai rather than folded into
+  // design-docs/site-ai-risk-register-generation.md §9: the two-phase
+  // "Analyze with AI" flow that fully replaces the old AI-suggestion
+  // dismiss/import lifecycle (aexa-frontend#922, aiSuggestion module
+  // deleted) -- kept as its own sub-prefix under /ai, not folded into
   // ai.route.ts.
-  { path: '/ai/suggestions', route: aiSuggestionRoute },
-  // design-docs/site-ai-risk-register-generation.md: the two-phase
-  // "Analyze with AI" flow that replaces the Sites-page button's old
-  // single-call /ai/analyze-site-risks -- kept as its own sub-prefix
-  // under /ai, same reasoning as /ai/suggestions above.
   { path: '/ai/risk-analysis-runs', route: aiRiskAnalysisRoute },
   { path: '/risk', route: riskRoute },
   { path: '/risk-link', route: riskLinkRoute },

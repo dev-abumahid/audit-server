@@ -31,8 +31,6 @@ model Site {
     recommendations Recommendation[]
     action          Action[]
     complianceObligations ComplianceObligation[]
-    // aexa-frontend#922: AI-suggested-risk dismiss/import decisions for this site.
-    aiSuggestionStates AiSuggestionState[]
     aiRiskAnalysisRuns AiRiskAnalysisRun[]
 
     @@index([org_account_id])

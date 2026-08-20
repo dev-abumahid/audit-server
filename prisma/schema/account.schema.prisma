@@ -53,8 +53,6 @@ model Account {
     // aexa-frontend#142: risk-to-risk correlation links (RiskLink.ref-based
     // design — see risk.prisma's RiskLink comment).
     riskLinks         RiskLink[]
-    // aexa-frontend#922: AI-suggested-risk dismiss/import decisions.
-    aiSuggestionStates AiSuggestionState[]
     // design-docs/site-ai-risk-register-generation.md: "Analyze with AI" run
     // provenance records.
     aiRiskAnalysisRuns AiRiskAnalysisRun[]

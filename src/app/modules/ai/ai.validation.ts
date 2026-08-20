@@ -27,11 +27,6 @@ const analyze_site_risks = z.object({
 // prompted to produce on the aexa-ai side — kept as-is here rather than
 // renamed, so this schema stays a faithful check of what aexa-ai actually
 // sends, not a reshaped version of it.
-//
-// Exported (aexa-frontend#922) so the AI-suggestion dismiss/mark-imported
-// endpoints (aiSuggestion.validation.ts) can validate `suggestion` bodies
-// against this exact shape instead of duplicating it inline, keeping both
-// in sync with whatever aexa-ai actually returns.
 const risk_suggestion = z.object({
   risk_id: z.string(),
   title: z.string(),
