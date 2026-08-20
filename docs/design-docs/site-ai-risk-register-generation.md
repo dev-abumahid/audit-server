@@ -2,7 +2,7 @@
 
 **Status:** Design approved, ready for implementation planning
 **Date:** 2026-08-20
-**Origin:** CEO mockup (French/EU risk-consultant prompt, ~40-60 fixed risks) + Omar's brief (a company's risk lead creates a Site, clicks "Analyze with AI," gets a full, precise, grounded risk register). Reworked significantly from the mockup after codebase research, a live single-call-vs-two-phase test against a real company, and **two** rounds of multi-agent critical review — an initial 5-agent panel (GRC/compliance, engineering, product/UX, security, devil's-advocate) against the conceptual design, then a second 3-agent pass (completeness/consistency, implementability cross-checked against the real codebase, a second devil's-advocate round) against this written document itself, which caught real gaps the first round couldn't see (see §9).
+**Origin:** CEO mockup (French/EU risk-consultant prompt, ~40-60 fixed risks) + Omar's brief (a company's risk lead creates a Site, clicks "Analyze with AI," gets a full, precise, grounded risk register). Reworked significantly from the mockup after codebase research, a live single-call-vs-two-phase test against a real company, and **three** rounds of multi-agent critical review — an initial 5-agent panel (GRC/compliance, engineering, product/UX, security, devil's-advocate) against the conceptual design, a second 3-agent pass (completeness/consistency, implementability cross-checked against the real codebase, a second devil's-advocate round) against this written document itself, and a third 4-agent pass scoped specifically to whether/how to verify AI-generated regulatory citations (see §10).
 
 This **fully replaces** the existing `analyze_site_risks_with_ai` feature (6-10 risks, single call, no regulatory grounding, no financial ranges) for its main entry point (the Sites page "Analyze with AI" button). The existing single-call `/risk_analysis` endpoint stays alive for the *separate*, structurally different zero-input onboarding flow (see §9) — it is not deleted, just no longer the Sites-page feature.
 
@@ -217,3 +217,117 @@ The implementability review cross-checked the "fully replaces" claim against the
 - `SitesEntities.tsx`'s existing "Analyze AI" review UI (state, selection, bulk-import) and its test file
 
 All of this is genuinely dead once the new flow ships (the new `AiRiskAnalysisRun`/review-UX design in §3/§6 replaces it outright) — it should be deleted as part of this feature's implementation, not left dangling as unused code. Grep for `AiSuggestionState`, `aiSuggestions`, and `aiSuggestionFingerprint` across all three repos at implementation time to find every reference before deleting.
+
+## 10. Citation verification — what ships now vs. what's designed but deferred
+
+Prompted by a direct question: should a second AI pass adversarially double-check a risk's `citation_confidence: curated_verified` claim, rather than trusting the generating call's own self-assessment? A 4-agent review (architecture/cost, verification-prompt design, review UX, and a dedicated cost-benefit skeptic) worked this through in full. Three of the four independently designed a genuinely solid adversarial verification pass; the fourth made a sharper point the other three hadn't been asked to weigh: the single highest-stakes version of this problem doesn't need an LLM at all.
+
+### Ships now: a deterministic threshold check (extends §7's existing validation)
+
+The frameworks in the curated table that carry a non-null `applicability_threshold` (Sapin II, Devoir de Vigilance, CSRD — see §5) are exactly the cases where "does this genuinely apply" isn't a judgment call, it's arithmetic: `site.employees_count >= threshold.min_employees AND site.revenue >= threshold.min_revenue_eur`. Both fields already exist on `Site` today.
+
+**Add to the server-side validation §7 already mandates**: after a Phase 2 risk citing a threshold-bearing `regulatory_framework_id` is generated, check the site's actual data against `applicability_threshold` in code, before persisting. If the threshold isn't clearly met, force `legal_status` to `conditional_statutory` and cap `citation_confidence` at `ai_estimate` — regardless of what the generating call itself asserted. This upgrades the current mitigation (§4's prompt instruction "don't assert applicability without evidence," which is itself just an LLM being trusted to behave — the same category of risk a verification pass exists to catch, one layer up) from a prompt hint to actual, auditable code. Near-zero cost, no new prompt, no new model call, no new UI state — a GRC auditor can read the check itself rather than trust a probabilistic verdict.
+
+### Deferred, fully designed for when it's needed: adversarial LLM verification
+
+The one real evidence point available — the Fives Nordon validation test (§2) — found **zero** citation-accuracy failures; it correctly downgraded NIS2 to pending and correctly cited Loi Waserman unprompted. Building a second orchestration layer, a new prompt to maintain, new cost (~20 calls / <$1 per analysis), and new UI states to fix a failure mode not yet observed, on a feature that hasn't shipped v1 yet, is solving a hypothetical ahead of a real one — the same "no evidence of need yet, real complexity cost" bar that got the org-threshold subsystem and audit-scheduling fields deferred in §8. This is deferred for the identical reason.
+
+The design is fully worked out and ready to build the moment real usage shows a genuine gap (specifically: wrong citations on *non*-threshold frameworks — domain-fit mismatches like ATEX cited without an explosive-atmosphere process — since the deterministic check above already closes the threshold-gated case):
+
+- **Timing**: asynchronous, after Phase 2 results are already visible — not synchronous, which would erode the 121s→35s win that made the synchronous UX viable in the first place (§2).
+- **Granularity**: one verification call per *category* (batching all of that category's `curated_verified` claims), not per risk — caps calls at ≤20 instead of 20-60+, and lets a category-level check catch a pattern a per-risk call can't see (e.g. one framework over-applied across several risks in the same category).
+- **Independent pass, not folded into Phase 2 as self-critique**: the same completion-momentum bias that makes proofreading your own writing five minutes after typing it unreliable applies here — a genuinely separate context, framed adversarially from the start, doesn't inherit the generating call's bias toward agreeing with itself.
+- **Single verifier, not an N-skeptic voting panel**: unlike the open-ended judgment calls this project's own review rounds used a panel for, citation-fit is checked against a fixed, already-curated rubric — low legitimate variance across repeated calls, and the dominant failure mode (systematic over-assertion, not random hallucination) isn't one voting averages away.
+- **Cheaper model tier**: a bounded classification task (confirm/refute against provided facts), not open generation — doesn't need the same capability tier as Phase 2, though this should be validated against the real Fives Nordon output before committing, not assumed.
+- **The safeguard that makes it trustworthy rather than theater**: a verdict of `REFUTED` is only valid if the model names one of five specific mismatch types (threshold not evidenced / domain mismatch / legal-status overstated / narrow-gate violation / reference inconsistency) *and* quotes the specific conflicting fact — enforced server-side after the call returns, same discipline as the existing `_clamp` pattern (§7). A refutation with vague reasoning ("seems uncertain") is rejected, not acted on.
+- **On a valid refutation**: a new `citation_confidence: flagged_for_review` state (distinct from `ai_estimate` — a refuted claim is a negative signal, not a neutral absence of one), `regulatory_framework_id` stays set so the reviewer can judge the specifics themselves, and the one-line refutation reasoning surfaces inline on the risk row.
+- **UX integration**: no blocking spinner or global progress line — verification-pending rows just show a subtle pending micro-state and are excluded from the fast-path bulk-accept eligible set until resolved (closing the exact race condition — bulk-accepting a citation whose check hasn't finished — that motivated the question). Manual, individual accept is never blocked.
+
+### Appendix: verification prompt skeleton (for when this is built)
+
+```
+SYSTEM:
+You are a skeptical compliance verifier. Your only job is to check whether
+ONE specific regulatory citation, already made by another AI system, holds
+up under scrutiny. You are not evaluating the risk's severity, category, or
+overall quality — only whether this specific citation is sound.
+
+Your default posture is skeptical, not agreeable: a citation to a curated,
+human-verified framework is a strong claim, and it is your job to actively
+look for reasons it doesn't hold, not to confirm it sounds plausible.
+
+You may only return a verdict of REFUTED if you can name ONE of the five
+specific mismatch types below AND cite the specific conflicting fact from
+the data provided. General uncertainty, "hard to verify," stylistic
+disagreement, or disagreement with anything other than the citation itself
+(severity, category, wording) is NOT grounds for refutation — if that is
+all you find, you must return UPHELD.
+
+Mismatch types (choose exactly one if refuting):
+1. THRESHOLD_NOT_EVIDENCED — the framework has an applicability_threshold
+   and the site profile does not contain facts meeting it.
+   (Note: for threshold-bearing frameworks, the deterministic check
+   described above already runs first — this call only sees a citation
+   that already passed that check, or targets a non-threshold framework.)
+2. DOMAIN_MISMATCH — the risk's actual subject matter is not what the
+   framework's domain/summary govern.
+3. LEGAL_STATUS_OVERSTATED — the risk's description or legal_status frames
+   a pending_statutory or conditional_statutory framework as a current,
+   unconditional, binding obligation.
+4. NARROW_GATE_VIOLATION — (CBAM/MACF or Dual-Use only) the site profile
+   lacks the specific confirming fact the framework's narrow scope requires.
+5. REFERENCE_INCONSISTENCY — the risk states a reference/jurisdiction detail
+   that contradicts the curated framework row.
+
+Respond ONLY with the JSON schema provided. Do not add commentary outside it.
+
+USER:
+## Generated risk (citation to check)
+name: {risk.name}
+category: {risk.category}
+description: {risk.description}
+reasoning: {risk.reasoning}
+asserted_legal_status: {risk.legal_status}
+asserted_citation_confidence: {risk.citation_confidence}
+
+## Curated framework cited (ground truth — verbatim, do not paraphrase)
+name: {framework.name}
+official_reference: {framework.official_reference}
+jurisdiction: {framework.jurisdiction}
+domain: {framework.domain}
+legal_status: {framework.legal_status}
+applicability_threshold: {framework.applicability_threshold | "none (universal)"}
+summary: {framework.summary}
+last_verified_at: {framework.last_verified_at}
+
+## Site profile (facts available to check applicability against)
+activity: {site.activity}
+employees_count: {site.employees_count}
+revenue: {site.revenue}
+site_type: {site.site_type}
+country: {site.country}
+description: {site.description}   # capped 2,000 chars, same as generation prompt
+
+## Task
+Check this citation against the five mismatch types above, in order.
+Stop and return REFUTED at the first one that concretely applies. If none
+apply, return UPHELD.
+
+## Output schema (JSON only)
+{
+  "verdict": "UPHELD" | "REFUTED",
+  "mismatch_type": "THRESHOLD_NOT_EVIDENCED" | "DOMAIN_MISMATCH" |
+                    "LEGAL_STATUS_OVERSTATED" | "NARROW_GATE_VIOLATION" |
+                    "REFERENCE_INCONSISTENCY" | null,
+  "specific_evidence": string | null,   // required, non-generic, if REFUTED;
+                                         // must quote/reference an actual
+                                         // field value from above
+  "reasoning_summary": string           // one or two sentences, shown to
+                                         // the human reviewer verbatim if
+                                         // REFUTED
+}
+```
+
+**Server-side enforcement after the call returns** (not in-prompt — belongs in the calling service, same as every other output-validation rule in §7): reject/treat-as-UPHELD any response where `verdict == REFUTED` but `mismatch_type` is null or `specific_evidence` is empty/generic (matches a denylist of vague phrases like "unclear," "uncertain," "hard to say"). Log a warning for prompt-tuning review rather than silently passing through — a model that returns malformed refutations repeatedly signals the prompt needs tightening, not that the check should be trusted anyway.
+
+Batching note: when built, this runs once per category (not per risk) against that category's full set of `curated_verified` risks — the skeleton above shows the single-risk shape for clarity; the batched version repeats the "Generated risk" + "Curated framework cited" blocks per risk in the same call and returns an array of verdicts.
