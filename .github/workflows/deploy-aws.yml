@@ -1,13 +1,14 @@
 name: AEXA Server Deployment (AWS ECS)
 
-# workflow_dispatch only, deliberately -- this is the new AWS pipeline being
-# built out and validated (migration plan steps 7-9) alongside the existing
-# VPS deploy.yml, which stays the sole automatic path until cutover. Wiring
-# this to `push: main` happens *at* cutover, at the same time the VPS
-# SSH-based steps in deploy.yml are retired -- not before (a window where
-# both paths could fire is a source of confusing double-deploys) and not
-# long after (this pipeline shouldn't sit untested).
+# Wired to push:main at cutover completion (see aexa-server#358) --
+# deploy.yml's VPS SSH path is retired in the same change, so there's never
+# a window where both or neither pipeline is the automatic one.
+# workflow_dispatch is kept for manual re-runs (e.g. a one-off catch-up
+# deploy after a failed run).
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
