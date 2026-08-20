@@ -58,6 +58,40 @@ describe('risk_validations.create_risk — 0-100 bounded fields', () => {
   });
 });
 
+// 2026-08-19 audit: pagerank_score/financial_impact_min/financial_impact_max
+// were unbounded, so a negative or absurd value passed validation and fed
+// straight into the EBITDA-at-risk calculation. pagerank_score matches the
+// other 0-100 derived scores above; financial_impact_* is a k€ currency
+// amount, so it gets its own larger ceiling instead.
+describe('risk_validations.create_risk — pagerank_score / financial_impact bounds', () => {
+  it.each([
+    ['pagerank_score', 50],
+    ['financial_impact_min', 100],
+    ['financial_impact_max', 5000],
+  ])('accepts an in-range %s', (field, value) => {
+    const result = risk_validations.create_risk.safeParse({ ...BASE, [field]: value });
+    expect(result.success).toBe(true);
+  });
+
+  it.each([
+    ['pagerank_score', -1],
+    ['financial_impact_min', -1],
+    ['financial_impact_max', -1],
+  ])('rejects a negative %s', (field, value) => {
+    const result = risk_validations.create_risk.safeParse({ ...BASE, [field]: value });
+    expect(result.success).toBe(false);
+  });
+
+  it.each([
+    ['pagerank_score', 101],
+    ['financial_impact_min', 1_000_001],
+    ['financial_impact_max', 1_000_001],
+  ])('rejects an out-of-range %s', (field, value) => {
+    const result = risk_validations.create_risk.safeParse({ ...BASE, [field]: value });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe('risk_validations.update_risk — 0-100 bounded fields (partial)', () => {
   it.each([
     ['probability', -1],

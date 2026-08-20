@@ -17,9 +17,13 @@ const create_kri = z
     name: z.string().min(1, 'Name is required'),
     owner: z.string().optional(),
     unit: z.string().min(1, 'Unit is required'),
-    current_value: z.number(),
-    alert_threshold: z.number(),
-    target_value: z.number(),
+    // .finite() closes a gap z.number() alone leaves open: it rejects
+    // NaN by default but NOT +/-Infinity, which would otherwise reach
+    // compute_kri_status's threshold comparisons and produce a
+    // meaningless/NaN alert-status result.
+    current_value: z.number().finite(),
+    alert_threshold: z.number().finite(),
+    target_value: z.number().finite(),
     frequency: z.string().optional(),
     line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
   })
@@ -35,8 +39,8 @@ const update_kri = z
     name: z.string().min(1).optional(),
     owner: z.string().optional(),
     unit: z.string().min(1).optional(),
-    alert_threshold: z.number().optional(),
-    target_value: z.number().optional(),
+    alert_threshold: z.number().finite().optional(),
+    target_value: z.number().finite().optional(),
     frequency: z.string().optional(),
     line_of_defense: LINE_OF_DEFENSE_ENUM.optional(),
   })
@@ -52,7 +56,7 @@ const update_kri = z
   );
 
 const submit_value = z.object({
-  current_value: z.number(),
+  current_value: z.number().finite(),
 });
 
 export const kri_validations = {

@@ -18,9 +18,16 @@ const create_risk = z.object({
   description: z.string().optional(),
   category: z.string().min(1, 'Category is required'),
   inherent_score: z.number().int().min(0).max(100).optional(),
-  pagerank_score: z.number().int().optional(),
-  financial_impact_min: z.number().int().optional(),
-  financial_impact_max: z.number().int().optional(),
+  // Bounded, matching every other score/effectiveness field in this schema
+  // -- unbounded before meant a negative or absurdly large value passed
+  // validation and fed straight into the EBITDA-at-risk calculation
+  // (ebitda_risk.ts reads financial_impact_min/max), silently corrupting
+  // that figure. 100 is the same "derived-score" ceiling used elsewhere in
+  // this schema; financial impact is a currency amount in k€ (see
+  // RiskFormModal), so it gets its own, much larger ceiling instead.
+  pagerank_score: z.number().int().min(0).max(100).optional(),
+  financial_impact_min: z.number().int().min(0).max(1_000_000).optional(),
+  financial_impact_max: z.number().int().min(0).max(1_000_000).optional(),
   probability: z.number().int().min(0).max(100).optional(),
   // aexa-server#241: real, independent impact axis for the risk matrix
   // (previously faked from inherent_score — see #202).

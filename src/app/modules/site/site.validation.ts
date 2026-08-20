@@ -5,8 +5,12 @@ const create_site = z.object({
   location: z.string().optional(),
   country: z.string().optional(),
   activity: z.string().optional(),
-  revenue: z.number().int(),
-  employees_count: z.number().int(),
+  // Unbounded before meant a negative revenue/headcount passed validation
+  // and fed straight into the EBITDA-at-risk benchmark margin calculation
+  // (ebitda_risk.ts) and general risk-severity scaling, silently poisoning
+  // downstream financial-risk math for the whole site.
+  revenue: z.number().int().min(0).max(1_000_000_000),
+  employees_count: z.number().int().min(0).max(1_000_000),
   site_type: z.string(),
   lat: z.number().optional(),
   lng: z.number().optional(),
