@@ -61,6 +61,26 @@ router.post(
   risk_controller.create_risk,
 );
 
+// docs/design-docs/ai-risk-review-approval-workflow.md -- fixed sub-paths,
+// not risk ids, so registered before the /:id routes below, same
+// convention as correlation-matrix/ebitda-at-risk-summary/suggest-fields
+// above. Distinct from the OLD maker-checker approval workflow's
+// /approvals/:id/approve below -- this answers "does this AI-generated
+// risk exist as a confirmed register entry yet," not "is this risk's
+// assessment signed off."
+router.post(
+  '/bulk-approve',
+  auth('ORGANIZATION'),
+  RequestValidator(risk_validations.bulk_review),
+  risk_controller.bulk_approve_risks,
+);
+router.post(
+  '/bulk-dismiss',
+  auth('ORGANIZATION'),
+  RequestValidator(risk_validations.bulk_review),
+  risk_controller.bulk_dismiss_risks,
+);
+
 // aexa-frontend#95: risk maker-checker approval workflow. Role checks are
 // enforced in the service (assertCanWriteOrgResource for submit,
 // assertIsOrgAdmin for approve/reject), mirroring the FindingAssignment
@@ -92,6 +112,11 @@ router.post(
   RequestValidator(risk_validations.record_line_review),
   risk_controller.record_line_review,
 );
+
+// docs/design-docs/ai-risk-review-approval-workflow.md -- per-risk
+// approve/dismiss for an AI-generated risk still PENDING_REVIEW.
+router.post('/:id/approve', auth('ORGANIZATION'), risk_controller.approve_risk);
+router.post('/:id/dismiss', auth('ORGANIZATION'), risk_controller.dismiss_risk);
 
 router.get('/:id', auth('ORGANIZATION'), risk_controller.get_single_risk);
 router.patch(

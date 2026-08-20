@@ -279,6 +279,44 @@ describe('kri service — org scoping and role gating', () => {
       expect(db.create).not.toHaveBeenCalled();
     });
 
+    // docs/design-docs/ai-risk-review-approval-workflow.md
+    it('409s when the risk was dismissed', async () => {
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        review_status: 'DISMISSED',
+      });
+
+      await expect(
+        kri_service.create_kri_into_db(
+          makeReq({
+            body: { risk_id: 'r1', current_value: 1, alert_threshold: 2, target_value: 3 },
+          }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
+    it('allows creating a KRI for a PENDING_REVIEW risk (unreviewed, but not rejected)', async () => {
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ORG_A,
+        review_status: 'PENDING_REVIEW',
+      });
+      db.create.mockResolvedValue({
+        id: 'k1',
+        current_value: 1,
+        alert_threshold: 2,
+        target_value: 3,
+      });
+
+      await kri_service.create_kri_into_db(
+        makeReq({ body: { risk_id: 'r1', current_value: 1, alert_threshold: 2, target_value: 3 } }),
+      );
+
+      expect(db.create).toHaveBeenCalled();
+    });
+
     it('injects org_account_id and creates when the risk belongs to the caller org', async () => {
       riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
       db.create.mockResolvedValue({

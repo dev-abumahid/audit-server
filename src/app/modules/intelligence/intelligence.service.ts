@@ -43,8 +43,14 @@ const buildOrgContext = async (organizationId: string): Promise<OrgContext> => {
 };
 
 const fetchExistingRisks = async (organizationId: string): Promise<ExistingRisk[]> => {
+  // docs/design-docs/ai-risk-review-approval-workflow.md -- APPROVED +
+  // PENDING_REVIEW for dedup, excluding only DISMISSED (same rationale as
+  // aiRiskAnalysis.service.ts's fetchExistingRiskTitles).
   const risks = await prisma.risk.findMany({
-    where: { org_account_id: organizationId },
+    where: {
+      org_account_id: organizationId,
+      review_status: { in: ['APPROVED', 'PENDING_REVIEW'] },
+    },
     select: { id: true, name: true, category: true, description: true },
   });
   return risks;

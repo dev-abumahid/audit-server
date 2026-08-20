@@ -95,9 +95,16 @@ const suggest_fields = z.object({
   fields: z.array(RISK_FIELD_NAMES).min(1).optional(),
 });
 
+// docs/design-docs/ai-risk-review-approval-workflow.md -- shared by
+// POST /risk/bulk-approve and POST /risk/bulk-dismiss.
+const bulk_review = z.object({
+  riskIds: z.array(z.string().uuid()).min(1, 'At least one risk id is required'),
+});
+
 export const risk_validations = {
   create_risk,
   update_risk,
   suggest_fields,
   record_line_review: recordLineReviewBody,
+  bulk_review,
 };

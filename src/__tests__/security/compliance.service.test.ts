@@ -2210,6 +2210,43 @@ describe('compliance obligation <-> risk linking (aexa-server#346)', () => {
       ).rejects.toMatchObject({ statusCode: 403 });
       expect(db.findFirst).not.toHaveBeenCalled();
     });
+
+    // docs/design-docs/ai-risk-review-approval-workflow.md
+    it('409s when the risk was dismissed', async () => {
+      db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: null });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'risk-1',
+        org_account_id: ORG_A,
+        review_status: 'DISMISSED',
+      });
+
+      await expect(
+        compliance_service.link_risk_to_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' }, body: { riskId: 'risk-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('allows linking a PENDING_REVIEW risk (unreviewed, but not rejected)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: null });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'risk-1',
+        org_account_id: ORG_A,
+        review_status: 'PENDING_REVIEW',
+      });
+      db.update.mockResolvedValue({
+        id: 'obl-1',
+        risk_id: 'risk-1',
+        due_date: null,
+        status: 'compliant',
+      });
+
+      const result = await compliance_service.link_risk_to_obligation_into_db(
+        makeReq({ params: { id: 'obl-1' }, body: { riskId: 'risk-1' } }),
+      );
+      expect(result.risk_id).toBe('risk-1');
+    });
   });
 
   describe('unlink_risk_from_obligation_into_db', () => {

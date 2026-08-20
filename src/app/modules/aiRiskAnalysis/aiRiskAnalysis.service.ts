@@ -260,7 +260,17 @@ async function fetchExistingRiskTitles(
   orgAccountId: string,
 ): Promise<{ title: string }[]> {
   const existingRisks = await prisma.risk.findMany({
-    where: { site_id: siteId, org_account_id: orgAccountId },
+    // docs/design-docs/ai-risk-review-approval-workflow.md -- dedup counts
+    // APPROVED + PENDING_REVIEW (a fresh run shouldn't re-suggest something
+    // already sitting in the register OR already pending review), but not
+    // DISMISSED -- a reviewer's rejection of one attempt's proposal isn't a
+    // permanent "never applicable" verdict, so a later run may legitimately
+    // re-flag it (accepted tradeoff, see the design doc's open items).
+    where: {
+      site_id: siteId,
+      org_account_id: orgAccountId,
+      review_status: { in: ['APPROVED', 'PENDING_REVIEW'] },
+    },
     select: { name: true },
     take: MAX_EXISTING_RISKS_FOR_DEDUP,
   });
@@ -765,6 +775,10 @@ async function persistGeneratedRisk(
     category,
     status: 'open',
     ai_generated: true,
+    // docs/design-docs/ai-risk-review-approval-workflow.md -- generated
+    // risks start unreviewed, not the schema's APPROVED default (that
+    // default is for manually-created risks and pre-existing rows only).
+    review_status: 'PENDING_REVIEW',
     source_info: `AI risk analysis, ${new Date().toISOString().slice(0, 10)}`,
     probability,
     impact,

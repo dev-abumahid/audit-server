@@ -44,7 +44,10 @@ const get_correlation_matrix_data = async (req: Request) => {
 
   const [risks, riskLinks, actions] = await Promise.all([
     prisma.risk.findMany({
-      where: { org_account_id: ctx.organizationId },
+      // docs/design-docs/ai-risk-review-approval-workflow.md -- feeds the
+      // correlation matrix and page-rank graph, neither of which should
+      // ever show unreviewed AI risks.
+      where: { org_account_id: ctx.organizationId, review_status: 'APPROVED' },
       orderBy: { createdAt: 'asc' },
     }),
     prisma.riskLink.findMany({
@@ -191,7 +194,11 @@ const run_root_cause_bucketing = async (req: Request) => {
 
     const [organizationContext, risks, actions] = await Promise.all([
       buildOrganizationContext(ctx.organizationId),
-      prisma.risk.findMany({ where: { org_account_id: ctx.organizationId } }),
+      // docs/design-docs/ai-risk-review-approval-workflow.md -- same
+      // APPROVED-only treatment as get_correlation_matrix_data above.
+      prisma.risk.findMany({
+        where: { org_account_id: ctx.organizationId, review_status: 'APPROVED' },
+      }),
       prisma.action.findMany({ where: actionWhere }),
     ]);
 

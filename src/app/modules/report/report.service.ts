@@ -146,13 +146,23 @@ const fetchOrgData = async (ctx: CallerOrgContext): Promise<OrgReportData> => {
 
   const [profile, risks, kris, sites, actions] = await Promise.all([
     prisma.organizationProfile.findUnique({ where: { accountId: orgAccountId } }),
+    // docs/design-docs/ai-risk-review-approval-workflow.md
     prisma.risk.findMany({
-      where: { org_account_id: orgAccountId },
+      where: { org_account_id: orgAccountId, review_status: 'APPROVED' },
       include: { site: { select: { name: true } } },
       orderBy: { residual_score: 'desc' },
     }),
     prisma.kri.findMany({
-      where: { org_account_id: orgAccountId },
+      // Review finding: the risks query above already excludes
+      // PENDING_REVIEW/DISMISSED risks, but this query's joined `risk`
+      // relation wasn't filtered by the same condition -- a KRI attached to
+      // an unreviewed risk would still surface that risk's name in the
+      // report even though the risk itself is excluded from the risks
+      // section above. `where` can't filter a required to-one include
+      // (Prisma only supports filtering the parent by the relation), so
+      // this excludes the KRI row itself when its risk isn't approved --
+      // consistent with the report only reflecting confirmed register data.
+      where: { org_account_id: orgAccountId, risk: { review_status: 'APPROVED' } },
       include: { risk: { select: { name: true } } },
     }),
     prisma.site.findMany({ where: { org_account_id: orgAccountId } }),

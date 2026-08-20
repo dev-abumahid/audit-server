@@ -65,7 +65,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
   describe('submit_risk_for_approval', () => {
     it('LEAD_AUDITOR submits a risk with no live cycle, creating a PENDING_APPROVAL row + audit event', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue(null);
       approvalDb.create.mockResolvedValue({ id: 'ra-1', status: 'PENDING_APPROVAL' });
 
@@ -84,9 +88,44 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
       );
     });
 
+    // docs/design-docs/ai-risk-review-approval-workflow.md -- a risk that
+    // hasn't been confirmed as a real register entry yet can't be
+    // submitted into this separate maker-checker sign-off flow.
+    it('409s when the risk is still PENDING_REVIEW (unreviewed AI suggestion)', async () => {
+      mockMembership('LEAD_AUDITOR');
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'PENDING_REVIEW',
+      });
+
+      await expect(
+        risk_approval_service.submit_risk_for_approval(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(approvalDb.create).not.toHaveBeenCalled();
+    });
+
+    it('409s when the risk was DISMISSED', async () => {
+      mockMembership('LEAD_AUDITOR');
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'DISMISSED',
+      });
+
+      await expect(
+        risk_approval_service.submit_risk_for_approval(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(approvalDb.create).not.toHaveBeenCalled();
+    });
+
     it('ADMIN may also submit (superset of Lead Auditor)', async () => {
       mockMembership('ADMIN');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue(null);
       approvalDb.create.mockResolvedValue({ id: 'ra-1', status: 'PENDING_APPROVAL' });
 
@@ -118,7 +157,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
 
     it('blocks (409) when a PENDING_APPROVAL cycle is already live', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue({ id: 'ra-1', status: 'PENDING_APPROVAL' });
 
       await expect(
@@ -130,7 +173,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
 
     it('blocks (409) when an APPROVED cycle is already live (must edit to resubmit)', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue({ id: 'ra-1', status: 'APPROVED' });
 
       await expect(
@@ -153,7 +200,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
 
     it('resolves a P2002 create race to the winning row instead of a 500', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       // No live row at first check, then the concurrent winner appears.
       approvalDb.findFirst
         .mockResolvedValueOnce(null)
@@ -178,7 +229,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
     // surface a clean, retryable 409 instead.
     it('returns a clean 409 (not 500) when the P2002 winner has already vanished from the live set', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       // No live row at the first check, and STILL none on the post-P2002
       // re-query — the winner was invalidated/rejected in the gap.
       approvalDb.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
@@ -509,7 +564,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
   describe('get_risk_approval_state', () => {
     it('returns NOT_SUBMITTED when the risk has no approval cycle', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue(null);
 
       const result = await risk_approval_service.get_risk_approval_state(
@@ -521,7 +580,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
 
     it('returns PENDING_APPROVAL when the latest cycle is pending', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue({
         id: 'ra-1',
         status: 'PENDING_APPROVAL',
@@ -537,7 +600,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
 
     it('returns NOT_SUBMITTED when the latest cycle was invalidated by an edit', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue({
         id: 'ra-1',
         status: 'APPROVED',
@@ -553,7 +620,11 @@ describe('risk approval service — maker-checker (aexa-frontend#95)', () => {
 
     it('returns REJECTED when the latest live cycle is rejected', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ANCHOR });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'r1',
+        org_account_id: ANCHOR,
+        review_status: 'APPROVED',
+      });
       approvalDb.findFirst.mockResolvedValue({
         id: 'ra-1',
         status: 'REJECTED',

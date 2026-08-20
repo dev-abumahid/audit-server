@@ -90,6 +90,50 @@ const record_line_review = catchAsync(async (req, res) => {
   });
 });
 
+const approve_risk = catchAsync(async (req, res) => {
+  const result = await risk_service.approve_risk_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Risk approved.',
+    data: result,
+    meta: {},
+  });
+});
+
+const dismiss_risk = catchAsync(async (req, res) => {
+  const result = await risk_service.dismiss_risk_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Risk dismissed.',
+    data: result,
+    meta: {},
+  });
+});
+
+const bulk_approve_risks = catchAsync(async (req, res) => {
+  const result = await risk_service.bulk_approve_risks_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Risks approved.',
+    data: result,
+    meta: {},
+  });
+});
+
+const bulk_dismiss_risks = catchAsync(async (req, res) => {
+  const result = await risk_service.bulk_dismiss_risks_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Risks dismissed.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const risk_controller = {
   get_ebitda_at_risk_summary,
   get_all_risk,
@@ -99,4 +143,8 @@ export const risk_controller = {
   delete_risk,
   suggest_fields,
   record_line_review,
+  approve_risk,
+  dismiss_risk,
+  bulk_approve_risks,
+  bulk_dismiss_risks,
 };

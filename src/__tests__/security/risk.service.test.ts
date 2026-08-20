@@ -6,8 +6,10 @@ vi.mock('../../app/lib/prisma.js', () => ({
     risk: {
       findMany: vi.fn(),
       findFirst: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
       count: vi.fn(),
     },
@@ -33,8 +35,12 @@ vi.mock('../../app/lib/prisma.js', () => ({
     auditEngagementRisk: {
       count: vi.fn(),
     },
+    complianceObligation: {
+      count: vi.fn(),
+    },
     riskLink: {
       deleteMany: vi.fn(),
+      count: vi.fn(),
     },
     site: {
       findFirst: vi.fn(),
@@ -79,6 +85,10 @@ const auditEngagementRiskDb = prisma.auditEngagementRisk as unknown as Record<
   ReturnType<typeof vi.fn>
 >;
 const riskLinkDb = prisma.riskLink as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const complianceObligationDb = prisma.complianceObligation as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const organizationDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -129,6 +139,10 @@ describe('risk service — org scoping (ticket #6)', () => {
     // aexa-frontend#25 dangling-link cleanup on delete is a no-op unless a
     // test overrides it.
     riskLinkDb.deleteMany.mockResolvedValue({ count: 0 });
+    // Default: no in-use references for the dismiss warning (design doc
+    // ai-risk-review-approval-workflow.md) unless a test overrides it.
+    riskLinkDb.count.mockResolvedValue(0);
+    complianceObligationDb.count.mockResolvedValue(0);
     // Default (aexa-server#347): a plausible site for EBITDA-at-risk
     // resolution so tests unrelated to that feature don't have to know
     // about it. Individual ebitda tests override this per-case.
@@ -217,7 +231,9 @@ describe('risk service — org scoping (ticket #6)', () => {
       await risk_service.get_ebitda_at_risk_summary(makeReq());
 
       expect(db.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { org_account_id: ORG_A } }),
+        expect.objectContaining({
+          where: { org_account_id: ORG_A, review_status: 'APPROVED' },
+        }),
       );
       expect(siteDb.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { org_account_id: ORG_A } }),
@@ -1578,7 +1594,9 @@ describe('risk_service — POST /risk/suggest-fields (mocked aexa-ai call)', () 
       where: { id: 'site-1', org_account_id: ORG_A },
     });
     expect(db.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { org_account_id: ORG_A, site_id: 'site-1' } }),
+      expect.objectContaining({
+        where: { org_account_id: ORG_A, site_id: 'site-1', review_status: 'APPROVED' },
+      }),
     );
   });
 
@@ -1717,6 +1735,242 @@ describe('risk_service — POST /risk/suggest-fields (mocked aexa-ai call)', () 
     ).rejects.toMatchObject({
       statusCode: 500,
       message: 'Failed to generate risk field suggestions',
+    });
+  });
+});
+
+// docs/design-docs/ai-risk-review-approval-workflow.md
+describe('risk service — AI-risk review/approval workflow', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    orgMemberDb.findUnique.mockResolvedValue(null);
+    kriDb.count.mockResolvedValue(0);
+    complianceObligationDb.count.mockResolvedValue(0);
+    auditEngagementRiskDb.count.mockResolvedValue(0);
+    riskLinkDb.count.mockResolvedValue(0);
+  });
+
+  describe('get_all_risk_from_db reviewStatus filtering', () => {
+    it('defaults to APPROVED-only when reviewStatus is omitted', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(makeReq({}));
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ org_account_id: ORG_A, review_status: 'APPROVED' }),
+        }),
+      );
+    });
+
+    it('shows all three statuses when reviewStatus=all is passed (the Register page opt-in)', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(makeReq({ query: { reviewStatus: 'all' } }));
+
+      const call = db.findMany.mock.calls[0][0];
+      expect(call.where.review_status).toBeUndefined();
+      expect(call.where.org_account_id).toBe(ORG_A);
+    });
+
+    it('scopes to a specific status when reviewStatus=PENDING_REVIEW is passed (the Pending AI Review panel)', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(
+        makeReq({ query: { reviewStatus: 'PENDING_REVIEW' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            org_account_id: ORG_A,
+            review_status: 'PENDING_REVIEW',
+          }),
+        }),
+      );
+    });
+
+    it('scopes to DISMISSED when requested (the Dismissed history view)', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(makeReq({ query: { reviewStatus: 'DISMISSED' } }));
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ org_account_id: ORG_A, review_status: 'DISMISSED' }),
+        }),
+      );
+    });
+
+    it('falls back to APPROVED-only for an invalid reviewStatus value', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(
+        makeReq({ query: { reviewStatus: 'not-a-real-status' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ org_account_id: ORG_A, review_status: 'APPROVED' }),
+        }),
+      );
+    });
+  });
+
+  describe('approve_risk_into_db', () => {
+    it('flips a PENDING_REVIEW risk to APPROVED', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      db.updateMany.mockResolvedValue({ count: 1 });
+      db.findUniqueOrThrow.mockResolvedValue({ id: 'r1', review_status: 'APPROVED' });
+
+      const result = await risk_service.approve_risk_into_db(makeReq({ params: { id: 'r1' } }));
+
+      expect(db.updateMany).toHaveBeenCalledWith({
+        where: { id: 'r1', org_account_id: ORG_A, review_status: 'PENDING_REVIEW' },
+        data: { review_status: 'APPROVED' },
+      });
+      expect(result.review_status).toBe('APPROVED');
+    });
+
+    it('404s when the risk does not belong to the caller org', async () => {
+      db.findFirst.mockResolvedValue(null);
+
+      await expect(
+        risk_service.approve_risk_into_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(db.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('409s when the risk is not PENDING_REVIEW (already approved, or a concurrent approve/dismiss won the race)', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+      // Guarded updateMany matched nothing -- the exact TOCTOU-guard shape
+      // used for the AI-analysis retry endpoint.
+      db.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        risk_service.approve_risk_into_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('blocks a VIEWER from approving', async () => {
+      mockMembership('VIEWER');
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A });
+
+      await expect(
+        risk_service.approve_risk_into_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(db.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('dismiss_risk_into_db', () => {
+    it('flips a PENDING_REVIEW risk to DISMISSED', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A, ref: 'CYB-001' });
+      db.updateMany.mockResolvedValue({ count: 1 });
+      db.findUniqueOrThrow.mockResolvedValue({ id: 'r1', review_status: 'DISMISSED' });
+
+      const result = await risk_service.dismiss_risk_into_db(makeReq({ params: { id: 'r1' } }));
+
+      expect(db.updateMany).toHaveBeenCalledWith({
+        where: { id: 'r1', org_account_id: ORG_A, review_status: 'PENDING_REVIEW' },
+        data: { review_status: 'DISMISSED' },
+      });
+      expect(result.risk.review_status).toBe('DISMISSED');
+    });
+
+    it('surfaces a non-blocking warning count when the risk is still referenced elsewhere', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A, ref: 'CYB-001' });
+      db.updateMany.mockResolvedValue({ count: 1 });
+      db.findUniqueOrThrow.mockResolvedValue({ id: 'r1', review_status: 'DISMISSED' });
+      kriDb.count.mockResolvedValue(2);
+      auditEngagementRiskDb.count.mockResolvedValue(1);
+
+      const result = await risk_service.dismiss_risk_into_db(makeReq({ params: { id: 'r1' } }));
+
+      // Dismiss is not blocked by in-use references (unlike delete) -- the
+      // warning is informational, surfaced for the frontend to show before
+      // confirming.
+      expect(result.referencedBy).toEqual({
+        kris: 2,
+        complianceObligations: 0,
+        auditEngagements: 1,
+        riskLinks: 0,
+      });
+    });
+
+    it('409s when the risk is not PENDING_REVIEW', async () => {
+      db.findFirst.mockResolvedValue({ id: 'r1', org_account_id: ORG_A, ref: 'CYB-001' });
+      db.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        risk_service.dismiss_risk_into_db(makeReq({ params: { id: 'r1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+    });
+  });
+
+  describe('bulk_approve_risks_into_db / bulk_dismiss_risks_into_db', () => {
+    it('approves every PENDING_REVIEW risk in the list and reports how many were skipped', async () => {
+      db.count.mockResolvedValue(2); // both ids belong to the org
+      db.updateMany.mockResolvedValue({ count: 1 }); // one was already APPROVED
+
+      const result = await risk_service.bulk_approve_risks_into_db(
+        makeReq({ body: { riskIds: ['r1', 'r2'] } }),
+      );
+
+      expect(db.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: { in: ['r1', 'r2'] },
+          org_account_id: ORG_A,
+          review_status: 'PENDING_REVIEW',
+        },
+        data: { review_status: 'APPROVED' },
+      });
+      expect(result).toEqual({ updated: 1, skipped: 1 });
+    });
+
+    it('rejects the whole batch with 400 when a riskId belongs to a different org', async () => {
+      // Only 1 of the 2 ids actually resolves under this org's scope.
+      db.count.mockResolvedValue(1);
+
+      await expect(
+        risk_service.bulk_approve_risks_into_db(
+          makeReq({ body: { riskIds: ['r1', 'cross-org-risk'] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+      expect(db.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('dismisses every PENDING_REVIEW risk in the list', async () => {
+      db.count.mockResolvedValue(2);
+      db.updateMany.mockResolvedValue({ count: 2 });
+
+      const result = await risk_service.bulk_dismiss_risks_into_db(
+        makeReq({ body: { riskIds: ['r1', 'r2'] } }),
+      );
+
+      expect(db.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: { in: ['r1', 'r2'] },
+          org_account_id: ORG_A,
+          review_status: 'PENDING_REVIEW',
+        },
+        data: { review_status: 'DISMISSED' },
+      });
+      expect(result).toEqual({ updated: 2, skipped: 0 });
+    });
+
+    it('blocks a VIEWER from bulk-approving', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        risk_service.bulk_approve_risks_into_db(makeReq({ body: { riskIds: ['r1'] } })),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(db.count).not.toHaveBeenCalled();
     });
   });
 });

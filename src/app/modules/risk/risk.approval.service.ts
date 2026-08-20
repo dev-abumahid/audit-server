@@ -87,7 +87,19 @@ const submit_risk_for_approval = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const { id: riskId } = req.params as { id: string };
 
-  await requireOrgScopedRisk(riskId, ctx);
+  const risk = await requireOrgScopedRisk(riskId, ctx);
+  // docs/design-docs/ai-risk-review-approval-workflow.md -- a risk that
+  // hasn't even been confirmed as a real register entry yet (still
+  // PENDING_REVIEW as an unreviewed AI suggestion, or already DISMISSED)
+  // shouldn't be submittable into this separate maker-checker sign-off
+  // flow. Also structurally prevents a risk from ever showing both
+  // "pending" badges (AI review + maker-checker) at once.
+  if (risk.review_status !== 'APPROVED') {
+    throw new AppError(
+      'This risk must be approved as a register entry before it can be submitted for sign-off.',
+      409,
+    );
+  }
   const organizationId = await requireCallerOrganizationId(ctx);
 
   const liveWhere: Prisma.RiskApprovalWhereInput = {

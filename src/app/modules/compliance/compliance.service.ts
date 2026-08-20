@@ -803,6 +803,12 @@ const link_risk_to_obligation_into_db = async (req: Request) => {
     where: { id: riskId, org_account_id: ctx.organizationId },
   });
   if (!risk) throw new AppError('Risk not found', 404);
+  // docs/design-docs/ai-risk-review-approval-workflow.md -- same guard as
+  // risk_link.service.ts's assertRiskRefExists / kri.service.ts's
+  // create_kri_into_db.
+  if (risk.review_status === 'DISMISSED') {
+    throw new AppError('This risk was dismissed and cannot be linked to an obligation.', 409);
+  }
 
   const result = await prisma.complianceObligation.update({
     where: { id: obligation.id },

@@ -53,7 +53,7 @@ describe('risk_link_service', () => {
 
   describe('create_risk_link_into_db', () => {
     it('creates a link once both refs resolve to real, org-scoped risks', async () => {
-      riskDb.findFirst.mockResolvedValue({ id: 'risk-1' });
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-1', review_status: 'APPROVED' });
       linkDb.create.mockResolvedValue({
         id: 'link-1',
         org_account_id: ORG_A,
@@ -68,11 +68,11 @@ describe('risk_link_service', () => {
 
       expect(riskDb.findFirst).toHaveBeenCalledWith({
         where: { org_account_id: ORG_A, ref: 'CYB-001' },
-        select: { id: true },
+        select: { id: true, review_status: true },
       });
       expect(riskDb.findFirst).toHaveBeenCalledWith({
         where: { org_account_id: ORG_A, ref: 'OPS-002' },
-        select: { id: true },
+        select: { id: true, review_status: true },
       });
       expect(linkDb.create).toHaveBeenCalledWith({
         data: {
@@ -85,11 +85,40 @@ describe('risk_link_service', () => {
       expect(result.id).toBe('link-1');
     });
 
+    // docs/design-docs/ai-risk-review-approval-workflow.md, open item 1
+    it('409s when a ref resolves to a DISMISSED risk', async () => {
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-1', review_status: 'DISMISSED' });
+
+      await expect(
+        risk_link_service.create_risk_link_into_db(
+          makeReq({ body: { source_ref: 'CYB-001', target_ref: 'OPS-002', link_type: 'CAUSES' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(linkDb.create).not.toHaveBeenCalled();
+    });
+
+    it('allows linking to a PENDING_REVIEW risk (unreviewed, but not rejected)', async () => {
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-1', review_status: 'PENDING_REVIEW' });
+      linkDb.create.mockResolvedValue({
+        id: 'link-1',
+        org_account_id: ORG_A,
+        source_ref: 'CYB-001',
+        target_ref: 'OPS-002',
+        link_type: 'CAUSES',
+      });
+
+      const result = await risk_link_service.create_risk_link_into_db(
+        makeReq({ body: { source_ref: 'CYB-001', target_ref: 'OPS-002', link_type: 'CAUSES' } }),
+      );
+
+      expect(result.id).toBe('link-1');
+    });
+
     // Review fix: the new @@unique([org_account_id, source_ref, target_ref,
     // link_type]) constraint means a duplicate link now throws P2002 --
     // surfaced as a clean 409, not an unhandled 500.
     it('returns a 409 when the exact same link already exists', async () => {
-      riskDb.findFirst.mockResolvedValue({ id: 'risk-1' });
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-1', review_status: 'APPROVED' });
       linkDb.create.mockRejectedValue(
         new Prisma.PrismaClientKnownRequestError('unique', {
           code: 'P2002',
@@ -106,7 +135,7 @@ describe('risk_link_service', () => {
     });
 
     it('propagates a non-conflict error from link creation unchanged', async () => {
-      riskDb.findFirst.mockResolvedValue({ id: 'risk-1' });
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-1', review_status: 'APPROVED' });
       linkDb.create.mockRejectedValue(new Error('db connection lost'));
 
       await expect(
@@ -164,7 +193,7 @@ describe('risk_link_service', () => {
 
     it('LEAD_AUDITOR can create a risk link', async () => {
       mockMembership('LEAD_AUDITOR');
-      riskDb.findFirst.mockResolvedValue({ id: 'risk-1' });
+      riskDb.findFirst.mockResolvedValue({ id: 'risk-1', review_status: 'APPROVED' });
       linkDb.create.mockResolvedValue({ id: 'link-1' });
 
       await risk_link_service.create_risk_link_into_db(

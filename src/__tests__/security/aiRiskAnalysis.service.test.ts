@@ -258,6 +258,19 @@ describe('ai_risk_analysis_service', () => {
       expect(created.regulatory_framework_id).toBe('framework-sapin-ii');
       expect(created.ai_generation_run_id).toBe('run-new');
       expect(created.ai_generated).toBe(true);
+      // docs/design-docs/ai-risk-review-approval-workflow.md -- AI-generated
+      // risks start unreviewed, not the schema's APPROVED default.
+      expect(created.review_status).toBe('PENDING_REVIEW');
+      // Dedup context (fetchExistingRiskTitles) counts APPROVED +
+      // PENDING_REVIEW, excluding DISMISSED -- a reviewer's rejection isn't
+      // a permanent "never applicable" verdict.
+      expect(riskDb.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            review_status: { in: ['APPROVED', 'PENDING_REVIEW'] },
+          }),
+        }),
+      );
       expect(created.status).toBe('open');
 
       expect(runDb.update).toHaveBeenLastCalledWith({

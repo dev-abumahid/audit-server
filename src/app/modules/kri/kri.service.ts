@@ -147,6 +147,14 @@ const create_kri_into_db = async (req: Request) => {
     where: { id: payload.risk_id, org_account_id: ctx.organizationId },
   });
   if (!risk) throw new AppError('Risk not found', 404);
+  // docs/design-docs/ai-risk-review-approval-workflow.md -- same guard as
+  // risk_link.service.ts's assertRiskRefExists: linking to an explicitly-
+  // dismissed risk is almost certainly a mistake. PENDING_REVIEW is still
+  // allowed -- an unreviewed AI risk can be a legitimate KRI target while
+  // awaiting review.
+  if (risk.review_status === 'DISMISSED') {
+    throw new AppError('This risk was dismissed and cannot be linked to a KRI.', 409);
+  }
 
   // aexa-server#242: the value a KRI is created with counts as its first
   // reading — seeded via a nested create so the Kri row and its first

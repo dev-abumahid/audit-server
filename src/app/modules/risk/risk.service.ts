@@ -29,7 +29,7 @@ import { computeEbitdaSummary } from './ebitda_summary.js';
 import { mapActivityToSector } from './sector_mapper.js';
 
 const get_all_risk_from_db = async (req: Request) => {
-  const { searchTerm, siteId, category } = req.query as Record<string, string>;
+  const { searchTerm, siteId, category, reviewStatus } = req.query as Record<string, string>;
 
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
@@ -42,6 +42,25 @@ const get_all_risk_from_db = async (req: Request) => {
   const whereCondition: any = {
     org_account_id: ctx.organizationId,
   };
+
+  // docs/design-docs/ai-risk-review-approval-workflow.md -- this endpoint
+  // is shared by many consumers (matrix, graph, dashboard, KRI picker, CSV
+  // export, compliance/audit linking) that all expect APPROVED-only data
+  // and pass no override -- filtering here once, rather than in every
+  // consumer, is deliberate (the "filter at the source" rationale). The
+  // Risk Register needs three different views without re-fetching the
+  // (potentially large) approved register just to find a handful of
+  // pending/dismissed rows: ?reviewStatus=all shows all three, or a
+  // specific status value (PENDING_REVIEW/DISMISSED/APPROVED) scopes to
+  // just that one. Any other/invalid value falls through to the default.
+  const VALID_REVIEW_STATUSES = ['APPROVED', 'PENDING_REVIEW', 'DISMISSED'];
+  if (reviewStatus === 'all') {
+    // no filter -- all three statuses
+  } else if (VALID_REVIEW_STATUSES.includes(reviewStatus)) {
+    whereCondition.review_status = reviewStatus;
+  } else {
+    whereCondition.review_status = 'APPROVED';
+  }
 
   // search by name
   if (searchTerm) {
@@ -488,6 +507,139 @@ const delete_risk_from_db = async (req: Request) => {
   return result;
 };
 
+// docs/design-docs/ai-risk-review-approval-workflow.md -- shared reference
+// count for the dismiss in-use warning, mirroring delete_risk_from_db's
+// in-use guard above but as a non-blocking count (dismiss doesn't break any
+// FK the way delete's cascades would, so it's a warning, not a hard block).
+const countRiskReferences = async (
+  riskId: string,
+  riskRef: string,
+  orgAccountId: string,
+): Promise<{
+  kris: number;
+  complianceObligations: number;
+  auditEngagements: number;
+  riskLinks: number;
+}> => {
+  const [kris, complianceObligations, auditEngagements, riskLinks] = await Promise.all([
+    prisma.kri.count({ where: { risk_id: riskId } }),
+    prisma.complianceObligation.count({ where: { risk_id: riskId } }),
+    prisma.auditEngagementRisk.count({ where: { riskId } }),
+    prisma.riskLink.count({
+      where: {
+        org_account_id: orgAccountId,
+        OR: [{ source_ref: riskRef }, { target_ref: riskRef }],
+      },
+    }),
+  ]);
+  return { kris, complianceObligations, auditEngagements, riskLinks };
+};
+
+// action verb, no body -- same convention as report.route.ts's
+// PATCH /:id/publish and this session's POST /ai/risk-analysis-runs/:id/retry.
+const approve_risk_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { id } = req.params as Record<string, string>;
+
+  const existing = await prisma.risk.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Risk not found', 404);
+
+  // Guarded updateMany (not findFirst-then-update) -- the exact TOCTOU shape
+  // fixed tonight on the retry-failed-categories endpoint: two concurrent
+  // requests against the same risk (a bulk call racing a single one, or two
+  // overlapping bulk calls) must not both succeed.
+  const outcome = await prisma.risk.updateMany({
+    where: { id, org_account_id: ctx.organizationId, review_status: 'PENDING_REVIEW' },
+    data: { review_status: 'APPROVED' },
+  });
+  if (outcome.count === 0) {
+    throw new AppError('This risk is not pending review.', 409);
+  }
+  return prisma.risk.findUniqueOrThrow({ where: { id } });
+};
+
+const dismiss_risk_into_db = async (req: Request) => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { id } = req.params as Record<string, string>;
+
+  const existing = await prisma.risk.findFirst({
+    where: { id, org_account_id: ctx.organizationId },
+  });
+  if (!existing) throw new AppError('Risk not found', 404);
+
+  const outcome = await prisma.risk.updateMany({
+    where: { id, org_account_id: ctx.organizationId, review_status: 'PENDING_REVIEW' },
+    data: { review_status: 'DISMISSED' },
+  });
+  if (outcome.count === 0) {
+    throw new AppError('This risk is not pending review.', 409);
+  }
+  const referencedBy = await countRiskReferences(id, existing.ref, ctx.organizationId);
+  return { risk: await prisma.risk.findUniqueOrThrow({ where: { id } }), referencedBy };
+};
+
+type BulkReviewOutcome = { updated: number; skipped: number };
+
+const bulk_approve_risks_into_db = async (req: Request): Promise<BulkReviewOutcome> => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { riskIds } = req.body as { riskIds: string[] };
+
+  // A cross-org id can't arise from legitimate client use (ids only ever
+  // come from the caller's own org's risk list), unlike an already-
+  // approved/dismissed id in the same org, which is a normal race a stale
+  // UI can produce. Reject the whole batch on a cross-org id (a real client
+  // bug or a probe worth surfacing) rather than silently absorbing it into
+  // the same "not applicable" bucket as an ordinary status-mismatch skip.
+  const ownedCount = await prisma.risk.count({
+    where: { id: { in: riskIds }, org_account_id: ctx.organizationId },
+  });
+  if (ownedCount !== riskIds.length) {
+    throw new AppError('One or more risks do not belong to this organization.', 400);
+  }
+
+  const outcome = await prisma.risk.updateMany({
+    where: {
+      id: { in: riskIds },
+      org_account_id: ctx.organizationId,
+      review_status: 'PENDING_REVIEW',
+    },
+    data: { review_status: 'APPROVED' },
+  });
+  return { updated: outcome.count, skipped: riskIds.length - outcome.count };
+};
+
+const bulk_dismiss_risks_into_db = async (req: Request): Promise<BulkReviewOutcome> => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { riskIds } = req.body as { riskIds: string[] };
+
+  const ownedCount = await prisma.risk.count({
+    where: { id: { in: riskIds }, org_account_id: ctx.organizationId },
+  });
+  if (ownedCount !== riskIds.length) {
+    throw new AppError('One or more risks do not belong to this organization.', 400);
+  }
+
+  const outcome = await prisma.risk.updateMany({
+    where: {
+      id: { in: riskIds },
+      org_account_id: ctx.organizationId,
+      review_status: 'PENDING_REVIEW',
+    },
+    data: { review_status: 'DISMISSED' },
+  });
+  return { updated: outcome.count, skipped: riskIds.length - outcome.count };
+};
+
 /**
  * aexa-server#347 — org-scoped EBITDA-at-risk distribution for the
  * dashboard chart. Reads the already-persisted `ebitda_at_risk` values
@@ -502,7 +654,9 @@ const get_ebitda_at_risk_summary = async (req: Request) => {
 
   const [risks, sites] = await Promise.all([
     prisma.risk.findMany({
-      where: { org_account_id: ctx.organizationId },
+      // docs/design-docs/ai-risk-review-approval-workflow.md -- financial
+      // exposure chart shouldn't include unreviewed AI numbers.
+      where: { org_account_id: ctx.organizationId, review_status: 'APPROVED' },
       select: { ebitda_at_risk: true },
     }),
     prisma.site.findMany({
@@ -587,7 +741,9 @@ const suggest_risk_fields_with_ai = async (req: Request) => {
     // same "give the model real context, not just the one risk's name"
     // reasoning as run_root_cause_bucketing's risks array.
     const existingRisks = await prisma.risk.findMany({
-      where: { org_account_id: ctx.organizationId, site_id },
+      // docs/design-docs/ai-risk-review-approval-workflow.md -- don't
+      // calibrate a new AI suggestion off other not-yet-reviewed AI output.
+      where: { org_account_id: ctx.organizationId, site_id, review_status: 'APPROVED' },
       orderBy: { createdAt: 'desc' },
       take: 5,
       select: {
@@ -653,4 +809,8 @@ export const risk_service = {
   get_ebitda_at_risk_summary,
   suggest_risk_fields_with_ai,
   record_risk_line_review,
+  approve_risk_into_db,
+  dismiss_risk_into_db,
+  bulk_approve_risks_into_db,
+  bulk_dismiss_risks_into_db,
 };

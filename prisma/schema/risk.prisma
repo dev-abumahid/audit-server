@@ -39,6 +39,21 @@ enum LegalStatus {
     voluntary_best_practice
 }
 
+// docs/design-docs/ai-risk-review-approval-workflow.md. Deliberately NOT
+// named RiskApprovalStatus/approval_status -- that vocabulary is already
+// taken by the unrelated maker-checker sign-off workflow below
+// (RiskApprovalStatus, RiskApproval model): is this risk's *assessment*
+// correct and final. This enum answers a different question: does this
+// risk-register entry exist as a confirmed entry at all yet, or is it an
+// unreviewed AI suggestion. A risk must be APPROVED here before it can be
+// submitted into the separate RiskApprovalStatus flow (see
+// risk.approval.service.ts).
+enum RiskReviewStatus {
+    APPROVED
+    PENDING_REVIEW
+    DISMISSED
+}
+
 // design-docs/site-ai-risk-register-generation.md §3. Both the GRC and UX
 // design reviews independently flagged this as the single most important
 // trust signal on an AI-generated risk -- must be a persisted, queryable
@@ -164,6 +179,15 @@ model Risk {
     ai_generation_run_id      String?
     aiGenerationRun           AiRiskAnalysisRun? @relation(fields: [ai_generation_run_id], references: [id], onDelete: SetNull)
 
+    // docs/design-docs/ai-risk-review-approval-workflow.md. Defaults to
+    // APPROVED for manually-created risks (a human wrote it directly, no
+    // review needed) and every pre-existing row as of this migration
+    // (backfill matches the prior design's contract: AI risks already
+    // wrote straight into the confirmed register). AI-generated risks are
+    // set to PENDING_REVIEW explicitly at creation time in
+    // persistGeneratedRisk, not relying on this default.
+    review_status              RiskReviewStatus @default(APPROVED)
+
     createdAt             DateTime @default(now())
     updatedAt             DateTime @updatedAt
 
@@ -207,6 +231,9 @@ model Risk {
     @@unique([org_account_id, ref])
     @@index([regulatory_framework_id])
     @@index([ai_generation_run_id])
+    // Register listing and several filtered read paths query by both
+    // together on every load (see the design doc's filtering table).
+    @@index([org_account_id, review_status])
 }
 
 // aexa-frontend#142 — explicit risk-to-risk relationship table, mirroring

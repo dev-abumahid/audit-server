@@ -581,7 +581,7 @@ describe('audit service — org scoping (issue #92)', () => {
     const RISK_2 = 'risk-00000000-0000-0000-0000-000000000002';
 
     it('create validates the supplied risk ids belong to the caller org, then writes nested link rows', async () => {
-      riskDb.count.mockResolvedValue(2); // both ids resolve within ORG_A
+      riskDb.count.mockResolvedValueOnce(2).mockResolvedValue(0); // both ids resolve within ORG_A, none dismissed
       db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
 
       await audit_service.create_audit_into_db(
@@ -615,6 +615,21 @@ describe('audit service — org scoping (issue #92)', () => {
       expect(db.create).not.toHaveBeenCalled();
     });
 
+    // docs/design-docs/ai-risk-review-approval-workflow.md
+    it('create REJECTS a dismissed risk id with 409 and writes nothing', async () => {
+      // Both ids exist in ORG_A (first count), but one of them is dismissed
+      // (second count).
+      riskDb.count.mockResolvedValueOnce(2).mockResolvedValue(1);
+
+      await expect(
+        audit_service.create_audit_into_db(
+          makeReq({ body: { title: 'x', status: 'planned', riskIds: [RISK_1, RISK_2] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
     it('create with no riskIds writes no risks relation at all', async () => {
       db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
 
@@ -629,7 +644,7 @@ describe('audit service — org scoping (issue #92)', () => {
 
     it('update replaces the whole link set when riskIds is an explicit array (deleteMany + create)', async () => {
       db.findFirst.mockResolvedValue({ id: 'a1', org_account_id: ORG_A });
-      riskDb.count.mockResolvedValue(1);
+      riskDb.count.mockResolvedValueOnce(1).mockResolvedValue(0);
       db.update.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
 
       await audit_service.update_audit_into_db(
@@ -683,7 +698,7 @@ describe('audit service — org scoping (issue #92)', () => {
     });
 
     it('de-duplicates repeated ids and drops blanks before validating/writing', async () => {
-      riskDb.count.mockResolvedValue(1);
+      riskDb.count.mockResolvedValueOnce(1).mockResolvedValue(0);
       db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
 
       await audit_service.create_audit_into_db(

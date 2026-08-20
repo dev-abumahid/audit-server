@@ -75,7 +75,7 @@ describe('risk_correlation_service — GET /risk/correlation-matrix', () => {
     await risk_correlation_service.get_correlation_matrix_data(makeReq({}));
 
     expect(riskDb.findMany).toHaveBeenCalledWith({
-      where: { org_account_id: ORG_A },
+      where: { org_account_id: ORG_A, review_status: 'APPROVED' },
       orderBy: { createdAt: 'asc' },
     });
     expect(riskLinkDb.findMany).toHaveBeenCalledWith({

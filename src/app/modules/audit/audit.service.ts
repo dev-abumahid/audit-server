@@ -96,6 +96,15 @@ const assertRisksBelongToOrg = async (riskIds: unknown, orgAccountId: string): P
   if (found !== ids.length) {
     throw new AppError('One or more linked risks were not found in your organization', 404);
   }
+  // docs/design-docs/ai-risk-review-approval-workflow.md -- same guard as
+  // risk_link.service.ts's assertRiskRefExists / kri.service.ts's
+  // create_kri_into_db / compliance.service.ts's link_risk_to_obligation.
+  const dismissedCount = await prisma.risk.count({
+    where: { id: { in: ids }, org_account_id: orgAccountId, review_status: 'DISMISSED' },
+  });
+  if (dismissedCount > 0) {
+    throw new AppError('One or more linked risks were dismissed and cannot be linked.', 409);
+  }
 };
 
 const get_all_audit_from_db = async (req: Request) => {
