@@ -312,8 +312,18 @@ const change_password_into_db = async (req: Request) => {
   if (!isUserExist) {
     throw new AppError('Account not found!!', 404);
   }
+  // Social-login accounts (Google/Facebook/etc, see accountCreatorHelper.ts)
+  // have no password at all -- bcrypt.compareSync throws a TypeError on a
+  // null hash, which otherwise surfaced as an opaque 500 instead of a clear
+  // "there's no password to change" message.
+  if (!isUserExist.password) {
+    throw new AppError(
+      'This account signed up via social login and has no password to change.',
+      400,
+    );
+  }
   // check old password
-  const isPasswordMatch = bcrypt.compareSync(payload.oldPassword, isUserExist.password as string);
+  const isPasswordMatch = bcrypt.compareSync(payload.oldPassword, isUserExist.password);
   if (!isPasswordMatch) {
     throw new AppError('Incorrect password', 401);
   }

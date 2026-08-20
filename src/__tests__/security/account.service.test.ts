@@ -667,4 +667,54 @@ describe('account service', () => {
       });
     });
   });
+
+  describe('change_password_into_db', () => {
+    it('rejects with a clear 400 instead of crashing when the account has no password (social login)', async () => {
+      db.findFirst.mockResolvedValue({
+        id: 'acct-1',
+        email: 'orga@test.com',
+        password: null,
+      });
+
+      await expect(
+        account_services.change_password_into_db(
+          makeReq({ body: { oldPassword: 'whatever123', newPassword: 'newPassword123' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('changes the password when the old password matches', async () => {
+      const hashed = bcrypt.hashSync('oldPassword123', 10);
+      db.findFirst.mockResolvedValue({ id: 'acct-1', email: 'orga@test.com', password: hashed });
+      db.update.mockResolvedValue({});
+
+      await account_services.change_password_into_db(
+        makeReq({ body: { oldPassword: 'oldPassword123', newPassword: 'newPassword123' } }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'acct-1' } }));
+    });
+
+    it('throws 401 when the old password does not match', async () => {
+      const hashed = bcrypt.hashSync('oldPassword123', 10);
+      db.findFirst.mockResolvedValue({ id: 'acct-1', email: 'orga@test.com', password: hashed });
+
+      await expect(
+        account_services.change_password_into_db(
+          makeReq({ body: { oldPassword: 'wrongPassword', newPassword: 'newPassword123' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 401 });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects when old and new password are the same, before ever touching the DB', async () => {
+      await expect(
+        account_services.change_password_into_db(
+          makeReq({ body: { oldPassword: 'samePassword123', newPassword: 'samePassword123' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(db.findFirst).not.toHaveBeenCalled();
+    });
+  });
 });
