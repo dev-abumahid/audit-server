@@ -5,6 +5,12 @@ const create_site = z.object({
   location: z.string().optional(),
   country: z.string().optional(),
   activity: z.string().optional(),
+  // design-docs/site-ai-risk-register-generation.md §3: free text fed into
+  // the AI risk-generation prompt -- capped here at the same 2,000-char
+  // bound §7 mandates before any prompt (aiRiskAnalysis.service.ts's
+  // cap() enforces it again at the prompt boundary itself; this is
+  // defense-in-depth at the API boundary, not the only place it's bounded).
+  description: z.string().max(2000).optional(),
   // Unbounded before meant a negative revenue/headcount passed validation
   // and fed straight into the EBITDA-at-risk benchmark margin calculation
   // (ebitda_risk.ts) and general risk-severity scaling, silently poisoning

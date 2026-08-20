@@ -47,3 +47,36 @@ describe('site_validations.create_site — revenue/employees_count bounds', () =
     expect(result.success).toBe(false);
   });
 });
+
+// design-docs/site-ai-risk-register-generation.md §3/§7: description is
+// free text fed into the AI risk-generation prompt, capped at 2,000 chars
+// before it reaches any prompt.
+describe('site_validations.create_site — description', () => {
+  it('accepts a missing description', () => {
+    const result = site_validations.create_site.safeParse(BASE);
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a description at the 2,000-char cap', () => {
+    const result = site_validations.create_site.safeParse({
+      ...BASE,
+      description: 'x'.repeat(2000),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a description over the 2,000-char cap', () => {
+    const result = site_validations.create_site.safeParse({
+      ...BASE,
+      description: 'x'.repeat(2001),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an over-cap description on a partial update too', () => {
+    const result = site_validations.update_site.safeParse({
+      description: 'x'.repeat(2001),
+    });
+    expect(result.success).toBe(false);
+  });
+});
