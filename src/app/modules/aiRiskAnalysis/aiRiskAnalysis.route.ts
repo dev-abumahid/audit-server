@@ -21,4 +21,10 @@ router.post(
 
 router.get('/:id', auth('ORGANIZATION'), ai_risk_analysis_controller.get_ai_risk_analysis_run);
 
+// design-docs §7: "a scoped retry limited to just those categories,
+// updating the same run row." No request body -- the run id in the URL is
+// the only input, same "action verb, no body" shape as report.route.ts's
+// PATCH /:id/publish.
+router.post('/:id/retry', auth('ORGANIZATION'), ai_risk_analysis_controller.retry_ai_risk_analysis);
+
 export default router;

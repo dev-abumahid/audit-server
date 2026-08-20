@@ -24,7 +24,19 @@ const get_ai_risk_analysis_run = catchAsync(async (req, res) => {
   });
 });
 
+const retry_ai_risk_analysis = catchAsync(async (req, res) => {
+  const result = await ai_risk_analysis_service.retry_ai_risk_analysis(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 202,
+    message: 'AI risk analysis retry started.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const ai_risk_analysis_controller = {
   start_ai_risk_analysis,
   get_ai_risk_analysis_run,
+  retry_ai_risk_analysis,
 };

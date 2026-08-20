@@ -229,6 +229,44 @@ function buildSiteProfile(site: Site): Record<string, string> {
   };
 }
 
+type RegulatoryFrameworkRow = Prisma.RegulatoryFrameworkGetPayload<Record<string, never>>;
+
+// Shared by runAnalysis and retryFailedCategories -- both need the same
+// curated-table snapshot and its official_reference lookup map, and must
+// build it the exact same way so a retry validates citations against the
+// identical curated set the original run did.
+async function fetchFrameworksForPrompt(): Promise<{
+  frameworkByRef: Map<string, RegulatoryFrameworkRow>;
+  regulatoryFrameworksPayload: unknown[];
+}> {
+  const frameworks = await prisma.regulatoryFramework.findMany({ take: MAX_REGULATORY_FRAMEWORKS });
+  const frameworkByRef = new Map(frameworks.map((f) => [f.official_reference, f]));
+  const regulatoryFrameworksPayload = frameworks.map((f) => ({
+    name: f.name,
+    official_reference: f.official_reference,
+    jurisdiction: f.jurisdiction,
+    domain: f.domain,
+    legal_status: f.legal_status,
+    applicability_threshold: f.applicability_threshold ?? undefined,
+    summary: f.summary,
+  }));
+  return { frameworkByRef, regulatoryFrameworksPayload };
+}
+
+// Shared by runAnalysis and retryFailedCategories -- soft dedup hint only
+// (design-docs §6), same org-scoped query both need.
+async function fetchExistingRiskTitles(
+  siteId: string,
+  orgAccountId: string,
+): Promise<{ title: string }[]> {
+  const existingRisks = await prisma.risk.findMany({
+    where: { site_id: siteId, org_account_id: orgAccountId },
+    select: { name: true },
+    take: MAX_EXISTING_RISKS_FOR_DEDUP,
+  });
+  return existingRisks.map((r) => ({ title: r.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH) }));
+}
+
 // Kicks off a new "Analyze with AI" run for a site: resolves/validates the
 // site, enforces the re-run cooldown, creates the AiRiskAnalysisRun row,
 // and hands off the actual two-phase generation to runAnalysis WITHOUT
@@ -310,6 +348,78 @@ const get_ai_risk_analysis_run = async (req: Request) => {
   }
 };
 
+// design-docs §7: "a scoped retry limited to just those categories,
+// updating the same run row" -- deliberately deferred out of the original
+// orchestration PR, built here as its own follow-up. Re-runs Phase 2 ONLY
+// for the categories recorded in categories_failed, never re-runs Phase 1
+// triage (the applicable/skipped category list from the original run is
+// reused as-is) and never creates a new AiRiskAnalysisRun row -- the same
+// run's provenance stays intact, matching design-docs §6's "retrying a
+// failed category updates the same run row... risks from the retry link
+// to that same run id" requirement.
+const retry_ai_risk_analysis = async (req: Request) => {
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
+    const { id } = req.params as { id: string };
+
+    const run = await prisma.aiRiskAnalysisRun.findFirst({
+      where: { id, org_account_id: ctx.organizationId },
+    });
+    if (!run) throw new AppError('Analysis run not found', 404);
+
+    if (run.status === 'running') {
+      throw new AppError('This analysis run is still in progress.', 409);
+    }
+
+    const failedCategories =
+      (run.categories_failed as { category: string; error: string }[] | null) ?? [];
+    if (failedCategories.length === 0) {
+      throw new AppError('This run has no failed categories to retry.', 400);
+    }
+
+    const site = await prisma.site.findFirst({
+      where: { id: run.site_id, org_account_id: ctx.organizationId },
+    });
+    if (!site) throw new AppError('Site not found', 404);
+
+    // Review finding: a plain update() here has a real TOCTOU race -- two
+    // concurrent retry requests can both pass the `run.status === 'running'`
+    // check above before either commits, both flip status to running, both
+    // fire retryFailedCategories for the same failedCategories snapshot,
+    // double-generating risks. Same guarded-updateMany pattern
+    // kri.service.ts's submit_kri_value_into_db already established for
+    // this exact class of race: only a write that still finds the row in
+    // a non-running state actually applies; the loser's updateMany affects
+    // zero rows and gets a 409 instead of silently racing ahead.
+    const updateOutcome = await prisma.aiRiskAnalysisRun.updateMany({
+      where: { id: run.id, status: { not: 'running' } },
+      data: { status: 'running' },
+    });
+    if (updateOutcome.count === 0) {
+      throw new AppError('This analysis run is still in progress.', 409);
+    }
+    const updatedRun = await prisma.aiRiskAnalysisRun.findUniqueOrThrow({
+      where: { id: run.id },
+    });
+
+    void retryFailedCategories(
+      run.id,
+      site,
+      ctx,
+      run.triggered_by_account_id,
+      failedCategories,
+    ).catch((error) => {
+      logger.error({ err: error, runId: run.id }, 'AI risk analysis retry failed unexpectedly');
+    });
+
+    return updatedRun;
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to retry AI risk analysis');
+  }
+};
+
 // The actual two-phase generation, run after start_ai_risk_analysis has
 // already responded. Owns its own error handling end to end -- a rejection
 // here is caught by the caller's .catch() and must never crash the process,
@@ -366,29 +476,8 @@ async function runAnalysis(
     return;
   }
 
-  const frameworks = await prisma.regulatoryFramework.findMany({ take: MAX_REGULATORY_FRAMEWORKS });
-  const frameworkByRef = new Map(frameworks.map((f) => [f.official_reference, f]));
-  const regulatoryFrameworksPayload = frameworks.map((f) => ({
-    name: f.name,
-    official_reference: f.official_reference,
-    jurisdiction: f.jurisdiction,
-    domain: f.domain,
-    legal_status: f.legal_status,
-    applicability_threshold: f.applicability_threshold ?? undefined,
-    summary: f.summary,
-  }));
-
-  // Soft dedup hint only (design-docs §6) -- the actual enforced dedup at
-  // review/import time is a frontend/review-UX concern, out of scope for
-  // this generation-and-persist pass.
-  const existingRisks = await prisma.risk.findMany({
-    where: { site_id: site.id, org_account_id: ctx.organizationId },
-    select: { name: true },
-    take: MAX_EXISTING_RISKS_FOR_DEDUP,
-  });
-  const existingRiskTitles = existingRisks.map((r) => ({
-    title: r.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH),
-  }));
+  const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
+  const existingRiskTitles = await fetchExistingRiskTitles(site.id, ctx.organizationId);
 
   const outcomes = await Promise.allSettled(
     applicable.map((category, index) =>
@@ -432,6 +521,108 @@ async function runAnalysis(
   });
 }
 
+// Re-runs Phase 2 ONLY for the categories that failed on a prior attempt,
+// reusing that same category's estimated_risk_count from the original
+// Phase 1 triage result (stored on the run row) rather than re-triaging.
+// Owns its own error handling end to end, same contract as runAnalysis --
+// a rejection here is caught by the caller's .catch() and must never
+// crash the process, but every path also updates the run row so a stuck
+// `running` status can't linger forever.
+async function retryFailedCategories(
+  runId: string,
+  site: Site,
+  ctx: CallerOrgContext,
+  triggeredByAccountId: string,
+  failedCategories: { category: string; error: string }[],
+): Promise<void> {
+  const run = await prisma.aiRiskAnalysisRun.findUnique({ where: { id: runId } });
+  // Defensive only -- the run existed moments ago when retry_ai_risk_analysis
+  // read it; nothing in this codebase deletes an AiRiskAnalysisRun row.
+  if (!run) return;
+
+  const triage = (run.triage_result as { categories?: TriageCategoryResult[] } | null) ?? {};
+  const triageByCategory = new Map((triage.categories ?? []).map((c) => [c.category, c]));
+
+  // Re-derives estimated_risk_count from the ORIGINAL triage call rather
+  // than re-triaging -- Phase 1 already reasoned about this site once;
+  // re-running it on every retry would both cost an extra LLM call and
+  // risk it changing its mind about which categories even apply.
+  const toRetry = failedCategories
+    .map((f) => triageByCategory.get(f.category))
+    .filter(
+      (c): c is TriageCategoryResult & { category: RiskCategoryValue } =>
+        !!c && (RISK_CATEGORIES as readonly string[]).includes(c.category),
+    );
+
+  const siteProfile = buildSiteProfile(site);
+  const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
+  const existingRiskTitles = await fetchExistingRiskTitles(site.id, ctx.organizationId);
+
+  const outcomes = await Promise.allSettled(
+    toRetry.map((category, index) =>
+      delay(index * CATEGORY_CALL_STAGGER_MS).then(() =>
+        runCategoryGeneration(
+          runId,
+          site,
+          ctx,
+          triggeredByAccountId,
+          category,
+          siteProfile,
+          regulatoryFrameworksPayload,
+          existingRiskTitles,
+          frameworkByRef,
+        ),
+      ),
+    ),
+  );
+
+  const stillFailed: { category: string; error: string }[] = [];
+  outcomes.forEach((outcome, index) => {
+    if (outcome.status === 'rejected') {
+      const category = toRetry[index].category;
+      const message =
+        outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+      stillFailed.push({ category, error: message });
+      logger.error({ err: outcome.reason, runId, category }, 'Category retry failed');
+    }
+  });
+
+  // A category not in toRetry (its triage record vanished or its category
+  // string somehow failed the enum check) can't be retried -- keep it
+  // recorded as failed rather than silently dropping it, same "never
+  // silently drop a category" requirement §7 already established for the
+  // original run.
+  const unretriable = failedCategories.filter(
+    (f) => !toRetry.some((c) => c.category === f.category),
+  );
+
+  const categoriesFailed = [...stillFailed, ...unretriable];
+  // Review finding: this used to only ever produce 'completed'/'partial',
+  // never 'failed' -- if every category the run ever attempted still has
+  // zero successes after this retry (the original run was already fully
+  // 'failed' and the retry didn't fix anything), the run should read as
+  // 'failed' again, not a misleadingly less-severe 'partial'. Mirrors
+  // runAnalysis's own `failed.length === outcomes.length` check, just
+  // against the run's full original category count instead of this one
+  // retry's smaller category list.
+  const totalApplicable = (run.categories_applicable as string[] | null)?.length ?? 0;
+  const finalStatus =
+    categoriesFailed.length === 0
+      ? 'completed'
+      : categoriesFailed.length === totalApplicable
+        ? 'failed'
+        : 'partial';
+
+  await prisma.aiRiskAnalysisRun.update({
+    where: { id: runId },
+    data: {
+      status: finalStatus,
+      completed_at: new Date(),
+      categories_failed: categoriesFailed as unknown as Prisma.InputJsonValue,
+    },
+  });
+}
+
 async function runCategoryGeneration(
   runId: string,
   site: Site,
@@ -441,7 +632,7 @@ async function runCategoryGeneration(
   siteProfile: Record<string, string>,
   regulatoryFrameworksPayload: unknown[],
   existingRiskTitles: { title: string }[],
-  frameworkByRef: Map<string, Prisma.RegulatoryFrameworkGetPayload<Record<string, never>>>,
+  frameworkByRef: Map<string, RegulatoryFrameworkRow>,
 ): Promise<void> {
   const body = {
     category: triageCategory.category,
@@ -473,7 +664,7 @@ async function persistGeneratedRisk(
   triggeredByAccountId: string,
   category: RiskCategoryValue,
   raw: any,
-  frameworkByRef: Map<string, Prisma.RegulatoryFrameworkGetPayload<Record<string, never>>>,
+  frameworkByRef: Map<string, RegulatoryFrameworkRow>,
 ): Promise<void> {
   let legalStatus = raw.legal_status;
   let citationConfidence = raw.citation_confidence;
@@ -606,4 +797,5 @@ void computeEbitdaAtRisk;
 export const ai_risk_analysis_service = {
   start_ai_risk_analysis,
   get_ai_risk_analysis_run,
+  retry_ai_risk_analysis,
 };

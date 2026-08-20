@@ -10,7 +10,14 @@ vi.mock('../../app/lib/prisma.js', () => ({
     site: { findFirst: vi.fn() },
     risk: { findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     regulatoryFramework: { findMany: vi.fn() },
-    aiRiskAnalysisRun: { create: vi.fn(), update: vi.fn(), findFirst: vi.fn() },
+    aiRiskAnalysisRun: {
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
+    },
     orgMember: { findUnique: vi.fn() },
     organization: { findUnique: vi.fn() },
   },
@@ -64,6 +71,9 @@ describe('ai_risk_analysis_service', () => {
     );
     frameworkDb.findMany.mockResolvedValue([]);
     runDb.update.mockResolvedValue({});
+    // Default: the guarded updateMany "wins" the race (count: 1) --
+    // individual tests override to simulate a lost race (count: 0).
+    runDb.updateMany.mockResolvedValue({ count: 1 });
   });
 
   afterEach(() => {
@@ -709,6 +719,252 @@ describe('ai_risk_analysis_service', () => {
         expect.arrayContaining([expect.objectContaining({ category: 'fire' })]),
       );
       expect(riskDb.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('retry_ai_risk_analysis', () => {
+    function makeFailedRun(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'run-1',
+        site_id: 'site-1',
+        org_account_id: ORG_A,
+        triggered_by_account_id: ORG_A,
+        status: 'partial',
+        triage_result: {
+          categories: [
+            { category: 'cyber', applies: true, reasoning: 'r1', estimated_risk_count: 3 },
+            { category: 'fire', applies: true, reasoning: 'r2', estimated_risk_count: 2 },
+          ],
+        },
+        categories_applicable: ['cyber', 'fire'],
+        categories_skipped: [],
+        categories_failed: [{ category: 'fire', error: 'AI service error: 502' }],
+        ...overrides,
+      };
+    }
+
+    it('throws 404 when the run does not exist or belongs to another org', async () => {
+      runDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+
+    it('throws 409 when the run is still running', async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun({ status: 'running' }));
+
+      await expect(
+        ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(runDb.update).not.toHaveBeenCalled();
+    });
+
+    it('throws 400 when the run has no failed categories', async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun({ categories_failed: [] }));
+
+      await expect(
+        ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } })),
+      ).rejects.toMatchObject({ statusCode: 400 });
+      expect(runDb.update).not.toHaveBeenCalled();
+    });
+
+    // Review finding: two near-simultaneous retry requests could both pass
+    // the `run.status === 'running'` check above before either commits --
+    // the guarded updateMany (only applies when status is still NOT
+    // 'running' at write time) is what actually prevents the second one
+    // from winning. Simulated here by having it report count: 0, as a real
+    // race loser would.
+    it('throws 409 when a concurrent retry already won the race to flip status to running', async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun());
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(runDb.updateMany).toHaveBeenCalledWith({
+        where: { id: 'run-1', status: { not: 'running' } },
+        data: { status: 'running' },
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("throws 404 when the run's site no longer exists in the org", async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun());
+      siteDb.findFirst.mockResolvedValue(null);
+
+      await expect(
+        ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } })),
+      ).rejects.toMatchObject({ statusCode: 404 });
+    });
+
+    it('sets the run back to running and returns immediately without waiting for the retry', async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun());
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.update.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUniqueOrThrow.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUnique.mockResolvedValue(makeFailedRun());
+      // Never resolves -- proves retry_ai_risk_analysis doesn't await the
+      // actual retry work, same fire-and-forget contract as
+      // start_ai_risk_analysis.
+      (fetch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
+
+      const result = await ai_risk_analysis_service.retry_ai_risk_analysis(
+        makeReq({ params: { id: 'run-1' } }),
+      );
+
+      expect(result).toMatchObject({ status: 'running' });
+      expect(runDb.updateMany).toHaveBeenCalledWith({
+        where: { id: 'run-1', status: { not: 'running' } },
+        data: { status: 'running' },
+      });
+
+      // Drains retryFailedCategories' pending background work (the
+      // Prisma-backed steps before the actual fetch() call, plus the
+      // delay(0) stagger timer) up to the point it genuinely hangs
+      // forever on the never-resolving fetch mock -- without this, that
+      // work can straddle into the NEXT test's timer queue and fire
+      // there once THAT test swaps in a resolving fetch mock, silently
+      // double-creating a risk in an unrelated test (found by exactly
+      // that failure while writing this test).
+      await flush();
+    });
+
+    it('retries only the failed category, updates the same run row to completed on success, and creates no duplicate run', async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun());
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.update.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUniqueOrThrow.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUnique.mockResolvedValue(makeFailedRun());
+      frameworkDb.findMany.mockResolvedValue([]);
+
+      (fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string, init?: RequestInit) => {
+        if (url.endsWith('/risk_category_generation')) {
+          const body = JSON.parse((init?.body as string) ?? '{}');
+          // Only the previously-failed category should ever be retried --
+          // 'cyber' already succeeded on the original run and must not be
+          // re-called.
+          expect(body.category).toBe('fire');
+          return Promise.resolve(
+            mockAiResponse({
+              risks: [
+                {
+                  name: 'Fire safety gap',
+                  description: 'desc',
+                  applicability_reasoning: 'reason',
+                  legal_status: 'active_statutory',
+                  regulatory_official_reference: null,
+                  regulatory_citation_note: null,
+                  citation_confidence: 'none',
+                  probability: 40,
+                  impact: 50,
+                  financial_impact_min: 20,
+                  financial_impact_max: 200,
+                  velocity: 'medium',
+                  trend: 'none',
+                  control_design_eff: 40,
+                  control_operating_eff: 40,
+                  internal_pilot: null,
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(mockAiResponse({}, false, 404));
+      });
+
+      await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+      await flush();
+
+      // create is called at most once, on the run row -- no second
+      // AiRiskAnalysisRun ever created by a retry.
+      expect(runDb.create).not.toHaveBeenCalled();
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+
+      const finalUpdateCall = runDb.update.mock.calls[runDb.update.mock.calls.length - 1][0];
+      expect(finalUpdateCall.where).toEqual({ id: 'run-1' });
+      expect(finalUpdateCall.data.status).toBe('completed');
+      expect(finalUpdateCall.data.categories_failed).toEqual([]);
+    });
+
+    it('keeps a category that fails again in categories_failed, staying partial', async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun());
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.update.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUniqueOrThrow.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUnique.mockResolvedValue(makeFailedRun());
+      frameworkDb.findMany.mockResolvedValue([]);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({}, false, 502));
+
+      await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+      await flush();
+
+      const finalUpdateCall = runDb.update.mock.calls[runDb.update.mock.calls.length - 1][0];
+      expect(finalUpdateCall.data.status).toBe('partial');
+      expect(finalUpdateCall.data.categories_failed).toEqual([
+        expect.objectContaining({ category: 'fire' }),
+      ]);
+    });
+
+    // Review finding: retryFailedCategories used to only ever produce
+    // 'completed'/'partial', never 'failed' -- if literally every category
+    // the run ever attempted still has zero successes after the retry, the
+    // run should read as 'failed' again, not a misleadingly less-severe
+    // 'partial'. categories_applicable here has only the one category that
+    // keeps failing, so a 0-success retry means 0 of 0-other successes too.
+    it("marks the run 'failed' again when the retry doesn't fix the run's only category and nothing else ever succeeded", async () => {
+      runDb.findFirst.mockResolvedValue(
+        makeFailedRun({
+          status: 'failed',
+          categories_applicable: ['fire'],
+          categories_failed: [{ category: 'fire', error: 'AI service error: 502' }],
+        }),
+      );
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.update.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUniqueOrThrow.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUnique.mockResolvedValue(
+        makeFailedRun({
+          categories_applicable: ['fire'],
+          categories_failed: [{ category: 'fire', error: 'AI service error: 502' }],
+        }),
+      );
+      frameworkDb.findMany.mockResolvedValue([]);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({}, false, 502));
+
+      await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+      await flush();
+
+      const finalUpdateCall = runDb.update.mock.calls[runDb.update.mock.calls.length - 1][0];
+      expect(finalUpdateCall.data.status).toBe('failed');
+    });
+
+    it('keeps a failed-category record whose category no longer exists in the stored triage result, never silently dropping it', async () => {
+      runDb.findFirst.mockResolvedValue(
+        makeFailedRun({
+          categories_failed: [{ category: 'atex', error: 'AI service error: 502' }],
+        }),
+      );
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.update.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUniqueOrThrow.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUnique.mockResolvedValue(
+        makeFailedRun({
+          categories_failed: [{ category: 'atex', error: 'AI service error: 502' }],
+        }),
+      );
+      frameworkDb.findMany.mockResolvedValue([]);
+
+      await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+      await flush();
+
+      expect(fetch).not.toHaveBeenCalled();
+      const finalUpdateCall = runDb.update.mock.calls[runDb.update.mock.calls.length - 1][0];
+      expect(finalUpdateCall.data.status).toBe('partial');
+      expect(finalUpdateCall.data.categories_failed).toEqual([
+        expect.objectContaining({ category: 'atex' }),
+      ]);
     });
   });
 });
