@@ -1,0 +1,609 @@
+import { Prisma, Site } from '@prisma/client';
+import { Request } from 'express';
+import { configs } from '../../configs/index.js';
+import { logger } from '../../lib/logger.js';
+import { prisma } from '../../lib/prisma.js';
+import { AppError } from '../../utils/app_error.js';
+import { JwtPayloadType } from '../../utils/JWT.js';
+import {
+  assertCanWriteOrgResource,
+  CallerOrgContext,
+  resolveCallerOrgContext,
+} from '../../utils/org_scope.js';
+import {
+  buildAiHeaders,
+  fetchWithTimeout,
+  LLM_CALL_TIMEOUT_MS,
+  wrapAiServiceError,
+} from '../ai/ai.service.js';
+import { computeEbitdaAtRisk } from '../risk/ebitda_risk.js';
+import { resolveEbitdaFields } from '../risk/ebitda_risk.js';
+import { createRiskWithGeneratedRef } from '../risk/risk_ref.js';
+import { resolveInherentFields, resolveResidualFields } from '../risk/risk_scoring.js';
+
+// design-docs/site-ai-risk-register-generation.md §4: the same 20 fixed
+// categories already in the app, matching aexa-ai's RiskCategory enum
+// exactly (app/schemas/risk_triage_schema.py) -- kept in sync by hand,
+// same keep-in-sync-by-hand caveat as that repo's own enum comments,
+// there is no shared schema source between the two codebases.
+const RISK_CATEGORIES = [
+  'supply_chain',
+  'financial',
+  'regulatory',
+  'cyber',
+  'operational',
+  'hr',
+  'strategic',
+  'ehs',
+  'geopolitical',
+  'natural_disaster',
+  'technology',
+  'reputational',
+  'compliance',
+  'ai_emerging',
+  'fire',
+  'electrical',
+  'atex',
+  'machine_safety',
+  'environmental',
+  'security_physical',
+] as const;
+type RiskCategoryValue = (typeof RISK_CATEGORIES)[number];
+
+// design-docs §4: "Existing app enums the prompt must target exactly,"
+// verified from RiskFormModal.tsx -- same values risk_category_generation_
+// schema.py's Velocity/Trend enums target on the aexa-ai side.
+const VALID_VELOCITY = new Set(['critical', 'high', 'medium', 'low']);
+const VALID_TREND = new Set(['increasing', 'decreasing', 'none']);
+
+// design-docs §7: cap site description/activity at 2,000 chars before they
+// reach any prompt -- the single most realistic failure mode identified in
+// review is a long, legitimately-authored description with
+// instructional-sounding language duplicated into every parallel category
+// call at once.
+const MAX_PROMPT_FIELD_LENGTH = 2000;
+
+// design-docs §6: 10-minute re-run cooldown per site, caps the cost-abuse
+// vector the engineering review flagged.
+const RERUN_COOLDOWN_MS = 10 * 60 * 1000;
+
+// design-docs §7: fire the N parallel Phase 2 calls with a small stagger
+// rather than a separate pre-warm call, so the shared static
+// framework-reference prefix has a chance to benefit from OpenAI prompt
+// caching.
+const CATEGORY_CALL_STAGGER_MS = 300;
+
+const MAX_EXISTING_RISKS_FOR_DEDUP = 200;
+const MAX_EXISTING_RISK_TITLE_LENGTH = 200;
+const MAX_REGULATORY_FRAMEWORKS = 50;
+
+type TriageCategoryResult = {
+  category: string;
+  applies: boolean;
+  reasoning: string;
+  estimated_risk_count: number;
+};
+
+// design-docs §3/§5: the curated table's real seeded shapes vary per
+// framework -- Sapin II uses { min_employees, min_revenue_eur }, Devoir de
+// Vigilance uses { min_employees_france, min_employees_worldwide } (no
+// revenue at all), CSRD adds a third { min_balance_sheet_eur } dimension
+// Site has no data for, Loi Waserman uses only { min_employees }. §10's
+// literal "min_employees/min_revenue_eur" formula only covers Sapin II's
+// shape -- meetsApplicabilityThreshold below generalizes it to the other
+// real shapes instead of silently no-op'ing (review finding: the
+// single-shape version evaluated an unrecognized/differently-keyed
+// threshold as vacuously met, failing open exactly for the frameworks §10
+// names as its targets).
+type ApplicabilityThreshold = {
+  min_employees?: number;
+  min_revenue_eur?: number;
+  min_employees_france?: number;
+  min_employees_worldwide?: number;
+  min_balance_sheet_eur?: number;
+};
+
+// Record<keyof ApplicabilityThreshold, true> (rather than a plain string
+// array) makes TypeScript itself enforce that this list stays in sync with
+// ApplicabilityThreshold's fields -- a future field added to one without
+// the other is a compile error, not a silent gap in what
+// hasKnownNumericThreshold recognizes.
+const THRESHOLD_KEY_FLAGS: Record<keyof ApplicabilityThreshold, true> = {
+  min_employees: true,
+  min_revenue_eur: true,
+  min_employees_france: true,
+  min_employees_worldwide: true,
+  min_balance_sheet_eur: true,
+};
+const KNOWN_THRESHOLD_KEYS = Object.keys(THRESHOLD_KEY_FLAGS) as (keyof ApplicabilityThreshold)[];
+
+/**
+ * True only when the threshold object actually contains at least one of
+ * the recognized numeric keys this deterministic check knows how to
+ * evaluate. Most of the curated table's non-null applicability_threshold
+ * values are qualitative `{ note: '...' }` objects steering the model's
+ * judgment (ATEX, ICPE, CBAM, the AI Act, ...), not arithmetic gates --
+ * design-docs §10 scopes THIS deterministic check to Sapin II/Devoir de
+ * Vigilance/CSRD specifically, not every framework carrying any threshold
+ * object at all. A review round caught a regression here: an earlier
+ * version treated "unrecognized shape" as "check fails," silently
+ * downgrading every citation to those ~10 qualitative-threshold
+ * frameworks regardless of how well-grounded the citation actually was.
+ * Call this BEFORE meetsApplicabilityThreshold and skip the downgrade
+ * entirely when it's false -- a qualitative-only threshold isn't a
+ * dimension this arithmetic check has any evidence about either way.
+ */
+function hasKnownNumericThreshold(threshold: ApplicabilityThreshold): boolean {
+  return KNOWN_THRESHOLD_KEYS.some((key) => threshold[key] != null);
+}
+
+/**
+ * Only meaningful once hasKnownNumericThreshold has confirmed there's an
+ * evaluable numeric shape. Fail-safe by construction: returns false
+ * (threshold not confirmed met) whenever the site's real data can't
+ * affirmatively confirm every dimension the threshold states. Never
+ * asserts an applicability the available Site fields can't actually
+ * verify.
+ */
+function meetsApplicabilityThreshold(threshold: ApplicabilityThreshold, site: Site): boolean {
+  if (threshold.min_employees_france != null || threshold.min_employees_worldwide != null) {
+    // Known data-model limitation (review round 2): legally this is a real
+    // OR (>=5,000 in France OR >=10,000 worldwide), but Site tracks a
+    // single employees_count, not separate France/worldwide figures.
+    // Since min_employees_france is always the lower of the two, this
+    // effectively resolves against whichever bound site.employees_count is
+    // being compared to -- not a confirmed guarantee the count is actually
+    // France-scoped. That's a real gap in what this deterministic check
+    // can verify from today's Site schema, not something this arithmetic
+    // fix can close; a genuinely France-vs-worldwide-scoped headcount
+    // would need its own Site field.
+    const meetsFrance =
+      threshold.min_employees_france != null &&
+      site.employees_count >= threshold.min_employees_france;
+    const meetsWorldwide =
+      threshold.min_employees_worldwide != null &&
+      site.employees_count >= threshold.min_employees_worldwide;
+    if (!meetsFrance && !meetsWorldwide) return false;
+  }
+
+  if (threshold.min_employees != null && site.employees_count < threshold.min_employees)
+    return false;
+  if (threshold.min_revenue_eur != null && site.revenue < threshold.min_revenue_eur) return false;
+
+  if (threshold.min_balance_sheet_eur != null) {
+    // CSRD-style "must exceed 2 of these 3 thresholds" -- Site has no
+    // balance-sheet field, so the only case we can confidently confirm
+    // without it is both employees AND revenue already clearing their own
+    // bounds (already 2 of 3 regardless of balance sheet). Anything less
+    // can't be confirmed from the data available, so it doesn't count as met.
+    const employeesMet =
+      threshold.min_employees != null && site.employees_count >= threshold.min_employees;
+    const revenueMet =
+      threshold.min_revenue_eur != null && site.revenue >= threshold.min_revenue_eur;
+    if (!(employeesMet && revenueMet)) return false;
+  }
+
+  return true;
+}
+
+function cap(value: string | null | undefined): string {
+  return (value ?? '').slice(0, MAX_PROMPT_FIELD_LENGTH);
+}
+
+function clamp(value: unknown, lo: number, hi: number): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num)) return lo;
+  return Math.min(hi, Math.max(lo, Math.round(num)));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callAiJson(path: string, body: unknown, orgAccountId: string): Promise<any> {
+  const response = await fetchWithTimeout(
+    `${configs.ai_server_end_point}${path}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...buildAiHeaders(orgAccountId) },
+      body: JSON.stringify(body),
+    },
+    LLM_CALL_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw new AppError(`AI service error: ${response.status} (${path})`, 502);
+  }
+  return response.json();
+}
+
+function buildSiteProfile(site: Site): Record<string, string> {
+  return {
+    site_name: site.name,
+    site_location: site.location || '',
+    site_country: site.country || '',
+    site_activity: cap(site.activity),
+    site_type: site.site_type,
+    site_employees: String(site.employees_count),
+    site_revenue: String(site.revenue),
+    ...(site.description ? { site_description: cap(site.description) } : {}),
+  };
+}
+
+// Kicks off a new "Analyze with AI" run for a site: resolves/validates the
+// site, enforces the re-run cooldown, creates the AiRiskAnalysisRun row,
+// and hands off the actual two-phase generation to runAnalysis WITHOUT
+// awaiting it -- this codebase has no job queue for AI generation (BullMQ
+// is wired up for email only, see src/app/queues/), so returning the run
+// id immediately and letting the frontend poll its status (design-docs §6,
+// the same RTK Query polling shape KnowledgeBaseUploadingForm.tsx /
+// ReportsPage.tsx already use) is the simplest correct alternative to
+// standing up new queue infrastructure for this one feature.
+const start_ai_risk_analysis = async (req: Request) => {
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    assertCanWriteOrgResource(ctx);
+    const { siteId } = req.body as { siteId: string };
+
+    const site = await prisma.site.findFirst({
+      where: { id: siteId, org_account_id: ctx.organizationId },
+    });
+    if (!site) throw new AppError('Site not found', 404);
+
+    if (!site.activity?.trim()) {
+      throw new AppError(
+        'This site is missing a primary activity. Add one before running AI risk analysis.',
+        400,
+      );
+    }
+
+    const lastRun = await prisma.aiRiskAnalysisRun.findFirst({
+      where: { site_id: siteId, org_account_id: ctx.organizationId },
+      orderBy: { started_at: 'desc' },
+    });
+    if (lastRun) {
+      const elapsedMs = Date.now() - lastRun.started_at.getTime();
+      if (elapsedMs < RERUN_COOLDOWN_MS) {
+        const waitMinutes = Math.ceil((RERUN_COOLDOWN_MS - elapsedMs) / 60000);
+        throw new AppError(
+          `This site was analyzed recently. Try again in ${waitMinutes} minute(s).`,
+          429,
+        );
+      }
+    }
+
+    const run = await prisma.aiRiskAnalysisRun.create({
+      data: {
+        site_id: siteId,
+        org_account_id: ctx.organizationId,
+        triggered_by_account_id: user.accountId,
+        status: 'running',
+      },
+    });
+
+    void runAnalysis(run.id, site, ctx, user.accountId).catch((error) => {
+      logger.error({ err: error, runId: run.id }, 'AI risk analysis run failed unexpectedly');
+    });
+
+    return run;
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to start AI risk analysis');
+  }
+};
+
+const get_ai_risk_analysis_run = async (req: Request) => {
+  try {
+    const user = req.user as JwtPayloadType;
+    const ctx = await resolveCallerOrgContext(user.accountId);
+    const { id } = req.params as { id: string };
+
+    const run = await prisma.aiRiskAnalysisRun.findFirst({
+      where: { id, org_account_id: ctx.organizationId },
+    });
+    if (!run) throw new AppError('Analysis run not found', 404);
+
+    const risksCreated = await prisma.risk.count({ where: { ai_generation_run_id: run.id } });
+
+    return { ...run, risks_created: risksCreated };
+  } catch (error) {
+    return wrapAiServiceError(error, 'Failed to fetch AI risk analysis run');
+  }
+};
+
+// The actual two-phase generation, run after start_ai_risk_analysis has
+// already responded. Owns its own error handling end to end -- a rejection
+// here is caught by the caller's .catch() and must never crash the process,
+// but every failure path here also updates the run row so a stuck
+// `running` status can't linger forever.
+async function runAnalysis(
+  runId: string,
+  site: Site,
+  ctx: CallerOrgContext,
+  triggeredByAccountId: string,
+): Promise<void> {
+  const siteProfile = buildSiteProfile(site);
+
+  let triage: { categories?: TriageCategoryResult[] };
+  try {
+    triage = await callAiJson('/risk_triage', siteProfile, ctx.organizationId);
+  } catch (error) {
+    logger.error({ err: error, runId }, 'Risk triage call failed');
+    await prisma.aiRiskAnalysisRun.update({
+      where: { id: runId },
+      data: { status: 'failed', completed_at: new Date() },
+    });
+    return;
+  }
+
+  const categories = triage.categories ?? [];
+  // design-docs §2/§4: category must be a strictly server-validated enum,
+  // never trusted free text from the model -- aexa-ai's own schema already
+  // enforces this as a closed enum, this filter is defense-in-depth, not
+  // the only layer.
+  const applicable = categories.filter(
+    (c): c is TriageCategoryResult & { category: RiskCategoryValue } =>
+      c.applies && (RISK_CATEGORIES as readonly string[]).includes(c.category),
+  );
+  const skipped = categories.filter((c) => !c.applies);
+
+  await prisma.aiRiskAnalysisRun.update({
+    where: { id: runId },
+    data: {
+      triage_result: triage as Prisma.InputJsonValue,
+      categories_applicable: applicable.map((c) => c.category) as Prisma.InputJsonValue,
+      categories_skipped: skipped.map((c) => ({
+        category: c.category,
+        reasoning: c.reasoning,
+      })) as Prisma.InputJsonValue,
+    },
+  });
+
+  if (applicable.length === 0) {
+    await prisma.aiRiskAnalysisRun.update({
+      where: { id: runId },
+      data: { status: 'completed', completed_at: new Date() },
+    });
+    return;
+  }
+
+  const frameworks = await prisma.regulatoryFramework.findMany({ take: MAX_REGULATORY_FRAMEWORKS });
+  const frameworkByRef = new Map(frameworks.map((f) => [f.official_reference, f]));
+  const regulatoryFrameworksPayload = frameworks.map((f) => ({
+    name: f.name,
+    official_reference: f.official_reference,
+    jurisdiction: f.jurisdiction,
+    domain: f.domain,
+    legal_status: f.legal_status,
+    applicability_threshold: f.applicability_threshold ?? undefined,
+    summary: f.summary,
+  }));
+
+  // Soft dedup hint only (design-docs §6) -- the actual enforced dedup at
+  // review/import time is a frontend/review-UX concern, out of scope for
+  // this generation-and-persist pass.
+  const existingRisks = await prisma.risk.findMany({
+    where: { site_id: site.id, org_account_id: ctx.organizationId },
+    select: { name: true },
+    take: MAX_EXISTING_RISKS_FOR_DEDUP,
+  });
+  const existingRiskTitles = existingRisks.map((r) => ({
+    title: r.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH),
+  }));
+
+  const outcomes = await Promise.allSettled(
+    applicable.map((category, index) =>
+      delay(index * CATEGORY_CALL_STAGGER_MS).then(() =>
+        runCategoryGeneration(
+          runId,
+          site,
+          ctx,
+          triggeredByAccountId,
+          category,
+          siteProfile,
+          regulatoryFrameworksPayload,
+          existingRiskTitles,
+          frameworkByRef,
+        ),
+      ),
+    ),
+  );
+
+  const failed: { category: string; error: string }[] = [];
+  outcomes.forEach((outcome, index) => {
+    if (outcome.status === 'rejected') {
+      const category = applicable[index].category;
+      const message =
+        outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+      failed.push({ category, error: message });
+      logger.error({ err: outcome.reason, runId, category }, 'Category generation failed');
+    }
+  });
+
+  const finalStatus =
+    failed.length === 0 ? 'completed' : failed.length === outcomes.length ? 'failed' : 'partial';
+
+  await prisma.aiRiskAnalysisRun.update({
+    where: { id: runId },
+    data: {
+      status: finalStatus,
+      completed_at: new Date(),
+      categories_failed: failed as unknown as Prisma.InputJsonValue,
+    },
+  });
+}
+
+async function runCategoryGeneration(
+  runId: string,
+  site: Site,
+  ctx: CallerOrgContext,
+  triggeredByAccountId: string,
+  triageCategory: TriageCategoryResult & { category: RiskCategoryValue },
+  siteProfile: Record<string, string>,
+  regulatoryFrameworksPayload: unknown[],
+  existingRiskTitles: { title: string }[],
+  frameworkByRef: Map<string, Prisma.RegulatoryFrameworkGetPayload<Record<string, never>>>,
+): Promise<void> {
+  const body = {
+    category: triageCategory.category,
+    estimated_risk_count: triageCategory.estimated_risk_count,
+    ...siteProfile,
+    regulatory_frameworks: regulatoryFrameworksPayload,
+    existing_risks: existingRiskTitles,
+  };
+
+  const generation = await callAiJson('/risk_category_generation', body, ctx.organizationId);
+
+  for (const raw of generation.risks ?? []) {
+    await persistGeneratedRisk(
+      runId,
+      site,
+      ctx,
+      triggeredByAccountId,
+      triageCategory.category,
+      raw,
+      frameworkByRef,
+    );
+  }
+}
+
+async function persistGeneratedRisk(
+  runId: string,
+  site: Site,
+  ctx: CallerOrgContext,
+  triggeredByAccountId: string,
+  category: RiskCategoryValue,
+  raw: any,
+  frameworkByRef: Map<string, Prisma.RegulatoryFrameworkGetPayload<Record<string, never>>>,
+): Promise<void> {
+  let legalStatus = raw.legal_status;
+  let citationConfidence = raw.citation_confidence;
+  let regulatoryFrameworkId: string | null = null;
+
+  // design-docs §7: never trust the model's citation even if it's
+  // schema-typed as a valid FK shape -- validate the claimed
+  // regulatory_official_reference against the real curated table before
+  // persisting.
+  if (raw.regulatory_official_reference) {
+    const framework = frameworkByRef.get(raw.regulatory_official_reference);
+    if (framework) {
+      regulatoryFrameworkId = framework.id;
+
+      // design-docs §10: deterministic threshold check for the
+      // threshold-bearing frameworks (Sapin II, Devoir de Vigilance,
+      // CSRD) -- arithmetic, not a judgment call. Downgrades regardless
+      // of what the generating call itself asserted.
+      const threshold = framework.applicability_threshold as ApplicabilityThreshold | null;
+      if (
+        threshold &&
+        hasKnownNumericThreshold(threshold) &&
+        !meetsApplicabilityThreshold(threshold, site)
+      ) {
+        legalStatus = 'conditional_statutory';
+        citationConfidence = 'ai_estimate';
+      }
+    }
+  }
+
+  // Review finding: the block above only downgraded a false
+  // curated_verified claim when a regulatory_official_reference was
+  // PRESENT but failed to resolve -- a claim with no reference at all (or
+  // an empty one) slipped through untouched. This is the general form of
+  // the same §7 requirement: curated_verified can only survive if it
+  // actually resolved to a real curated framework row, for whatever reason
+  // it didn't.
+  if (citationConfidence === 'curated_verified' && !regulatoryFrameworkId) {
+    citationConfidence = 'ai_estimate';
+  }
+
+  // design-docs §4: same fixed enums risk_category_generation_schema.py's
+  // Velocity/Trend target -- server-validated the same way category is,
+  // rather than trusted as free text (velocity/trend are plain String?
+  // columns, so an off-enum value wouldn't crash anything, but it would
+  // reach the UI unfiltered).
+  const velocity = VALID_VELOCITY.has(raw.velocity) ? raw.velocity : null;
+  const trend = VALID_TREND.has(raw.trend) ? raw.trend : null;
+
+  const probability = clamp(raw.probability, 0, 100);
+  const impact = clamp(raw.impact, 0, 100);
+  const controlDesignEff = clamp(raw.control_design_eff, 0, 100);
+  const controlOperatingEff = clamp(raw.control_operating_eff, 0, 100);
+  let financialImpactMin = clamp(raw.financial_impact_min, 0, 1_000_000);
+  let financialImpactMax = clamp(raw.financial_impact_max, 0, 1_000_000);
+  if (financialImpactMin > financialImpactMax) {
+    [financialImpactMin, financialImpactMax] = [financialImpactMax, financialImpactMin];
+  }
+
+  const inherent = resolveInherentFields(
+    { probability, impact, raw_inherent_score: null },
+    {},
+    triggeredByAccountId,
+    null,
+  );
+  if (!inherent.ok) throw new AppError(inherent.message, 500);
+
+  const residual = resolveResidualFields(
+    {
+      inherent_score: inherent.fields.inherent_score,
+      control_design_eff: controlDesignEff,
+      control_operating_eff: controlOperatingEff,
+    },
+    {},
+    triggeredByAccountId,
+    null,
+  );
+  if (!residual.ok) throw new AppError(residual.message, 500);
+
+  const ebitda = resolveEbitdaFields(
+    {
+      site_revenue: site.revenue,
+      site_activity: site.activity,
+      probability,
+      impact,
+    },
+    {},
+    triggeredByAccountId,
+    null,
+  );
+  if (!ebitda.ok) throw new AppError(ebitda.message, 500);
+
+  const payload: Omit<Prisma.RiskUncheckedCreateInput, 'ref'> = {
+    org_account_id: ctx.organizationId,
+    site_id: site.id,
+    name: raw.name,
+    description: raw.description ?? null,
+    category,
+    status: 'open',
+    ai_generated: true,
+    source_info: `AI risk analysis, ${new Date().toISOString().slice(0, 10)}`,
+    probability,
+    impact,
+    financial_impact_min: financialImpactMin,
+    financial_impact_max: financialImpactMax,
+    velocity,
+    trend,
+    control_design_eff: controlDesignEff,
+    control_operating_eff: controlOperatingEff,
+    legal_status: legalStatus,
+    regulatory_framework_id: regulatoryFrameworkId,
+    regulatory_citation_note: raw.regulatory_citation_note ?? null,
+    citation_confidence: citationConfidence,
+    internal_pilot: raw.internal_pilot ?? null,
+    ai_generation_run_id: runId,
+    ...inherent.fields,
+    ...residual.fields,
+    ...ebitda.fields,
+  };
+
+  await createRiskWithGeneratedRef(payload);
+}
+
+// computeEbitdaAtRisk is re-exported transitively via resolveEbitdaFields
+// above; imported directly here only so the module graph is explicit about
+// this file's dependency on ebitda_risk.ts's public surface, matching how
+// risk.service.ts imports the same module.
+void computeEbitdaAtRisk;
+
+export const ai_risk_analysis_service = {
+  start_ai_risk_analysis,
+  get_ai_risk_analysis_run,
+};
