@@ -10,6 +10,7 @@
     "dev": "tsx watch src/server.ts",
     "backfill:org-membership": "tsx src/scripts/backfill-org-membership.ts",
     "backfill:compliance-next-review-date": "tsx src/scripts/backfill-compliance-next-review-date.ts",
+    "seed:regulatory-frameworks": "tsx src/scripts/seed-regulatory-frameworks.ts",
     "build": "tsc",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
