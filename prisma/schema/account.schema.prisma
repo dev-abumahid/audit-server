@@ -55,6 +55,9 @@ model Account {
     riskLinks         RiskLink[]
     // aexa-frontend#922: AI-suggested-risk dismiss/import decisions.
     aiSuggestionStates AiSuggestionState[]
+    // design-docs/site-ai-risk-register-generation.md: "Analyze with AI" run
+    // provenance records.
+    aiRiskAnalysisRuns AiRiskAnalysisRun[]
 
     // Org membership — nullable/optional since not every account has one
     // until the slice-1 backfill script runs (see src/scripts/backfill-org-membership.ts).

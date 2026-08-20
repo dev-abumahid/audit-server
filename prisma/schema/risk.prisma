@@ -22,6 +22,34 @@ enum LineOfDefense {
     GOVERNING_BODY
 }
 
+// design-docs/site-ai-risk-register-generation.md §3. Replaces a flawed
+// binary "Nature: mandatory/voluntary" -- research surfaced real
+// intermediate states a simple boolean can't represent (e.g. NIS 2 is real
+// law but not yet transposed in France; Sapin II is real law but gated
+// behind an employee/revenue threshold; APSAD/NF C 18-510 are private
+// standards, not law at all). A derived "Mandatory/Voluntary" UI badge maps
+// active/pending/conditional -> Mandatory and recognized_standard/voluntary
+// -> Voluntary; that derivation lives in the frontend, not as a second
+// stored field, so the two can never drift out of sync.
+enum LegalStatus {
+    active_statutory
+    pending_statutory
+    conditional_statutory
+    recognized_standard
+    voluntary_best_practice
+}
+
+// design-docs/site-ai-risk-register-generation.md §3. Both the GRC and UX
+// design reviews independently flagged this as the single most important
+// trust signal on an AI-generated risk -- must be a persisted, queryable
+// field (not derived client-side) so it survives as a permanent marker on
+// the Risk detail view after import, not just during the review step.
+enum CitationConfidence {
+    curated_verified
+    ai_estimate
+    none
+}
+
 model Risk {
     id                    String   @id @default(uuid())
     org_account_id        String
@@ -109,6 +137,33 @@ model Risk {
     ebitda_overridden_by     String?
     ebitda_overridden_at     DateTime?
     ebitda_override_stale    Boolean   @default(false)
+
+    // design-docs/site-ai-risk-register-generation.md §3 -- new fields for
+    // the AI risk-register generation feature. All nullable: unrelated to
+    // this feature for any hand-created or pre-existing risk.
+    legal_status              LegalStatus?
+    regulatory_framework_id   String?
+    // Restrict, not SetNull -- citation_confidence is designed to be a
+    // permanent, never-drifting trust signal (see the field's own comment
+    // below); a hard delete of a cited RegulatoryFramework silently
+    // orphaning regulatory_framework_id while citation_confidence stays
+    // "curated_verified" is exactly the drift that field was designed to
+    // prevent. Restrict forces an explicit reassignment/downgrade flow at
+    // the application layer before a cited framework can be removed
+    // (review finding, PR #369).
+    regulatoryFramework       RegulatoryFramework? @relation(fields: [regulatory_framework_id], references: [id], onDelete: Restrict)
+    // Fallback citation text for a defensible-but-uncurated regulatory
+    // reference (e.g. a live-search result from the existing Regulatory
+    // Coverage feature's on-demand "find citation" action) -- never a
+    // fabricated article number; general framing only if uncertain.
+    regulatory_citation_note String?
+    citation_confidence       CitationConfidence?
+    // AI-suggested role hint (e.g. "HSE Manager"), not a real user FK --
+    // deliberate scope decision, see design doc §3.
+    internal_pilot            String?
+    ai_generation_run_id      String?
+    aiGenerationRun           AiRiskAnalysisRun? @relation(fields: [ai_generation_run_id], references: [id], onDelete: SetNull)
+
     createdAt             DateTime @default(now())
     updatedAt             DateTime @updatedAt
 
@@ -150,6 +205,8 @@ model Risk {
     // aexa-frontend#142: refs are human-readable identifiers scoped to one
     // org, not globally unique — two orgs can both have a "CYB-001".
     @@unique([org_account_id, ref])
+    @@index([regulatory_framework_id])
+    @@index([ai_generation_run_id])
 }
 
 // aexa-frontend#142 — explicit risk-to-risk relationship table, mirroring
@@ -246,5 +303,94 @@ model RiskApproval {
     updatedAt DateTime @updatedAt
 
     @@index([riskId])
+    @@index([status])
+}
+
+// design-docs/site-ai-risk-register-generation.md §3/§5. Curated,
+// human-verified regulatory reference the AI risk-generation prompt must
+// cite FROM (never invent a law/article number) -- DB-backed rather than a
+// static config file so it's admin-editable without a deploy and carries a
+// real audit trail (who changed what, when), since a customer's own
+// auditor may eventually ask why Qiyrix believes a given citation applies.
+// Global/shared across all orgs, not org-scoped -- these are real laws, not
+// tenant data.
+model RegulatoryFramework {
+    id                 String       @id @default(uuid())
+    name               String
+    official_reference String
+    jurisdiction       String
+    domain             String
+    legal_status       LegalStatus
+    // Structured threshold, e.g. {"min_employees": 500,
+    // "min_revenue_eur": 100000000} for Sapin II, or
+    // {"min_employees_france": 5000, "min_employees_worldwide": 10000} for
+    // Devoir de Vigilance. Null for universal frameworks (DUERP, RGPD).
+    // Consumed by the deterministic threshold check (design doc §10) --
+    // never trust the AI's own applicability judgment for a
+    // threshold-bearing framework.
+    applicability_threshold Json?
+    summary            String
+    source_url         String?
+    last_verified_at   DateTime
+    updated_by         String?
+    createdAt          DateTime @default(now())
+    updatedAt          DateTime @updatedAt
+
+    risks Risk[]
+
+    // Prevents a re-run seed script or an admin re-adding an entry from
+    // silently duplicating a curated framework -- since Phase 2 embeds the
+    // ENTIRE table verbatim into every generation call (design doc §4/§7),
+    // a duplicate wouldn't just be bad data, it'd pollute every prompt and
+    // break the byte-identical-prefix requirement the prompt-caching design
+    // depends on (review finding, PR #369).
+    @@unique([official_reference])
+    @@index([legal_status])
+    @@index([domain])
+}
+
+enum AiRiskAnalysisRunStatus {
+    running
+    completed
+    partial
+    failed
+}
+
+// design-docs/site-ai-risk-register-generation.md §3/§6. Provenance record
+// for one "Analyze with AI" click -- so a permanent link survives past the
+// review step (a future auditor needs to be able to tell "we manually
+// assessed this" from "AI suggested this and we accepted it," months
+// later), and so Phase 2's per-category pending/success/failed state has
+// somewhere to live for the progressive-results polling UI (design doc §6).
+model AiRiskAnalysisRun {
+    id                     String   @id @default(uuid())
+    site_id                String
+    site                   Site     @relation(fields: [site_id], references: [id], onDelete: Cascade)
+    org_account_id         String
+    account                Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+    triggered_by_account_id String
+
+    status      AiRiskAnalysisRunStatus @default(running)
+    started_at  DateTime                @default(now())
+    completed_at DateTime?
+
+    // Phase 1 triage output, kept for auditability -- which categories were
+    // judged applicable/not and why, before Phase 2 ever ran.
+    triage_result         Json?
+    categories_applicable  Json?
+    // [{category, reasoning}, ...] -- categories triage judged inapplicable.
+    categories_skipped     Json?
+    // [{category, error}, ...] -- categories whose Phase 2 call failed after
+    // retry; surfaced explicitly in the UI, never silently dropped (design
+    // doc §7).
+    categories_failed      Json?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    risks Risk[]
+
+    @@index([site_id])
+    @@index([org_account_id])
     @@index([status])
 }

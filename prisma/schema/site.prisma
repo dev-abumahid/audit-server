@@ -6,6 +6,11 @@ model Site {
     location        String?
     country         String?
     activity        String?
+    // design-docs/site-ai-risk-register-generation.md §3: the one field the
+    // CEO's mockup expected that Site didn't already have. Free text, fed
+    // into the AI risk-generation prompt (capped at 2,000 chars server-side
+    // before it reaches any prompt -- see the generation service).
+    description     String?
     revenue         Int
     employees_count Int
     site_type       String
@@ -28,6 +33,7 @@ model Site {
     complianceObligations ComplianceObligation[]
     // aexa-frontend#922: AI-suggested-risk dismiss/import decisions for this site.
     aiSuggestionStates AiSuggestionState[]
+    aiRiskAnalysisRuns AiRiskAnalysisRun[]
 
     @@index([org_account_id])
 }
