@@ -77,6 +77,18 @@ const MAX_EXISTING_RISKS_FOR_DEDUP = 200;
 const MAX_EXISTING_RISK_TITLE_LENGTH = 200;
 const MAX_REGULATORY_FRAMEWORKS = 50;
 
+// design-docs/site-ai-risk-register-generation.md §6: the free-text
+// "existing risks" prompt hint sent to aexa-ai (below) is explicitly
+// documented as a *soft* hint only -- it doesn't guarantee anything, and in
+// practice the model doesn't reliably honor it across ~16 parallel category
+// calls that all see the same list. The design doc calls for an ENFORCED
+// server-side layer at persist time: this is it. 0.8 is deliberately
+// conservative -- a regenerated risk almost always keeps most of its
+// distinguishing words even when reworded ("Ransomware attack on production
+// systems" vs "Production systems ransomware risk"), while two genuinely
+// different risks in the same category rarely share 80%+ of their words.
+const DUPLICATE_TITLE_SIMILARITY_THRESHOLD = 0.8;
+
 type TriageCategoryResult = {
   category: string;
   applies: boolean;
@@ -253,12 +265,95 @@ async function fetchFrameworksForPrompt(): Promise<{
   return { frameworkByRef, regulatoryFrameworksPayload };
 }
 
-// Shared by runAnalysis and retryFailedCategories -- soft dedup hint only
-// (design-docs §6), same org-scoped query both need.
+// A generated risk carries enough of an existing register entry's shape to
+// run BOTH dedup layers against it: the deterministic (category,
+// regulatory_framework_id) check and the fuzzy title-similarity fallback for
+// risks with no resolved citation. Also doubles as the shape of a
+// just-persisted risk appended mid-run in runCategoryGeneration, so a
+// category's own batch is deduped against itself, not just the pre-run
+// snapshot.
+type ExistingRiskForDedup = {
+  title: string;
+  category: string;
+  regulatoryFrameworkId: string | null;
+};
+
+// Normalizes a risk title for comparison: lowercased, punctuation stripped,
+// whitespace collapsed. "Ransomware Attack (Production)" and "ransomware
+// attack production" normalize identically.
+function normalizeRiskTitle(title: string): string {
+  return title
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function riskTitleTokens(title: string): Set<string> {
+  return new Set(normalizeRiskTitle(title).split(' ').filter(Boolean));
+}
+
+// Jaccard similarity on normalized word sets. Catches "differently worded,
+// same risk" duplicates (design-docs §6's own example: "even if the wording
+// differs") without an embeddings call -- see DUPLICATE_TITLE_SIMILARITY_THRESHOLD
+// above for why 0.8.
+function isLikelyDuplicateTitle(existingTitle: string, candidateTitle: string): boolean {
+  const normalizedExisting = normalizeRiskTitle(existingTitle);
+  const normalizedCandidate = normalizeRiskTitle(candidateTitle);
+  if (!normalizedExisting || !normalizedCandidate) return false;
+  if (normalizedExisting === normalizedCandidate) return true;
+
+  const existingTokens = riskTitleTokens(existingTitle);
+  const candidateTokens = riskTitleTokens(candidateTitle);
+  if (existingTokens.size === 0 || candidateTokens.size === 0) return false;
+
+  let intersectionSize = 0;
+  for (const token of existingTokens) {
+    if (candidateTokens.has(token)) intersectionSize++;
+  }
+  const unionSize = existingTokens.size + candidateTokens.size - intersectionSize;
+  return unionSize > 0 && intersectionSize / unionSize >= DUPLICATE_TITLE_SIMILARITY_THRESHOLD;
+}
+
+// True when `candidate` duplicates something already in `existingRisks`,
+// scoped to the same category (a "cyber" risk and an "hr" risk never
+// collide regardless of title overlap). Two layers, either sufficient:
+// 1. design-docs §6's enforced layer -- same category AND the same
+//    resolved regulatory_framework_id. Deterministic, no wording-dependent
+//    false negatives for cited risks. Known tradeoff (accepted, per the
+//    design doc): this matches on citation alone, with no title check, so
+//    two genuinely distinct risks in the same category that both cite the
+//    same framework article will be treated as duplicates. Revisit if this
+//    proves too aggressive in practice -- the fix would be requiring some
+//    minimum title overlap even on a citation match.
+// 2. Fuzzy title match (exact or high word-overlap) -- the fallback for
+//    risks with no resolved citation, or as a second check even when one
+//    exists.
+function isDuplicateOfExistingRisk(
+  candidate: { title: string; category: string; regulatoryFrameworkId: string | null },
+  existingRisks: ExistingRiskForDedup[],
+): boolean {
+  return existingRisks.some((existing) => {
+    if (existing.category !== candidate.category) return false;
+    if (
+      candidate.regulatoryFrameworkId &&
+      existing.regulatoryFrameworkId === candidate.regulatoryFrameworkId
+    ) {
+      return true;
+    }
+    return isLikelyDuplicateTitle(existing.title, candidate.title);
+  });
+}
+
+// Shared by runAnalysis and retryFailedCategories -- the pre-run snapshot
+// both the soft LLM-prompt hint (design-docs §6) and the enforced
+// persist-time dedup check (isDuplicateOfExistingRisk, added on top of that
+// same §6 spec) run against. Same org-scoped query both need.
 async function fetchExistingRiskTitles(
   siteId: string,
   orgAccountId: string,
-): Promise<{ title: string }[]> {
+): Promise<ExistingRiskForDedup[]> {
   const existingRisks = await prisma.risk.findMany({
     // docs/design-docs/ai-risk-review-approval-workflow.md -- dedup counts
     // APPROVED + PENDING_REVIEW (a fresh run shouldn't re-suggest something
@@ -271,10 +366,14 @@ async function fetchExistingRiskTitles(
       org_account_id: orgAccountId,
       review_status: { in: ['APPROVED', 'PENDING_REVIEW'] },
     },
-    select: { name: true },
+    select: { name: true, category: true, regulatory_framework_id: true },
     take: MAX_EXISTING_RISKS_FOR_DEDUP,
   });
-  return existingRisks.map((r) => ({ title: r.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH) }));
+  return existingRisks.map((r) => ({
+    title: r.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH),
+    category: r.category,
+    regulatoryFrameworkId: r.regulatory_framework_id,
+  }));
 }
 
 // Kicks off a new "Analyze with AI" run for a site: resolves/validates the
@@ -641,7 +740,7 @@ async function runCategoryGeneration(
   triageCategory: TriageCategoryResult & { category: RiskCategoryValue },
   siteProfile: Record<string, string>,
   regulatoryFrameworksPayload: unknown[],
-  existingRiskTitles: { title: string }[],
+  existingRiskTitles: ExistingRiskForDedup[],
   frameworkByRef: Map<string, RegulatoryFrameworkRow>,
 ): Promise<void> {
   const body = {
@@ -649,13 +748,24 @@ async function runCategoryGeneration(
     estimated_risk_count: triageCategory.estimated_risk_count,
     ...siteProfile,
     regulatory_frameworks: regulatoryFrameworksPayload,
-    existing_risks: existingRiskTitles,
+    // aexa-ai's wire contract only wants { title }[] (its own soft prompt
+    // hint just lists titles) -- the richer category/regulatoryFrameworkId
+    // fields on ExistingRiskForDedup are for the enforced check below,
+    // server-side only, not sent over the wire.
+    existing_risks: existingRiskTitles.map((r) => ({ title: r.title })),
   };
 
   const generation = await callAiJson('/risk_category_generation', body, ctx.organizationId);
 
+  // Mutable, category-scoped copy of the pre-run snapshot: each risk this
+  // loop persists is appended so the REST of this same category's batch is
+  // deduped against it too, not just against risks that existed before the
+  // run started. Catches the same LLM call proposing two near-duplicate
+  // risks in one response, not just cross-run duplication.
+  const dedupSet = [...existingRiskTitles];
+
   for (const raw of generation.risks ?? []) {
-    await persistGeneratedRisk(
+    const persisted = await persistGeneratedRisk(
       runId,
       site,
       ctx,
@@ -663,7 +773,9 @@ async function runCategoryGeneration(
       triageCategory.category,
       raw,
       frameworkByRef,
+      dedupSet,
     );
+    if (persisted) dedupSet.push(persisted);
   }
 }
 
@@ -675,7 +787,8 @@ async function persistGeneratedRisk(
   category: RiskCategoryValue,
   raw: any,
   frameworkByRef: Map<string, RegulatoryFrameworkRow>,
-): Promise<void> {
+  dedupSet: ExistingRiskForDedup[],
+): Promise<ExistingRiskForDedup | null> {
   let legalStatus = raw.legal_status;
   let citationConfidence = raw.citation_confidence;
   let regulatoryFrameworkId: string | null = null;
@@ -714,6 +827,26 @@ async function persistGeneratedRisk(
   // it didn't.
   if (citationConfidence === 'curated_verified' && !regulatoryFrameworkId) {
     citationConfidence = 'ai_estimate';
+  }
+
+  // design-docs §6's enforced dedup layer -- the free-text "existing risks"
+  // prompt hint sent to aexa-ai doesn't guarantee anything on its own (bug
+  // report: regenerating a site's AI analysis kept re-proposing risks
+  // already sitting in the register). Skip persisting anything that matches
+  // an existing PENDING_REVIEW/APPROVED risk in the same category, either
+  // by resolved regulatory_framework_id or by title similarity -- see
+  // isDuplicateOfExistingRisk.
+  const candidateForDedup = {
+    title: typeof raw.name === 'string' ? raw.name : '',
+    category,
+    regulatoryFrameworkId,
+  };
+  if (isDuplicateOfExistingRisk(candidateForDedup, dedupSet)) {
+    logger.info(
+      { runId, category, name: raw.name },
+      'Skipped AI-generated risk: duplicate of an existing register entry',
+    );
+    return null;
   }
 
   // design-docs §4: same fixed enums risk_category_generation_schema.py's
@@ -800,6 +933,7 @@ async function persistGeneratedRisk(
   };
 
   await createRiskWithGeneratedRef(payload);
+  return candidateForDedup;
 }
 
 // computeEbitdaAtRisk is re-exported transitively via resolveEbitdaFields

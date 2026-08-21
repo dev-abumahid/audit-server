@@ -735,6 +735,287 @@ describe('ai_risk_analysis_service', () => {
     });
   });
 
+  // CEO bug report: regenerating a site's AI analysis kept re-proposing
+  // risks already sitting in the register. The free-text "existing risks"
+  // block sent to aexa-ai (existing_risks in the request body) is a soft
+  // prompt hint only (design-docs §6) -- these tests cover the enforced
+  // server-side layer added on top of it in persistGeneratedRisk.
+  describe('duplicate risk prevention (design-docs §6 enforced layer)', () => {
+    function makeRawRisk(overrides: Record<string, unknown> = {}) {
+      return {
+        name: 'Cyber intrusion',
+        description: 'desc',
+        applicability_reasoning: 'reason',
+        legal_status: 'voluntary_best_practice',
+        regulatory_official_reference: null,
+        regulatory_citation_note: null,
+        citation_confidence: 'none',
+        probability: 40,
+        impact: 40,
+        financial_impact_min: 10,
+        financial_impact_max: 100,
+        velocity: 'medium',
+        trend: 'none',
+        control_design_eff: 50,
+        control_operating_eff: 50,
+        internal_pilot: null,
+        ...overrides,
+      };
+    }
+
+    function mockGenerationFlow(category: string, risks: Record<string, unknown>[]) {
+      (fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+        if (url.endsWith('/risk_triage')) {
+          return Promise.resolve(
+            mockAiResponse({
+              categories: [
+                { category, applies: true, reasoning: 'r', estimated_risk_count: risks.length },
+              ],
+            }),
+          );
+        }
+        if (url.endsWith('/risk_category_generation')) {
+          return Promise.resolve(mockAiResponse({ risks }));
+        }
+        return Promise.resolve(mockAiResponse({}, false, 404));
+      });
+    }
+
+    // riskDb.findMany is called for TWO unrelated purposes in this flow:
+    // fetchExistingRiskTitles's dedup query (where.review_status is set) and
+    // computeNextRiskRef's ref-sequence scan (where.ref is set, expects rows
+    // shaped { ref: string }, called once per risk actually persisted). A
+    // single mockResolvedValue would feed the dedup fixture into the ref
+    // scan too and crash on `row.ref.match(...)` -- route by the where
+    // clause so each caller gets the shape it expects.
+    function mockExistingRisksForDedup(risks: Record<string, unknown>[]) {
+      riskDb.findMany.mockImplementation((args: { where?: { review_status?: unknown } }) =>
+        Promise.resolve(args?.where?.review_status ? risks : []),
+      );
+    }
+
+    it('skips an exact-title duplicate of an existing PENDING_REVIEW risk in the same category', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([
+        { name: 'Cyber intrusion', category: 'cyber', regulatory_framework_id: null },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Cyber intrusion' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+
+    it('skips a reworded duplicate (same words, different order, one extra word) via title similarity', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([
+        {
+          name: 'Ransomware attack on production systems',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      // 4 of 5 normalized words shared with the existing title (ransomware,
+      // attack, production, systems), differing only by "on" vs "targeting
+      // key" -- Jaccard 4/7 would be too low; use a close paraphrase that
+      // stays at/above the 0.8 threshold like a genuine re-run would
+      // (same risk, LLM drops one filler word and reorders).
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Ransomware attack production systems' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+
+    it('does NOT skip the same title in a different category', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      // Existing risk is filed under "operational", the new one is "cyber"
+      // -- same title text should not collide across categories.
+      mockExistingRisksForDedup([
+        { name: 'Data loss', category: 'operational', regulatory_framework_id: null },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Data loss' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips a duplicate matched by resolved regulatory_framework_id even when the title differs entirely', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      frameworkDb.findMany.mockResolvedValue([
+        {
+          id: 'framework-sapin-ii',
+          name: 'Loi Sapin II',
+          official_reference: 'Loi n° 2016-1691',
+          jurisdiction: 'France',
+          domain: 'compliance',
+          legal_status: 'conditional_statutory',
+          applicability_threshold: null,
+          summary: 'Anti-corruption compliance obligations for large groups.',
+        },
+      ]);
+      // Existing risk already resolved to this framework; the new proposal
+      // uses completely different wording but cites the same official
+      // reference, which resolves to the same regulatory_framework_id.
+      mockExistingRisksForDedup([
+        {
+          name: 'Missing whistleblower channel',
+          category: 'compliance',
+          regulatory_framework_id: 'framework-sapin-ii',
+        },
+      ]);
+      mockGenerationFlow('compliance', [
+        makeRawRisk({
+          name: 'Anti-corruption program gap',
+          legal_status: 'conditional_statutory',
+          regulatory_official_reference: 'Loi n° 2016-1691',
+          citation_confidence: 'curated_verified',
+        }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+
+    it('dedups within the same category generation batch, not just against the pre-run snapshot', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([]); // nothing pre-existing
+      // The same LLM call proposes two near-duplicate risks in one batch --
+      // the second (one extra word, still >=0.8 Jaccard) must be deduped
+      // against the first, which this run just persisted, not only against
+      // what existed before the run started.
+      mockGenerationFlow('cyber', [
+        makeRawRisk({ name: 'Phishing attack targeting employees' }),
+        makeRawRisk({ name: 'Phishing attack targeting company employees' }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not skip a genuinely distinct risk in the same category (no false positive)', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([
+        {
+          name: 'Phishing attack targeting employees',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      mockGenerationFlow('cyber', [
+        makeRawRisk({ name: 'Unpatched VPN gateway exploited remotely' }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not skip a near-but-below-threshold reworded risk (Jaccard boundary, no false positive)', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      // 'ransomware attack on production systems' vs 'ransomware attack on
+      // staging systems' -- intersection 4 (ransomware, attack, on, systems),
+      // union 6 -> 0.667 Jaccard, below the 0.8 threshold. Distinct
+      // environments, distinct risks; must not be treated as a duplicate.
+      mockExistingRisksForDedup([
+        {
+          name: 'Ransomware attack on production systems',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Ransomware attack on staging systems' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('treats Unicode-decomposed and precomposed accented titles as the same risk (NFC normalization)', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      // Precomposed 'é' (U+00E9) vs decomposed 'e' + combining acute (U+0065
+      // U+0301) render identically but compare unequal without NFC
+      // normalization -- realistic for this France-focused app, where
+      // titles can arrive from different input sources.
+      mockExistingRisksForDedup([
+        {
+          name: 'Fuite de données sensibles',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Fuite de données sensibles' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).not.toHaveBeenCalled();
+    });
+
+    it('still sends the existing-risks list to aexa-ai as a plain {title} array (wire contract unchanged)', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([
+        { name: 'Cyber intrusion', category: 'cyber', regulatory_framework_id: null },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Unrelated new risk' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const categoryGenCall = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(([url]) =>
+        (url as string).endsWith('/risk_category_generation'),
+      );
+      const sentBody = JSON.parse(categoryGenCall![1].body as string);
+      expect(sentBody.existing_risks).toEqual([{ title: 'Cyber intrusion' }]);
+    });
+  });
+
   describe('retry_ai_risk_analysis', () => {
     function makeFailedRun(overrides: Record<string, unknown> = {}) {
       return {
@@ -899,6 +1180,59 @@ describe('ai_risk_analysis_service', () => {
       expect(finalUpdateCall.where).toEqual({ id: 'run-1' });
       expect(finalUpdateCall.data.status).toBe('completed');
       expect(finalUpdateCall.data.categories_failed).toEqual([]);
+    });
+
+    it('applies the same duplicate-risk dedup as the original run (both entry points share persistGeneratedRisk)', async () => {
+      runDb.findFirst.mockResolvedValue(makeFailedRun());
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.update.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUniqueOrThrow.mockResolvedValue(makeFailedRun({ status: 'running' }));
+      runDb.findUnique.mockResolvedValue(makeFailedRun());
+      frameworkDb.findMany.mockResolvedValue([]);
+      // 'fire' already has a PENDING_REVIEW risk with this exact title in
+      // the register -- the retry must not re-propose it.
+      riskDb.findMany.mockImplementation((args: { where?: { review_status?: unknown } }) =>
+        Promise.resolve(
+          args?.where?.review_status
+            ? [{ name: 'Fire safety gap', category: 'fire', regulatory_framework_id: null }]
+            : [],
+        ),
+      );
+
+      (fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+        if (url.endsWith('/risk_category_generation')) {
+          return Promise.resolve(
+            mockAiResponse({
+              risks: [
+                {
+                  name: 'Fire safety gap',
+                  description: 'desc',
+                  applicability_reasoning: 'reason',
+                  legal_status: 'active_statutory',
+                  regulatory_official_reference: null,
+                  regulatory_citation_note: null,
+                  citation_confidence: 'none',
+                  probability: 40,
+                  impact: 50,
+                  financial_impact_min: 20,
+                  financial_impact_max: 200,
+                  velocity: 'medium',
+                  trend: 'none',
+                  control_design_eff: 40,
+                  control_operating_eff: 40,
+                  internal_pilot: null,
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(mockAiResponse({}, false, 404));
+      });
+
+      await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+      await flush();
+
+      expect(riskDb.create).not.toHaveBeenCalled();
     });
 
     it('keeps a category that fails again in categories_failed, staying partial', async () => {
