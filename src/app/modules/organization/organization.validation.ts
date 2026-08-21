@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { passwordSchema } from '../account/account.validation.js';
 
 // Slice 2 (#55) never creates ExternalOrgMember rows here — that's slice 5 —
 // so all four internal OrgRole values are valid targets for an invite. Role
@@ -99,12 +100,14 @@ const update_external_member = z
 
 // Admin-provisioned tenant creation (#96). The manual (non-AI) fallback and
 // the AI onboarding commit both create the same shape of org, so they share
-// the same core fields. Password minimum matches the new-account branch of
-// account creation elsewhere in this codebase.
+// the same core fields. Reuses the same passwordSchema every other
+// new-password field in the app enforces (10+ chars, letter+number) --
+// previously a separately hand-rolled 8-char-only rule with no
+// letter/number requirement, found by the password-implementation audit.
 const create_organization = z.object({
   organizationName: z.string('Organization name is required.').min(1).max(255),
   email: z.string('Email is required.').email('Must be a valid email address.').max(255),
-  password: z.string('Password is required.').min(8, 'Password must be at least 8 characters.'),
+  password: passwordSchema,
   sector: z.string().max(255).nullish(),
   country: z.string().max(255).nullish(),
 });

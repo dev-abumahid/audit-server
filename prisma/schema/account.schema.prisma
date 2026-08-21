@@ -24,6 +24,20 @@ model Account {
     lastOtpSendingTime DateTime?
     isDeleted          Boolean   @default(false)
     isAccountVerified  Boolean   @default(false)
+    // Password-security-hardening audit. Bumped on every successful password
+    // change/reset, embedded in every access token at issue time, checked in
+    // auth() middleware (reusing the DB read that check already does for
+    // isAccountVerified -- no extra query). A stolen/leaked session token
+    // becomes invalid the moment the legitimate account holder changes their
+    // password, instead of surviving until natural JWT expiry.
+    security_stamp     String    @default(uuid())
+    // Bumped on every "forgot password" request (not just successful
+    // resets). Embedded in the reset-password JWT at issuance, checked at
+    // redemption -- makes reset tokens genuinely single-use (a successful
+    // reset also bumps this) and means requesting a new reset link
+    // invalidates any still-valid older one, rather than both staying live
+    // until their own 5-minute expiry.
+    reset_token_stamp  String    @default(uuid())
     createdAt          DateTime  @default(now())
     updatedAt          DateTime  @default(now())
 

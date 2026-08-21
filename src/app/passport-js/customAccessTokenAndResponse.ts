@@ -17,16 +17,20 @@ import manageResponse from '../utils/manage_response.js';
 // putting the token in the URL avoids leaking it into browser history,
 // Referer headers, or server access logs.
 export const customAccessTokenAndResponse = (req: any, res: Response) => {
-  // make access token
-  const accessToken = jwtHelpers.generateToken(
-    {
-      accountId: req?.user?.id as string,
-      email: req?.user?.email as string,
-      role: req?.user?.role as string,
-    },
-    configs.jwt.access_token as string,
-    configs.jwt.access_expires as string,
-  );
+  // Routed through the same shared helper login/org-invite-acceptance use
+  // (password-security-hardening audit) -- this used to be a third,
+  // independently hand-rolled jwt.sign() call with the same shape, which
+  // meant it silently never got the securityStamp claim other login paths
+  // now carry, leaving OAuth-issued sessions unaffected by a password
+  // change/reset (the actual security gap the audit found). req.user here
+  // is accountCreatorHelper.ts's SAFE_ACCOUNT_SELECT-shaped upsert result,
+  // which now includes security_stamp.
+  const accessToken = jwtHelpers.generateAccessToken({
+    accountId: req?.user?.id as string,
+    email: req?.user?.email as string,
+    role: req?.user?.role as string,
+    securityStamp: req?.user?.security_stamp as string,
+  });
 
   // set token into cookie
   res.cookie('access_token', accessToken, {

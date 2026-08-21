@@ -15,12 +15,26 @@ const verifyToken = (token: string, secret: Secret): JwtPayload => {
 };
 
 // Shared shape for every place that authenticates an account and hands back
-// a session token (login, and org-invite acceptance both authenticate an
-// account by one means or another and need the identical token) — one place
-// to change if the access-token payload/secret/expiry ever changes.
-const generateAccessToken = (account: { email: string; role: string; accountId: string }) =>
+// a session token (login, OAuth callback, and org-invite acceptance all
+// authenticate an account by one means or another and need the identical
+// token) — one place to change if the access-token payload/secret/expiry
+// ever changes. securityStamp is the account's CURRENT Account.security_stamp
+// at token-issue time — auth() re-checks it against the DB on every request,
+// so a password change invalidates every token minted before that change,
+// regardless of natural JWT expiry (password-security-hardening audit).
+const generateAccessToken = (account: {
+  email: string;
+  role: string;
+  accountId: string;
+  securityStamp: string;
+}) =>
   generateToken(
-    { email: account.email, role: account.role, accountId: account.accountId },
+    {
+      email: account.email,
+      role: account.role,
+      accountId: account.accountId,
+      securityStamp: account.securityStamp,
+    },
     configs.jwt.access_token as string,
     configs.jwt.access_expires as string,
   );
@@ -51,6 +65,7 @@ export type JwtPayloadType = JwtPayload & {
   email: string;
   role: string;
   accountId: string;
+  securityStamp: string;
   iat: number;
   exp: number;
 };

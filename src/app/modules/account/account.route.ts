@@ -65,6 +65,7 @@ accountRouter.get(
 );
 accountRouter.put(
   '/change-password',
+  sensitiveAuthLimiter,
   auth('USER', 'ADMIN', 'ORGANIZATION'),
   RequestValidator(account_validation.change_password),
   account_controller.change_password,

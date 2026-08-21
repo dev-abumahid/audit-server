@@ -578,6 +578,163 @@ describe('account service', () => {
     });
   });
 
+  describe('reset_token_stamp makes reset tokens single-use (password-security-hardening audit)', () => {
+    it('forget_password_generate_reset_token_from_db bumps reset_token_stamp and embeds the new value in the token', async () => {
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        email: 'a@test.com',
+        reset_token_stamp: 'old-stamp',
+      });
+      db.update.mockResolvedValue({});
+      mockResetQueueAdd.mockResolvedValue(undefined as never);
+
+      await account_services.forget_password_generate_reset_token_from_db(
+        makeReq({ body: { email: 'a@test.com' } }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith({
+        where: { id: 'acc-1' },
+        data: { reset_token_stamp: expect.any(String) },
+      });
+      const bumpedStamp = db.update.mock.calls[0][0].data.reset_token_stamp;
+      expect(bumpedStamp).not.toBe('old-stamp');
+
+      const [, payload] = mockResetQueueAdd.mock.calls[0];
+      const resetLink = (payload as { resetLink: string }).resetLink;
+      const token = new URL(resetLink).searchParams.get('token') as string;
+      const decoded = jwtHelpers.verifyToken(token, configs.jwt.reset_secret as string);
+      expect(decoded.resetTokenStamp).toBe(bumpedStamp);
+    });
+
+    it('reset_password_using_token_into_db rejects a token whose resetTokenStamp no longer matches the account (already redeemed or superseded)', async () => {
+      const resetToken = jwtHelpers.generateToken(
+        { email: 'a@test.com', accountId: 'acc-1', resetTokenStamp: 'stale-stamp' },
+        configs.jwt.reset_secret as string,
+        '5m',
+      );
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        email: 'a@test.com',
+        reset_token_stamp: 'current-stamp',
+      });
+
+      await expect(
+        account_services.reset_password_using_token_into_db(
+          makeReq({ body: { token: resetToken, newPass: 'new-password' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('reset_password_using_token_into_db accepts a matching resetTokenStamp and bumps both security_stamp and reset_token_stamp on success', async () => {
+      const resetToken = jwtHelpers.generateToken(
+        { email: 'a@test.com', accountId: 'acc-1', resetTokenStamp: 'current-stamp' },
+        configs.jwt.reset_secret as string,
+        '5m',
+      );
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        email: 'a@test.com',
+        reset_token_stamp: 'current-stamp',
+        security_stamp: 'old-security-stamp',
+      });
+      db.update.mockResolvedValue({});
+
+      await account_services.reset_password_using_token_into_db(
+        makeReq({ body: { token: resetToken, newPass: 'new-password' } }),
+      );
+
+      expect(db.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'acc-1' },
+          data: expect.objectContaining({
+            security_stamp: expect.any(String),
+            reset_token_stamp: expect.any(String),
+          }),
+        }),
+      );
+      const { security_stamp: newSecurityStamp, reset_token_stamp: newResetStamp } =
+        db.update.mock.calls[0][0].data;
+      expect(newSecurityStamp).not.toBe('old-security-stamp');
+      expect(newResetStamp).not.toBe('current-stamp');
+    });
+  });
+
+  describe('reset-password guards against deleted and social-login-only accounts (password-security-hardening audit)', () => {
+    it('forget_password_generate_reset_token_from_db silently no-ops for a deleted account (no distinguishing error, no email)', async () => {
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        email: 'a@test.com',
+        isDeleted: true,
+        password: 'some-hash',
+      });
+
+      await expect(
+        account_services.forget_password_generate_reset_token_from_db(
+          makeReq({ body: { email: 'a@test.com' } }),
+        ),
+      ).resolves.toBe('');
+
+      expect(db.update).not.toHaveBeenCalled();
+      expect(mockResetQueueAdd).not.toHaveBeenCalled();
+    });
+
+    it('forget_password_generate_reset_token_from_db silently no-ops for a social-login-only account (null password) instead of granting a new local password', async () => {
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        email: 'a@test.com',
+        isDeleted: false,
+        password: null,
+        provider: 'GOOGLE',
+      });
+
+      await expect(
+        account_services.forget_password_generate_reset_token_from_db(
+          makeReq({ body: { email: 'a@test.com' } }),
+        ),
+      ).resolves.toBe('');
+
+      expect(db.update).not.toHaveBeenCalled();
+      expect(mockResetQueueAdd).not.toHaveBeenCalled();
+    });
+
+    it('forget_password_generate_reset_token_from_db silently no-ops when no account exists at all (no account-existence oracle)', async () => {
+      db.findUnique.mockResolvedValue(null);
+
+      await expect(
+        account_services.forget_password_generate_reset_token_from_db(
+          makeReq({ body: { email: 'nobody@test.com' } }),
+        ),
+      ).resolves.toBe('');
+
+      expect(db.update).not.toHaveBeenCalled();
+      expect(mockResetQueueAdd).not.toHaveBeenCalled();
+    });
+
+    it('reset_password_using_token_into_db rejects a token for an account deleted after the token was issued', async () => {
+      const resetToken = jwtHelpers.generateToken(
+        { email: 'a@test.com', accountId: 'acc-1', resetTokenStamp: 'current-stamp' },
+        configs.jwt.reset_secret as string,
+        '5m',
+      );
+      db.findUnique.mockResolvedValue({
+        id: 'acc-1',
+        email: 'a@test.com',
+        isDeleted: true,
+        reset_token_stamp: 'current-stamp',
+      });
+
+      await expect(
+        account_services.reset_password_using_token_into_db(
+          makeReq({ body: { token: resetToken, newPass: 'new-password' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(db.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('malformed/garbage tokens return a clean 4xx instead of crashing (#285)', () => {
     // Previously both functions only string-matched 'invalid signature' and
     // 'jwt expired' on error.message, with no fallback branch. Any other

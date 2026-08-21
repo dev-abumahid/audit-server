@@ -620,6 +620,7 @@ const accept_invitation_into_db = async (req: Request) => {
       email: existingAccount.email,
       role: existingAccount.role,
       accountId: existingAccount.id,
+      securityStamp: existingAccount.security_stamp,
     });
 
     return { accessToken, accountId: existingAccount.id, isNewAccount: false };
@@ -653,7 +654,7 @@ const accept_invitation_into_db = async (req: Request) => {
     select: { name: true },
   });
 
-  const newAccountId = await runAcceptTransactionOrConflict(async (tx) => {
+  const newAccount = await runAcceptTransactionOrConflict(async (tx) => {
     const account = await tx.account.create({
       data: {
         email: invitation.email,
@@ -691,7 +692,7 @@ const accept_invitation_into_db = async (req: Request) => {
       data: { status: 'ACCEPTED', acceptedAt: new Date() },
     });
 
-    return account.id;
+    return account;
   }, 'This invitation has already been accepted or the account already exists.');
 
   await recordAuditEvent({
@@ -704,10 +705,11 @@ const accept_invitation_into_db = async (req: Request) => {
   const accessToken = jwtHelpers.generateAccessToken({
     email: invitation.email,
     role: 'ORGANIZATION',
-    accountId: newAccountId,
+    accountId: newAccount.id,
+    securityStamp: newAccount.security_stamp,
   });
 
-  return { accessToken, accountId: newAccountId, isNewAccount: true };
+  return { accessToken, accountId: newAccount.id, isNewAccount: true };
 };
 
 /**

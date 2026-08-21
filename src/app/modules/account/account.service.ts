@@ -1,4 +1,5 @@
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 import { Request } from 'express';
 import jwt from 'jsonwebtoken';
 import { configs } from '../../configs/index.js';
@@ -250,6 +251,7 @@ const login_user_into_db = async (req: Request) => {
     email: account.email,
     role: account.role,
     accountId: account.id,
+    securityStamp: account.security_stamp,
   });
 
   // return payload
@@ -335,6 +337,12 @@ const change_password_into_db = async (req: Request) => {
     },
     data: {
       password: newHashPassword,
+      // Password-security-hardening audit: invalidates every access token
+      // issued before this change (including on other devices/tabs) --
+      // auth() checks this on every request, so a stolen session stops
+      // working the moment the legitimate owner changes their password,
+      // instead of surviving until the token's own natural expiry.
+      security_stamp: crypto.randomUUID(),
     },
   });
 
@@ -393,15 +401,38 @@ const forget_password_generate_reset_token_from_db = async (req: Request) => {
       email,
     },
   });
-  // check if account exists
-  if (!account) {
-    throw new AppError('Account not found', 404);
+  // No account, a deleted account, or a social-login-only account (no local
+  // password to reset -- see the comment above the password===null check
+  // this replaced) all silently no-op instead of throwing a distinguishing
+  // error. This endpoint is unauthenticated and public, so a 404/400 here
+  // would be a straightforward account-existence/provider-type enumeration
+  // oracle (found by the password-implementation audit) -- and the
+  // frontend's ForgotPasswordModal.tsx already shows the same "check your
+  // email" success state regardless of what this endpoint returns, so
+  // there's no UX to preserve by keeping the distinguishing errors. A
+  // social-login-only account letting this silently no-op (rather than
+  // gaining a new local password) is itself the fix for that case; there's
+  // just no separate email/response telling the caller which case applied.
+  if (!account || account.isDeleted || account.password === null) {
+    return '';
   }
+  // Password-security-hardening audit: bump reset_token_stamp on every
+  // request (not just successful resets), and embed the new value into the
+  // token below. This makes reset tokens genuinely single-use (redemption
+  // also bumps it, see reset_password_using_token_into_db) and means
+  // requesting a new link invalidates any still-valid older one, instead of
+  // both staying live until their own 5-minute expiry.
+  const resetTokenStamp = crypto.randomUUID();
+  await prisma.account.update({
+    where: { id: account.id },
+    data: { reset_token_stamp: resetTokenStamp },
+  });
   // generate forget token
   const verificationToken = jwtHelpers.generateToken(
     {
       email: email,
       accountId: account.id,
+      resetTokenStamp,
     },
     configs.jwt.reset_secret as string,
     '5m',
@@ -446,9 +477,22 @@ const reset_password_using_token_into_db = async (req: Request) => {
       email: decodeToken.email,
     },
   });
-  // check if account exists
-  if (!account) {
+  // check if account exists. Also reject a deleted account (password-
+  // security-hardening audit, mirroring accountCreatorHelper.ts's own
+  // isDeleted guard) -- covers the window where the account was deleted
+  // AFTER a still-valid reset token was issued.
+  if (!account || account.isDeleted) {
     throw new AppError('Account not found', 404);
+  }
+
+  // Password-security-hardening audit: reject a token whose embedded stamp
+  // doesn't match the account's CURRENT reset_token_stamp -- either the
+  // token was already redeemed once (redemption bumps the stamp below), or
+  // a newer reset request has since superseded it. Same rejection path as
+  // an expired/tampered token, not a different error, so this doesn't leak
+  // which specific reason applies.
+  if (decodeToken.resetTokenStamp !== account.reset_token_stamp) {
+    throw new AppError('Link expired, please reset again', 403);
   }
 
   // change account password
@@ -459,6 +503,11 @@ const reset_password_using_token_into_db = async (req: Request) => {
     },
     data: {
       password: newHash,
+      // A successful reset is itself a password change -- invalidate
+      // existing login sessions the same way change_password_into_db does.
+      // Also bump reset_token_stamp so this same token can't be replayed.
+      security_stamp: crypto.randomUUID(),
+      reset_token_stamp: crypto.randomUUID(),
     },
   });
   // In future user alert for changing password

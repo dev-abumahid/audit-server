@@ -14,10 +14,9 @@ import { describe, expect, it } from 'vitest';
  *   account.route.ts: POST /sign-up, /sign-in,
  *                      PUT /verify-otp, /resend-otp,
  *                      /forget-password, /reset-password,
- *                      /verify-link                             — sensitiveAuthLimiter, 10/15min
+ *                      /verify-link, /change-password            — sensitiveAuthLimiter, 10/15min
  *                      GET /me                                  — sessionCheckLimiter, 500/15min
  *                      GET /social-providers                    — socialProvidersLimiter, 500/15min
- *                      PUT /change-password                     — no auth-specific limiter
  *
  * Every account route still sits under apiLimiter too (mounted broadly on
  * /api in app.ts), so sensitive routes are double-counted: the tight
@@ -83,8 +82,9 @@ function buildApp({
   app.get('/api/auth/social-providers', socialProvidersLimiter, (_req, res) =>
     res.status(200).json({ ok: true }),
   );
-  // No auth-specific limiter here — only the broad apiLimiter applies
-  app.put('/api/auth/change-password', (_req, res) => res.status(200).json({ ok: true }));
+  app.put('/api/auth/change-password', sensitiveAuthLimiter, (_req, res) =>
+    res.status(200).json({ ok: true }),
+  );
 
   return app;
 }
@@ -183,16 +183,17 @@ describe('rate limiter config shape (mirrors app.ts + account.route.ts)', () => 
     expect(providersBlocked.status).toBe(429);
   });
 
-  it('routes with no auth-specific limiter still fall under the broad apiLimiter', async () => {
-    // change-password has no per-route limiter in account.route.ts —
-    // apiLimiter (mounted on all of /api in app.ts) is the only thing protecting it.
-    const app = buildApp({ apiMax: 2, sessionMax: 100 });
+  it('allows change-password up to the sensitive-auth limit (10), then 429s (password-security-hardening audit)', async () => {
+    // change-password previously had no per-route limiter, unlike every
+    // other sensitive auth route — fixed to carry sensitiveAuthLimiter too.
+    const app = buildApp({ apiMax: 100, sessionMax: 100 });
 
-    await request(app).put('/api/auth/change-password');
-    await request(app).get('/api/auth/me');
-    const thirdRes = await request(app).put('/api/auth/change-password');
-
-    expect(thirdRes.status).toBe(429);
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).put('/api/auth/change-password');
+      expect(res.status).toBe(200);
+    }
+    const eleventh = await request(app).put('/api/auth/change-password');
+    expect(eleventh.status).toBe(429);
   });
 
   it('double-counts sensitive routes against the broad apiLimiter too', async () => {

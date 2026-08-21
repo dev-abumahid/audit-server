@@ -90,7 +90,12 @@ describe('auth middleware (ticket #8)', () => {
   });
 
   it('sets req.user and calls next() for a valid, verified token with correct role', async () => {
-    const payload = { accountId: 'acc-1', role: 'ORGANIZATION', email: 'org@test.com' };
+    const payload = {
+      accountId: 'acc-1',
+      role: 'ORGANIZATION',
+      email: 'org@test.com',
+      securityStamp: 'stamp-1',
+    };
     const token = makeToken(payload);
     const req = {
       headers: { authorization: `Bearer ${token}` },
@@ -98,7 +103,10 @@ describe('auth middleware (ticket #8)', () => {
     } as unknown as Request;
     const next = makeNext();
 
-    mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
+    mockFindUnique.mockResolvedValue({
+      isAccountVerified: true,
+      security_stamp: 'stamp-1',
+    } as unknown as never);
 
     await auth('ORGANIZATION')(req, makeRes(), next);
 
@@ -107,7 +115,12 @@ describe('auth middleware (ticket #8)', () => {
   });
 
   it('strips the "Bearer " prefix before verifying (ticket #28)', async () => {
-    const payload = { accountId: 'acc-3', role: 'ORGANIZATION', email: 'org3@test.com' };
+    const payload = {
+      accountId: 'acc-3',
+      role: 'ORGANIZATION',
+      email: 'org3@test.com',
+      securityStamp: 'stamp-3',
+    };
     const token = makeToken(payload);
     const req = {
       headers: { authorization: `Bearer ${token}` },
@@ -115,7 +128,10 @@ describe('auth middleware (ticket #8)', () => {
     } as unknown as Request;
     const next = makeNext();
 
-    mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
+    mockFindUnique.mockResolvedValue({
+      isAccountVerified: true,
+      security_stamp: 'stamp-3',
+    } as unknown as never);
 
     await auth('ORGANIZATION')(req, makeRes(), next);
 
@@ -126,7 +142,12 @@ describe('auth middleware (ticket #8)', () => {
   });
 
   it('accepts a token from the access_token cookie when header is absent', async () => {
-    const payload = { accountId: 'acc-2', role: 'ORGANIZATION', email: 'org2@test.com' };
+    const payload = {
+      accountId: 'acc-2',
+      role: 'ORGANIZATION',
+      email: 'org2@test.com',
+      securityStamp: 'stamp-2',
+    };
     const token = makeToken(payload);
     const req = {
       headers: {},
@@ -134,7 +155,10 @@ describe('auth middleware (ticket #8)', () => {
     } as unknown as Request;
     const next = makeNext();
 
-    mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
+    mockFindUnique.mockResolvedValue({
+      isAccountVerified: true,
+      security_stamp: 'stamp-2',
+    } as unknown as never);
 
     await auth('ORGANIZATION')(req, makeRes(), next);
 
@@ -143,7 +167,12 @@ describe('auth middleware (ticket #8)', () => {
   });
 
   it('falls back to the cookie when the Authorization header is present but malformed', async () => {
-    const payload = { accountId: 'acc-4', role: 'ORGANIZATION', email: 'org4@test.com' };
+    const payload = {
+      accountId: 'acc-4',
+      role: 'ORGANIZATION',
+      email: 'org4@test.com',
+      securityStamp: 'stamp-4',
+    };
     const token = makeToken(payload);
     const req = {
       // A stale/non-standard header (no "Bearer " prefix) must not shadow a valid cookie
@@ -152,7 +181,10 @@ describe('auth middleware (ticket #8)', () => {
     } as unknown as Request;
     const next = makeNext();
 
-    mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
+    mockFindUnique.mockResolvedValue({
+      isAccountVerified: true,
+      security_stamp: 'stamp-4',
+    } as unknown as never);
 
     await auth('ORGANIZATION')(req, makeRes(), next);
 
@@ -173,16 +205,82 @@ describe('auth middleware (ticket #8)', () => {
   });
 
   it('checks the DB exactly once per request (no N+1)', async () => {
-    const token = makeToken({ accountId: 'acc-1', role: 'ORGANIZATION', email: 'o@test.com' });
+    const token = makeToken({
+      accountId: 'acc-1',
+      role: 'ORGANIZATION',
+      email: 'o@test.com',
+      securityStamp: 'stamp-1',
+    });
     const req = {
       headers: { authorization: `Bearer ${token}` },
       cookies: {},
     } as unknown as Request;
 
-    mockFindUnique.mockResolvedValue({ isAccountVerified: true } as unknown as never);
+    mockFindUnique.mockResolvedValue({
+      isAccountVerified: true,
+      security_stamp: 'stamp-1',
+    } as unknown as never);
 
     await auth('ORGANIZATION')(req, makeRes(), makeNext());
 
     expect(mockFindUnique).toHaveBeenCalledTimes(1);
+  });
+
+  describe('security_stamp invalidates sessions on password change/reset (password-security-hardening audit)', () => {
+    it("calls next(AppError 401) when the token's securityStamp no longer matches the account (password changed since issue)", async () => {
+      const token = makeToken({
+        accountId: 'acc-5',
+        role: 'ORGANIZATION',
+        email: 'stale@test.com',
+        securityStamp: 'old-stamp',
+      });
+      const req = {
+        headers: { authorization: `Bearer ${token}` },
+        cookies: {},
+      } as unknown as Request;
+      const next = makeNext();
+
+      mockFindUnique.mockResolvedValue({
+        isAccountVerified: true,
+        security_stamp: 'new-stamp',
+      } as unknown as never);
+
+      await auth('ORGANIZATION')(req, makeRes(), next);
+
+      expect(next).toHaveBeenCalledWith(
+        expect.objectContaining({
+          statusCode: 401,
+          message: expect.stringMatching(/session has expired/i),
+        }),
+      );
+    });
+
+    it('calls next(AppError 401) for a pre-existing token minted before securityStamp existed (no claim at all)', async () => {
+      const token = makeToken({
+        accountId: 'acc-6',
+        role: 'ORGANIZATION',
+        email: 'pre-existing@test.com',
+        // no securityStamp claim, simulating a token minted before this feature shipped
+      });
+      const req = {
+        headers: { authorization: `Bearer ${token}` },
+        cookies: {},
+      } as unknown as Request;
+      const next = makeNext();
+
+      mockFindUnique.mockResolvedValue({
+        isAccountVerified: true,
+        security_stamp: 'real-stamp',
+      } as unknown as never);
+
+      await auth('ORGANIZATION')(req, makeRes(), next);
+
+      expect(next).toHaveBeenCalledWith(
+        expect.objectContaining({
+          statusCode: 401,
+          message: expect.stringMatching(/session has expired/i),
+        }),
+      );
+    });
   });
 });

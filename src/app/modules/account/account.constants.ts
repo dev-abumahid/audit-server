@@ -24,6 +24,10 @@ export const SAFE_ACCOUNT_SELECT = {
   provider: true,
   isAccountVerified: true,
   isDeleted: true,
+  // Needed so customAccessTokenAndResponse.ts can embed it into the OAuth
+  // login's access token, same as every other login path (password-
+  // security-hardening audit) -- not a secret, safe to carry on req.user.
+  security_stamp: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.AccountSelect;

@@ -29,10 +29,21 @@ const auth = (...roles: Role[]) => {
       }
       const account = await prisma.account.findUnique({
         where: { id: verifiedUser.accountId },
-        select: { isAccountVerified: true },
+        select: { isAccountVerified: true, security_stamp: true },
       });
       if (!account?.isAccountVerified) {
         throw new AppError('Please verify your email before continuing.', 401);
+      }
+      // Password-security-hardening audit: a token minted before the
+      // account's current security_stamp is a token issued under a
+      // password that's since been changed/reset -- reject it rather than
+      // trusting it until its own natural expiry. Also rejects every token
+      // issued before this field existed (verifiedUser.securityStamp
+      // undefined never matches a real stamp) -- a one-time mass
+      // re-authentication on deploy, the correct behavior for a token
+      // format this check didn't previously apply to.
+      if (account.security_stamp !== verifiedUser.securityStamp) {
+        throw new AppError('Your session has expired. Please sign in again.', 401);
       }
       req.user = verifiedUser as JwtPayloadType;
       next();
