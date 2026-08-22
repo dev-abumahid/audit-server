@@ -534,12 +534,63 @@ const retry_ai_risk_analysis = async (req: Request) => {
 // here is caught by the caller's .catch() and must never crash the process,
 // but every failure path here also updates the run row so a stuck
 // `running` status can't linger forever.
+// External-data-anchoring plan, Phase 0b (Step 0). Resolves and persists
+// the site's sector code the first time it's needed, then never again --
+// a site that already has secteur_code set is a no-op here, which is what
+// keeps this from re-hitting the SEC EDGAR/LLM cascade on every regenerate.
+// Deliberately non-fatal: a failure here (network error, aexa-ai down)
+// must never fail the whole risk analysis run over a side signal nothing
+// downstream consumes yet -- same degrade-gracefully principle as the rest
+// of this file's AI calls. Mutates `site` in place so any code later in
+// the same run sees the freshly resolved value without a second DB read.
+async function resolveSiteSectorIfNeeded(site: Site, orgAccountId: string): Promise<void> {
+  if (site.secteur_code) return;
+
+  let resolved: {
+    secteur_code: string | null;
+    secteur_code_type: 'SIC' | 'NAF' | 'ESTIMATED';
+    secteur_estime: boolean;
+  };
+  try {
+    resolved = await callAiJson(
+      '/company/resolve-sector',
+      { company_name: site.name, country: site.country, activity: site.activity },
+      orgAccountId,
+    );
+  } catch (error) {
+    logger.warn({ err: error, siteId: site.id }, 'Sector resolution failed, leaving unresolved');
+    return;
+  }
+
+  if (!resolved.secteur_code) return;
+
+  await prisma.site.update({
+    // org_account_id alongside id, matching this codebase's established
+    // convention for org-scoped updates (e.g. audit.service.ts's
+    // AuditEngagement update) -- not exploitable today since `site` is
+    // already fetched org-scoped by the caller, but consistent
+    // defense-in-depth against a future refactor that reuses this function
+    // with a differently-sourced `site`.
+    where: { id: site.id, org_account_id: orgAccountId },
+    data: {
+      secteur_code: resolved.secteur_code,
+      secteur_code_type: resolved.secteur_code_type,
+      secteur_estime: resolved.secteur_estime,
+    },
+  });
+  site.secteur_code = resolved.secteur_code;
+  site.secteur_code_type = resolved.secteur_code_type;
+  site.secteur_estime = resolved.secteur_estime;
+}
+
 async function runAnalysis(
   runId: string,
   site: Site,
   ctx: CallerOrgContext,
   triggeredByAccountId: string,
 ): Promise<void> {
+  await resolveSiteSectorIfNeeded(site, ctx.organizationId);
+
   const siteProfile = buildSiteProfile(site);
 
   let triage: { categories?: TriageCategoryResult[] };

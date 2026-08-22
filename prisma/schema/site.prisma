@@ -1,3 +1,18 @@
+// External-data-anchoring plan, Phase 0b (Step 0 sector/identity
+// resolution). SIC from SEC EDGAR, NAF from a future Sirene/INSEE
+// integration (Decision #3 in the plan is still open -- this value exists
+// so a later Sirene integration doesn't need a second migration), ESTIMATED
+// when the LLM-fallback tier of the resolution cascade was used. Kept
+// distinct from `secteur_code` itself because SEC EDGAR's SIC codes and a
+// future Sirene integration's NAF codes are different code spaces --
+// sharing one untyped column would silently corrupt lookups once a second
+// code type exists.
+enum SectorCodeType {
+    SIC
+    NAF
+    ESTIMATED
+}
+
 model Site {
     id              String   @id @default(uuid())
     org_account_id  String
@@ -22,6 +37,16 @@ model Site {
     // Tavily-derived discovery citation so a reviewer can verify it.
     ai_generated    Boolean  @default(false)
     source_info     String?
+    // External-data-anchoring plan, Phase 0b. Resolved once per site (see
+    // aiRiskAnalysis.service.ts's resolveSiteSectorIfNeeded, called at the
+    // start of every AI risk analysis run) and cached here -- a site that
+    // already has a secteur_code is never re-resolved, avoiding a redundant
+    // external call on every regenerate. All three nullable: unresolved
+    // until the first AI risk analysis run for this site actually runs the
+    // resolution cascade.
+    secteur_code       String?
+    secteur_code_type  SectorCodeType?
+    secteur_estime     Boolean  @default(false)
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 

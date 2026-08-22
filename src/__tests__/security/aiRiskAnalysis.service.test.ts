@@ -7,7 +7,7 @@ vi.mock('../../app/lib/logger.js', () => ({
 
 vi.mock('../../app/lib/prisma.js', () => ({
   prisma: {
-    site: { findFirst: vi.fn() },
+    site: { findFirst: vi.fn(), update: vi.fn() },
     risk: { findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
     regulatoryFramework: { findMany: vi.fn() },
     aiRiskAnalysisRun: {
@@ -151,6 +151,106 @@ describe('ai_risk_analysis_service', () => {
           status: 'running',
         },
       });
+    });
+  });
+
+  describe('sector resolution (external-data-anchoring plan, Phase 0b)', () => {
+    function mockSectorAndTriage(
+      sectorResponse: { ok: boolean; status?: number; body?: unknown },
+      triageResponse: unknown = { categories: [] },
+    ) {
+      (fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+        if (url.endsWith('/company/resolve-sector')) {
+          return Promise.resolve(
+            mockAiResponse(
+              sectorResponse.body ?? {},
+              sectorResponse.ok,
+              sectorResponse.status ?? 200,
+            ),
+          );
+        }
+        if (url.endsWith('/risk_triage')) {
+          return Promise.resolve(mockAiResponse(triageResponse));
+        }
+        return Promise.resolve(mockAiResponse({}, false, 404));
+      });
+    }
+
+    it('skips sector resolution entirely when the site already has a secteur_code', async () => {
+      siteDb.findFirst.mockResolvedValue({ ...SITE, secteur_code: '3571' });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockSectorAndTriage({
+        ok: true,
+        body: { secteur_code: '9999', secteur_code_type: 'SIC', secteur_estime: false },
+      });
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const sectorCall = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(([url]) =>
+        (url as string).endsWith('/company/resolve-sector'),
+      );
+      expect(sectorCall).toBeUndefined();
+      expect(siteDb.update).not.toHaveBeenCalled();
+    });
+
+    it('resolves and persists the sector code when the site has none yet', async () => {
+      siteDb.findFirst.mockResolvedValue({ ...SITE, secteur_code: null });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockSectorAndTriage({
+        ok: true,
+        body: { secteur_code: '3441', secteur_code_type: 'ESTIMATED', secteur_estime: true },
+      });
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(siteDb.update).toHaveBeenCalledWith({
+        where: { id: 'site-1', org_account_id: ORG_A },
+        data: { secteur_code: '3441', secteur_code_type: 'ESTIMATED', secteur_estime: true },
+      });
+    });
+
+    it('does not persist anything and continues the run when sector resolution fails', async () => {
+      siteDb.findFirst.mockResolvedValue({ ...SITE, secteur_code: null });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockSectorAndTriage({ ok: false, status: 500 });
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(siteDb.update).not.toHaveBeenCalled();
+      // The rest of the run must still proceed -- a sector-resolution
+      // failure is a degrade-gracefully signal, not a run-ending one.
+      expect(runDb.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'run-new' } }),
+      );
+    });
+
+    it('does not persist a null secteur_code (LLM had no basis to guess)', async () => {
+      siteDb.findFirst.mockResolvedValue({ ...SITE, secteur_code: null });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockSectorAndTriage({
+        ok: true,
+        body: { secteur_code: null, secteur_code_type: 'ESTIMATED', secteur_estime: true },
+      });
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(siteDb.update).not.toHaveBeenCalled();
     });
   });
 
