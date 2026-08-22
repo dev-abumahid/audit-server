@@ -65,6 +65,21 @@ enum CitationConfidence {
     none
 }
 
+// design-docs/site-ai-risk-register-generation.md's follow-on external-data-
+// anchoring plan (Phase 0a). Deliberately distinct from CitationConfidence
+// above: that field only ever describes the regulatory-citation dimension of
+// a risk (does the cited framework resolve). SourceType is the general
+// trust signal for the risk itself -- is ANY part of it (title, framing,
+// financial-impact range) actually grounded in a real external fact, or
+// purely the model's own reasoning. `anchored` requires a real,
+// non-empty source_reference; `estimated` is the safe default for every
+// pre-existing row and for anything the generation pipeline can't yet back
+// with a verified source.
+enum SourceType {
+    anchored
+    estimated
+}
+
 model Risk {
     id                    String   @id @default(uuid())
     org_account_id        String
@@ -178,6 +193,32 @@ model Risk {
     internal_pilot            String?
     ai_generation_run_id      String?
     aiGenerationRun           AiRiskAnalysisRun? @relation(fields: [ai_generation_run_id], references: [id], onDelete: SetNull)
+
+    // External-data-anchoring plan, Phase 0a. Non-nullable with a default so
+    // every existing row and every future insert that doesn't set it
+    // explicitly reads as `estimated` rather than leaving a trust gap. Set
+    // to `anchored` today only when persistGeneratedRisk resolves a real
+    // curated regulatory citation (see CitationConfidence.curated_verified
+    // above) -- true external-source anchoring (SEC EDGAR, Eurostat, etc.)
+    // lands in later phases and will set this the same way once those
+    // integrations exist.
+    source_type               SourceType @default(estimated)
+    // Populated only when source_type = anchored: for a citation-backed
+    // risk, RegulatoryFramework.official_reference; for future
+    // external-source-backed risks, a source-specific reference (a CVE ID,
+    // a docket number, an EDGAR CIK, etc. -- see the source-reference
+    // validator-registry design in the external-data-anchoring plan).
+    // Deliberately NOT required to be non-empty by a DB constraint --
+    // enforced instead at the application layer in persistGeneratedRisk,
+    // since the valid shape differs per source and isn't expressible as a
+    // single CHECK.
+    source_reference          String?
+    // Sub-type within `category`, from the anchoring plan's per-category
+    // checklist (e.g. "Ransomware" under "cyber"). Nullable: not populated
+    // until the generation prompt/schema actually carries a checklist to
+    // select from (later phase); existing categories have no such checklist
+    // today.
+    sous_type                 String?
 
     // docs/design-docs/ai-risk-review-approval-workflow.md. Defaults to
     // APPROVED for manually-created risks (a human wrote it directly, no

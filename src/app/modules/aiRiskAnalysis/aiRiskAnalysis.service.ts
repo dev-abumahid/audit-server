@@ -829,6 +829,21 @@ async function persistGeneratedRisk(
     citationConfidence = 'ai_estimate';
   }
 
+  // External-data-anchoring plan, Phase 0a: the only real anchoring signal
+  // available today is a resolved curated regulatory citation (the same
+  // check citationConfidence above already performs). `raw.regulatory_official_reference`
+  // is safe to reuse as source_reference here specifically because we only
+  // reach this branch when it already resolved against the real curated
+  // table (regulatoryFrameworkId is non-null) -- it's the validated key, not
+  // an unverified model claim. True external-source anchoring (SEC EDGAR,
+  // Eurostat, etc., landing in later phases) will set these two fields the
+  // same way, from their own validated source, once those integrations
+  // exist.
+  const sourceType: 'anchored' | 'estimated' =
+    citationConfidence === 'curated_verified' && regulatoryFrameworkId ? 'anchored' : 'estimated';
+  const sourceReference: string | null =
+    sourceType === 'anchored' ? raw.regulatory_official_reference : null;
+
   // design-docs §6's enforced dedup layer -- the free-text "existing risks"
   // prompt hint sent to aexa-ai doesn't guarantee anything on its own (bug
   // report: regenerating a site's AI analysis kept re-proposing risks
@@ -925,6 +940,8 @@ async function persistGeneratedRisk(
     regulatory_framework_id: regulatoryFrameworkId,
     regulatory_citation_note: raw.regulatory_citation_note ?? null,
     citation_confidence: citationConfidence,
+    source_type: sourceType,
+    source_reference: sourceReference,
     internal_pilot: raw.internal_pilot ?? null,
     ai_generation_run_id: runId,
     ...inherent.fields,

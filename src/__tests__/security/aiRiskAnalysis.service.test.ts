@@ -1014,6 +1014,194 @@ describe('ai_risk_analysis_service', () => {
       const sentBody = JSON.parse(categoryGenCall![1].body as string);
       expect(sentBody.existing_risks).toEqual([{ title: 'Cyber intrusion' }]);
     });
+
+    // External-data-anchoring plan, Phase 0a: source_type/source_reference
+    // threading through persistGeneratedRisk must not bypass or weaken the
+    // dedup check above it -- these two tests are the "dedup-path
+    // verification" the plan calls out explicitly, since the two features
+    // touch the exact same function and a careless edit could easily wire
+    // the new fields in a way that short-circuits dedup.
+    it('sets source_type=anchored with the real citation as source_reference for a curated_verified risk', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      frameworkDb.findMany.mockResolvedValue([
+        {
+          id: 'framework-sapin-ii',
+          name: 'Loi Sapin II',
+          official_reference: 'Loi n° 2016-1691',
+          jurisdiction: 'France',
+          domain: 'compliance',
+          legal_status: 'conditional_statutory',
+          applicability_threshold: null,
+          summary: 'Anti-corruption compliance obligations for large groups.',
+        },
+      ]);
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('compliance', [
+        makeRawRisk({
+          name: 'Anti-corruption program gap',
+          legal_status: 'conditional_statutory',
+          regulatory_official_reference: 'Loi n° 2016-1691',
+          citation_confidence: 'curated_verified',
+        }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.source_type).toBe('anchored');
+      expect(created.source_reference).toBe('Loi n° 2016-1691');
+    });
+
+    it('sets source_type=estimated with no source_reference for a risk with no resolved citation', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Unpatched legacy system' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.source_type).toBe('estimated');
+      expect(created.source_reference).toBeNull();
+    });
+
+    it('falls back to source_type=estimated when a claimed curated_verified citation does not resolve at all', async () => {
+      // The model claims citation_confidence='curated_verified' with a
+      // regulatory_official_reference, but that reference isn't in the
+      // curated table at all -- regulatoryFrameworkId never resolves, so
+      // the sourceType computation's `&& regulatoryFrameworkId` guard alone
+      // forces 'estimated' here, independent of which citation_confidence
+      // value (raw vs. downgraded) it reads. See the next test for the one
+      // scenario that actually discriminates between the two.
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      frameworkDb.findMany.mockResolvedValue([]); // curated table has nothing matching
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('compliance', [
+        makeRawRisk({
+          name: 'Fabricated citation risk',
+          citation_confidence: 'curated_verified',
+          regulatory_official_reference: 'Loi n° 9999-0000 (does not exist)',
+        }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.citation_confidence).toBe('ai_estimate');
+      expect(created.source_type).toBe('estimated');
+      expect(created.source_reference).toBeNull();
+    });
+
+    it('follows the resolved-but-threshold-downgraded citation_confidence, not the raw unresolved value (discriminating case)', async () => {
+      // The only scenario where sourceType's inputs actually diverge: the
+      // framework DOES resolve (regulatoryFrameworkId is truthy, so the
+      // '&& regulatoryFrameworkId' guard alone can't force 'estimated'),
+      // but the deterministic threshold check (site's employees_count below
+      // Sapin II's min_employees) downgrades citationConfidence from
+      // 'curated_verified' to 'ai_estimate' before source_type is computed.
+      // If sourceType were ever computed from raw.citation_confidence
+      // instead of the downgraded local variable, this is the case that
+      // would catch it -- the previous test can't, since it never resolves
+      // a framework at all. Same fixture as the pre-existing
+      // "applies the deterministic threshold check" test in the
+      // runAnalysis describe block above.
+      siteDb.findFirst.mockResolvedValue(SITE); // employees_count 300 < 500 required by Sapin II
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      frameworkDb.findMany.mockResolvedValue([
+        {
+          id: 'framework-sapin-ii',
+          name: 'Loi Sapin II',
+          official_reference: 'Loi n° 2016-1691',
+          jurisdiction: 'France',
+          domain: 'compliance',
+          legal_status: 'conditional_statutory',
+          applicability_threshold: { min_employees: 500, min_revenue_eur: 100_000_000 },
+          summary: 'Anti-corruption compliance obligations for large groups.',
+        },
+      ]);
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('compliance', [
+        makeRawRisk({
+          name: 'Failure to implement anti-corruption program',
+          legal_status: 'conditional_statutory',
+          regulatory_official_reference: 'Loi n° 2016-1691',
+          citation_confidence: 'curated_verified',
+        }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.citation_confidence).toBe('ai_estimate');
+      expect(created.source_type).toBe('estimated');
+      expect(created.source_reference).toBeNull();
+    });
+
+    // Same bug class as the discriminating test above, but for legalStatus
+    // (also reassigned by the threshold-downgrade block, aiRiskAnalysis
+    // .service.ts's threshold check). Every pre-existing threshold-downgrade
+    // test happens to send raw legal_status: 'conditional_statutory' -- the
+    // same value the downgrade forces anyway -- so none of them could catch
+    // a regression that persisted raw.legal_status instead of the
+    // downgraded local variable. Flagged by round-3 review; fixed here since
+    // it's the same one-line-cheap shape as the citation_confidence case.
+    it('follows the downgraded legal_status, not the raw claimed value, on a threshold miss', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE); // employees_count 300 < 500 required by Sapin II
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      frameworkDb.findMany.mockResolvedValue([
+        {
+          id: 'framework-sapin-ii',
+          name: 'Loi Sapin II',
+          official_reference: 'Loi n° 2016-1691',
+          jurisdiction: 'France',
+          domain: 'compliance',
+          legal_status: 'conditional_statutory',
+          applicability_threshold: { min_employees: 500, min_revenue_eur: 100_000_000 },
+          summary: 'Anti-corruption compliance obligations for large groups.',
+        },
+      ]);
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('compliance', [
+        makeRawRisk({
+          name: 'Failure to implement anti-corruption program',
+          // Deliberately NOT 'conditional_statutory' -- if legal_status
+          // were persisted from the raw model claim instead of the
+          // downgraded local variable, this would surface as
+          // 'active_statutory' in the assertion below instead of the
+          // correct downgraded value.
+          legal_status: 'active_statutory',
+          regulatory_official_reference: 'Loi n° 2016-1691',
+          citation_confidence: 'curated_verified',
+        }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.legal_status).toBe('conditional_statutory');
+    });
   });
 
   describe('retry_ai_risk_analysis', () => {
