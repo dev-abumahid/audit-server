@@ -880,20 +880,39 @@ async function persistGeneratedRisk(
     citationConfidence = 'ai_estimate';
   }
 
-  // External-data-anchoring plan, Phase 0a: the only real anchoring signal
-  // available today is a resolved curated regulatory citation (the same
-  // check citationConfidence above already performs). `raw.regulatory_official_reference`
-  // is safe to reuse as source_reference here specifically because we only
-  // reach this branch when it already resolved against the real curated
-  // table (regulatoryFrameworkId is non-null) -- it's the validated key, not
-  // an unverified model claim. True external-source anchoring (SEC EDGAR,
-  // Eurostat, etc., landing in later phases) will set these two fields the
-  // same way, from their own validated source, once those integrations
-  // exist.
+  // External-data-anchoring plan. Two independent anchoring signals, either
+  // sufficient:
+  // 1. Phase 0a: a resolved curated regulatory citation (the same check
+  //    citationConfidence above already performs). `raw.regulatory_official_reference`
+  //    is safe to reuse as source_reference here specifically because we
+  //    only reach this branch when it already resolved against the real
+  //    curated table (regulatoryFrameworkId is non-null) -- it's the
+  //    validated key, not an unverified model claim.
+  // 2. Phase 1: a wired per-category external source (e.g. World Bank WGI
+  //    for "geopolitical"). aexa-ai's risk_category_generation_service.py
+  //    already does its own server-side normalization before this ever
+  //    reaches us -- source_type can only come back "anchored" there if
+  //    real external data was actually fetched for that category, and
+  //    source_reference is always aexa-ai's own code-constructed citation,
+  //    never raw model text (the request schema doesn't even expose a
+  //    source_reference field to the model). aexa-server trusts that
+  //    already-normalized output as-is, same trust boundary as every other
+  //    field in this response -- no independent re-validation needed, this
+  //    is an internal service call (X-Internal-Secret), not third-party
+  //    input.
+  const citationAnchored =
+    citationConfidence === 'curated_verified' && Boolean(regulatoryFrameworkId);
+  const externalAnchored =
+    raw.source_type === 'anchored' &&
+    typeof raw.source_reference === 'string' &&
+    raw.source_reference.trim().length > 0;
   const sourceType: 'anchored' | 'estimated' =
-    citationConfidence === 'curated_verified' && regulatoryFrameworkId ? 'anchored' : 'estimated';
-  const sourceReference: string | null =
-    sourceType === 'anchored' ? raw.regulatory_official_reference : null;
+    citationAnchored || externalAnchored ? 'anchored' : 'estimated';
+  const sourceReference: string | null = citationAnchored
+    ? raw.regulatory_official_reference
+    : externalAnchored
+      ? raw.source_reference
+      : null;
 
   // design-docs §6's enforced dedup layer -- the free-text "existing risks"
   // prompt hint sent to aexa-ai doesn't guarantee anything on its own (bug

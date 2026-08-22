@@ -1302,6 +1302,81 @@ describe('ai_risk_analysis_service', () => {
       const created = riskDb.create.mock.calls[0][0].data;
       expect(created.legal_status).toBe('conditional_statutory');
     });
+
+    // External-data-anchoring plan, Phase 1: aexa-ai's risk_category_
+    // generation_service.py now returns source_type/source_reference
+    // itself (in addition to the Phase 0a regulatory-citation signal),
+    // for categories with a wired external source (e.g. "geopolitical"
+    // via World Bank WGI). aexa-server trusts that already-normalized
+    // output as-is -- these tests cover the second half of the
+    // "either signal is sufficient" logic in persistGeneratedRisk.
+    it('sets source_type=anchored with the aexa-ai-supplied reference for a category-level external source', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('geopolitical', [
+        makeRawRisk({
+          name: 'Political instability in France',
+          source_type: 'anchored',
+          source_reference:
+            'World Bank Worldwide Governance Indicators, Political Stability estimate for France (2024): -0.24',
+        }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.source_type).toBe('anchored');
+      expect(created.source_reference).toBe(
+        'World Bank Worldwide Governance Indicators, Political Stability estimate for France (2024): -0.24',
+      );
+    });
+
+    it('does not trust source_type=anchored without a non-empty source_reference', async () => {
+      // Defense-in-depth: aexa-ai's own normalization should never produce
+      // this shape (anchored with no reference), but aexa-server must not
+      // silently persist a risk as "anchored" with nothing backing it if
+      // it ever did.
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('geopolitical', [
+        makeRawRisk({ name: 'Some risk', source_type: 'anchored', source_reference: '' }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.source_type).toBe('estimated');
+      expect(created.source_reference).toBeNull();
+    });
+
+    it('leaves source_type=estimated when aexa-ai does not claim category-level anchoring', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([]);
+      mockGenerationFlow('geopolitical', [
+        makeRawRisk({ name: 'Some other geopolitical risk', source_type: 'estimated' }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      const created = riskDb.create.mock.calls[0][0].data;
+      expect(created.source_type).toBe('estimated');
+      expect(created.source_reference).toBeNull();
+    });
   });
 
   describe('retry_ai_risk_analysis', () => {
