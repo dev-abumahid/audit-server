@@ -80,3 +80,46 @@ describe('site_validations.create_site — description', () => {
     expect(result.success).toBe(false);
   });
 });
+
+// External-data-anchoring plan, Phase 1 (Cyber/IT category). Optional
+// per-site override of the org's OrganizationProfile.organizationWebsite --
+// review finding: without this being client-settable at all, the site-level
+// half of aiRiskAnalysis.service.ts's resolveSiteWebsiteDomain fallback
+// could never actually fire in practice.
+describe('site_validations.create_site — website_domain', () => {
+  it('accepts a missing website_domain', () => {
+    const result = site_validations.create_site.safeParse(BASE);
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a bare domain', () => {
+    const result = site_validations.create_site.safeParse({
+      ...BASE,
+      website_domain: 'plant.acme.example',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a full URL (parsed permissively on the aexa-ai side, not restricted here)', () => {
+    const result = site_validations.create_site.safeParse({
+      ...BASE,
+      website_domain: 'https://www.acme.example',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an over-cap website_domain', () => {
+    const result = site_validations.create_site.safeParse({
+      ...BASE,
+      website_domain: 'x'.repeat(256),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts website_domain on a partial update', () => {
+    const result = site_validations.update_site.safeParse({
+      website_domain: 'plant.acme.example',
+    });
+    expect(result.success).toBe(true);
+  });
+});

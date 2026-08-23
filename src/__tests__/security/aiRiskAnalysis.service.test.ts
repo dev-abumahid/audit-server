@@ -20,6 +20,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     },
     orgMember: { findUnique: vi.fn() },
     organization: { findUnique: vi.fn() },
+    organizationProfile: { findUnique: vi.fn() },
   },
 }));
 
@@ -34,6 +35,10 @@ const frameworkDb = prisma.regulatoryFramework as unknown as Record<
 >;
 const runDb = prisma.aiRiskAnalysisRun as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgProfileDb = prisma.organizationProfile as unknown as Record<
+  string,
+  ReturnType<typeof vi.fn>
+>;
 
 const SITE = {
   id: 'site-1',
@@ -65,6 +70,7 @@ describe('ai_risk_analysis_service', () => {
     vi.clearAllMocks();
     vi.stubGlobal('fetch', vi.fn());
     orgMemberDb.findUnique.mockResolvedValue(null);
+    orgProfileDb.findUnique.mockResolvedValue(null);
     riskDb.findMany.mockResolvedValue([]);
     riskDb.create.mockImplementation((args: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: 'risk-new', ref: 'GEN-001', ...args.data }),
@@ -251,6 +257,95 @@ describe('ai_risk_analysis_service', () => {
       await flush();
 
       expect(siteDb.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('site website domain resolution (external-data-anchoring plan, Phase 1)', () => {
+    function capturedTriageBody(): Record<string, unknown> {
+      const call = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(([url]) =>
+        (url as string).endsWith('/risk_triage'),
+      );
+      return JSON.parse(call![1].body as string);
+    }
+
+    it('uses site.website_domain when set, without querying the org profile', async () => {
+      siteDb.findFirst.mockResolvedValue({ ...SITE, website_domain: 'plant.acme.example' });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({ categories: [] }));
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(capturedTriageBody().site_website_domain).toBe('plant.acme.example');
+      expect(capturedTriageBody().site_website_domain_source).toBe('site');
+      expect(orgProfileDb.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the org profile website when the site has none', async () => {
+      siteDb.findFirst.mockResolvedValue({ ...SITE, website_domain: null });
+      orgProfileDb.findUnique.mockResolvedValue({
+        organizationWebsite: 'https://www.acme.example',
+      });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({ categories: [] }));
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(orgProfileDb.findUnique).toHaveBeenCalledWith({
+        where: { accountId: ORG_A },
+        select: { organizationWebsite: true },
+      });
+      expect(capturedTriageBody().site_website_domain).toBe('https://www.acme.example');
+      expect(capturedTriageBody().site_website_domain_source).toBe('org');
+    });
+
+    it('omits site_website_domain entirely when neither site nor org has one', async () => {
+      siteDb.findFirst.mockResolvedValue({ ...SITE, website_domain: null });
+      orgProfileDb.findUnique.mockResolvedValue(null);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({ categories: [] }));
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(capturedTriageBody()).not.toHaveProperty('site_website_domain');
+      expect(capturedTriageBody()).not.toHaveProperty('site_website_domain_source');
+    });
+
+    it('degrades gracefully and still completes the run when the org profile lookup fails', async () => {
+      // Round-1 review: this query previously had no try/catch, unlike
+      // resolveSiteSectorIfNeeded's own AI call -- an unhandled failure
+      // here would leave the run stuck at status: 'running' forever
+      // instead of completing.
+      siteDb.findFirst.mockResolvedValue({ ...SITE, website_domain: null });
+      orgProfileDb.findUnique.mockRejectedValue(new Error('DB connection lost'));
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({ categories: [] }));
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(capturedTriageBody()).not.toHaveProperty('site_website_domain');
+      // The run must still reach completion, not stay stuck at 'running'.
+      expect(runDb.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'run-new' },
+          data: expect.objectContaining({ status: 'completed' }),
+        }),
+      );
     });
   });
 

@@ -20,6 +20,15 @@ const create_site = z.object({
   site_type: z.string(),
   lat: z.number().optional(),
   lng: z.number().optional(),
+  // External-data-anchoring plan, Phase 1 (Cyber/IT category). Optional
+  // override of the org's OrganizationProfile.organizationWebsite for this
+  // specific site -- see aiRiskAnalysis.service.ts's
+  // resolveSiteWebsiteDomain for the fallback resolution. Accepts either a
+  // bare domain or a full URL; parsed permissively on the aexa-ai side, not
+  // strictly validated here (review finding: without this field being
+  // client-settable at all, the site-level half of that resolution could
+  // never actually fire in practice).
+  website_domain: z.string().max(255).optional(),
 });
 const update_site = create_site.partial();
 

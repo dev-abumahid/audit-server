@@ -228,7 +228,62 @@ async function callAiJson(path: string, body: unknown, orgAccountId: string): Pr
   return response.json();
 }
 
-function buildSiteProfile(site: Site): Record<string, string> {
+type ResolvedWebsiteDomain = { domain: string; source: 'site' | 'org' };
+
+// External-data-anchoring plan, Phase 1 (Cyber/IT category). Site.website_domain
+// takes priority (a site can genuinely have its own internet-facing footprint
+// distinct from the org's corporate site); falls back to the org's
+// OrganizationProfile.organizationWebsite when unset. Both are exclusively
+// user-provided -- no automated discovery/guessing anywhere in this
+// resolution, since a wrong domain would attribute a real, specific CVE to
+// the wrong company.
+//
+// Review finding: a silent org-level fallback in a multi-site org can
+// misattribute a CVE to a site whose real infrastructure differs from the
+// parent org's corporate domain -- the exact failure mode this design is
+// trying to prevent, just recurring at site granularity instead of company
+// granularity. Rather than disabling the fallback (which would mean NO
+// Cyber/IT anchoring at all for the common case of a single-site or
+// single-website org), the resolved source is threaded through to aexa-ai
+// so the eventual citation can honestly distinguish "this site's own
+// domain" from "inherited from the parent org, may not reflect this
+// specific site."
+async function resolveSiteWebsiteDomain(
+  site: Site,
+  orgAccountId: string,
+): Promise<ResolvedWebsiteDomain | null> {
+  if (site.website_domain) return { domain: site.website_domain, source: 'site' };
+
+  // Round-1 review: this query previously had no try/catch, unlike
+  // resolveSiteSectorIfNeeded's own AI call just above in this file --
+  // buildSiteProfile used to be synchronous and could never throw, so
+  // callers (runAnalysis/retryFailedCategories) had no reason to guard
+  // it. Now that it awaits a real DB query, an unhandled failure here
+  // (connection blip, pool exhaustion) would propagate all the way out
+  // to the top-level .catch(), which only logs -- silently leaving the
+  // run stuck at status: 'running' forever, the exact invariant this
+  // file's own header comment says every failure path must avoid.
+  // Degrade the same way a failed lookup already does (org fallback
+  // simply unavailable) rather than letting the whole run die over it.
+  try {
+    const profile = await prisma.organizationProfile.findUnique({
+      where: { accountId: orgAccountId },
+      select: { organizationWebsite: true },
+    });
+    return profile?.organizationWebsite
+      ? { domain: profile.organizationWebsite, source: 'org' }
+      : null;
+  } catch (error) {
+    logger.warn(
+      { err: error, orgAccountId },
+      'Failed to fetch org profile website, leaving Cyber/IT domain unresolved',
+    );
+    return null;
+  }
+}
+
+async function buildSiteProfile(site: Site, orgAccountId: string): Promise<Record<string, string>> {
+  const resolvedDomain = await resolveSiteWebsiteDomain(site, orgAccountId);
   return {
     site_name: site.name,
     site_location: site.location || '',
@@ -238,6 +293,12 @@ function buildSiteProfile(site: Site): Record<string, string> {
     site_employees: String(site.employees_count),
     site_revenue: String(site.revenue),
     ...(site.description ? { site_description: cap(site.description) } : {}),
+    ...(resolvedDomain
+      ? {
+          site_website_domain: resolvedDomain.domain,
+          site_website_domain_source: resolvedDomain.source,
+        }
+      : {}),
   };
 }
 
@@ -591,7 +652,7 @@ async function runAnalysis(
 ): Promise<void> {
   await resolveSiteSectorIfNeeded(site, ctx.organizationId);
 
-  const siteProfile = buildSiteProfile(site);
+  const siteProfile = await buildSiteProfile(site, ctx.organizationId);
 
   let triage: { categories?: TriageCategoryResult[] };
   try {
@@ -714,7 +775,7 @@ async function retryFailedCategories(
         !!c && (RISK_CATEGORIES as readonly string[]).includes(c.category),
     );
 
-  const siteProfile = buildSiteProfile(site);
+  const siteProfile = await buildSiteProfile(site, ctx.organizationId);
   const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
   const existingRiskTitles = await fetchExistingRiskTitles(site.id, ctx.organizationId);
 

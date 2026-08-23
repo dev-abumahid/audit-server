@@ -47,6 +47,21 @@ model Site {
     secteur_code       String?
     secteur_code_type  SectorCodeType?
     secteur_estime     Boolean  @default(false)
+    // External-data-anchoring plan, Phase 1 (Cyber/IT category). Optional
+    // per-site override of the org's OrganizationProfile.organizationWebsite
+    // -- a site can genuinely have its own internet-facing footprint
+    // distinct from the parent org's corporate site (e.g. a manufacturing
+    // plant with its own subdomain, or a subsidiary with its own domain).
+    // Resolution order (see aiRiskAnalysis.service.ts's site profile
+    // builder): this field first, falling back to the org's
+    // organizationWebsite when unset. Deliberately no automated
+    // discovery/guessing of this value anywhere -- both this field and the
+    // org-level fallback are exclusively user-provided, since a wrong
+    // domain here would attribute a real, specific CVE to the wrong
+    // company, a materially worse mistake than the softer classification
+    // signals (sector code, revenue figure) other Phase 1 sources accept
+    // some inference risk on.
+    website_domain     String?
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 
