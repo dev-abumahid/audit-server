@@ -299,6 +299,18 @@ async function buildSiteProfile(site: Site, orgAccountId: string): Promise<Recor
           site_website_domain_source: resolvedDomain.source,
         }
       : {}),
+    // resolveSiteSectorIfNeeded (below) has been persisting this since
+    // Phase 0b, but nothing ever forwarded it into the payload aexa-ai
+    // actually receives -- a real "computed and stored but silently
+    // unusable" gap, found while researching EU-wide anchoring sources
+    // (Eurostat's ESAW/crime datasets are sector-keyed by NACE/NAF, so
+    // this is what lets them dispatch at all).
+    ...(site.secteur_code && site.secteur_code_type
+      ? {
+          site_secteur_code: site.secteur_code,
+          site_secteur_code_type: site.secteur_code_type,
+        }
+      : {}),
   };
 }
 

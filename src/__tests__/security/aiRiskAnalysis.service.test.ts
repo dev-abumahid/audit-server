@@ -349,6 +349,54 @@ describe('ai_risk_analysis_service', () => {
     });
   });
 
+  describe('secteur_code forwarding to aexa-ai (external-data-anchoring plan)', () => {
+    function capturedTriageBody(): Record<string, unknown> {
+      const call = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(([url]) =>
+        (url as string).endsWith('/risk_triage'),
+      );
+      return JSON.parse(call![1].body as string);
+    }
+
+    it('forwards a resolved secteur_code and secteur_code_type to aexa-ai', async () => {
+      siteDb.findFirst.mockResolvedValue({
+        ...SITE,
+        secteur_code: '3571',
+        secteur_code_type: 'SIC',
+      });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({ categories: [] }));
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(capturedTriageBody().site_secteur_code).toBe('3571');
+      expect(capturedTriageBody().site_secteur_code_type).toBe('SIC');
+    });
+
+    it('omits site_secteur_code entirely when the site has no resolved sector', async () => {
+      // Regression: secteur_code/secteur_code_type were computed and
+      // persisted by resolveSiteSectorIfNeeded since Phase 0b, but
+      // buildSiteProfile never actually forwarded them into the payload
+      // aexa-ai receives -- a real "data exists, AI can't use it" gap,
+      // found while researching EU-wide anchoring sources.
+      siteDb.findFirst.mockResolvedValue({ ...SITE, secteur_code: null, secteur_code_type: null });
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse({ categories: [] }));
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(capturedTriageBody()).not.toHaveProperty('site_secteur_code');
+      expect(capturedTriageBody()).not.toHaveProperty('site_secteur_code_type');
+    });
+  });
+
   describe('get_ai_risk_analysis_run', () => {
     it('throws 404 for a run belonging to another org or that does not exist', async () => {
       runDb.findFirst.mockResolvedValue(null);
