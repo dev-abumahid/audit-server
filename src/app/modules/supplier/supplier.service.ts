@@ -144,18 +144,35 @@ const discover_suppliers_for_org = async (req: Request) => {
       );
     }
 
-    const aiResponse = await fetchWithTimeout(
-      `${configs.ai_server_end_point}/company-suppliers`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...buildAiHeaders(ctx.organizationId),
+    let aiResponse: Response;
+    try {
+      aiResponse = await fetchWithTimeout(
+        `${configs.ai_server_end_point}/company-suppliers`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...buildAiHeaders(ctx.organizationId),
+          },
+          body: JSON.stringify({ company_name: companyName }),
         },
-        body: JSON.stringify({ company_name: companyName }),
-      },
-      LLM_CALL_TIMEOUT_MS,
-    );
+        LLM_CALL_TIMEOUT_MS,
+      );
+    } catch (fetchError) {
+      // Same AbortError -> 504 special-case as compliance.service.ts's
+      // suggest-regulatory-sources call site -- fetchWithTimeout aborts via
+      // AbortController on LLM_CALL_TIMEOUT_MS, which fetch surfaces as a
+      // DOMException named 'AbortError'. Left uncaught, that falls into the
+      // outer catch/wrapAiServiceError below and comes out as the same
+      // generic 500 as a genuine failure, indistinguishable to the
+      // frontend -- which already branches on 504 to show a distinct
+      // "search timed out" toast (SupplierDiscoveryPanel.tsx) that,
+      // without this, could never actually fire.
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        throw new AppError('Supplier discovery timed out', 504);
+      }
+      throw fetchError;
+    }
     if (!aiResponse.ok) {
       throw new AppError(`AI service error: ${aiResponse.status}`, 502);
     }

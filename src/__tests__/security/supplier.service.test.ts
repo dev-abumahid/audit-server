@@ -232,6 +232,23 @@ describe('supplier service — org scoping', () => {
       expect(fetch).not.toHaveBeenCalled();
     });
 
+    it('wraps an aborted (timed-out) aexa-ai call as a distinct 504, not the generic 500', async () => {
+      // Same fix as compliance.service.ts's suggest_regulatory_sources_with_ai
+      // -- the frontend's SupplierDiscoveryPanel already branches on
+      // status === 504 to show a distinct "search timed out" toast, but
+      // without this the AbortError from fetchWithTimeout's own timeout
+      // fell into the generic wrapAiServiceError 500 path and that branch
+      // could never actually fire.
+      orgProfileDb.findUnique.mockResolvedValue({ organizationName: 'Fives Nordon' });
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(abortError);
+
+      await expect(
+        supplier_service.discover_suppliers_for_org(makeReq({ body: {} })),
+      ).rejects.toMatchObject({ statusCode: 504, message: 'Supplier discovery timed out' });
+    });
+
     it('throws a 502 AppError when the AI service responds with a non-ok status', async () => {
       orgProfileDb.findUnique.mockResolvedValue({ organizationName: 'Fives Nordon' });
       (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockAiResponse(false, 503));
