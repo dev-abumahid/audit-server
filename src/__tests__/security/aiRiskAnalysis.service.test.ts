@@ -979,6 +979,88 @@ describe('ai_risk_analysis_service', () => {
       );
       expect(riskDb.create).toHaveBeenCalledTimes(1);
     });
+
+    // Review finding: fetchFrameworksForPrompt, fetchExistingRiskTitles, and
+    // fetchOrgSuppliersForPrompt had no try/catch, unlike risk_triage's own
+    // handling just above them in runAnalysis -- an unhandled rejection from
+    // any of the three would propagate to the top-level .catch() on
+    // runAnalysis, which only logs, leaving the run stuck at 'running'
+    // forever instead of marked 'failed'. One test per fetch, each
+    // triggered via a real triage response with an applicable category so
+    // runAnalysis actually reaches the Phase-2 fetches.
+    describe('fetch failures before category generation mark the run failed', () => {
+      function mockApplicableTriage() {
+        (fetch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+          if (url.endsWith('/risk_triage')) {
+            return Promise.resolve(
+              mockAiResponse({
+                categories: [
+                  { category: 'cyber', applies: true, reasoning: 'r', estimated_risk_count: 1 },
+                ],
+              }),
+            );
+          }
+          return Promise.resolve(mockAiResponse({}, false, 404));
+        });
+      }
+
+      it('marks the run failed when fetchFrameworksForPrompt (regulatoryFramework.findMany) rejects', async () => {
+        siteDb.findFirst.mockResolvedValue(SITE);
+        runDb.findFirst.mockResolvedValue(null);
+        runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+        mockApplicableTriage();
+        frameworkDb.findMany.mockRejectedValue(new Error('DB connection lost'));
+
+        await ai_risk_analysis_service.start_ai_risk_analysis(
+          makeReq({ body: { siteId: 'site-1' } }),
+        );
+        await flush();
+
+        expect(riskDb.create).not.toHaveBeenCalled();
+        expect(runDb.update).toHaveBeenLastCalledWith({
+          where: { id: 'run-new' },
+          data: expect.objectContaining({ status: 'failed', completed_at: expect.any(Date) }),
+        });
+      });
+
+      it('marks the run failed when fetchExistingRiskTitles (risk.findMany) rejects', async () => {
+        siteDb.findFirst.mockResolvedValue(SITE);
+        runDb.findFirst.mockResolvedValue(null);
+        runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+        mockApplicableTriage();
+        riskDb.findMany.mockRejectedValue(new Error('DB connection lost'));
+
+        await ai_risk_analysis_service.start_ai_risk_analysis(
+          makeReq({ body: { siteId: 'site-1' } }),
+        );
+        await flush();
+
+        expect(riskDb.create).not.toHaveBeenCalled();
+        expect(runDb.update).toHaveBeenLastCalledWith({
+          where: { id: 'run-new' },
+          data: expect.objectContaining({ status: 'failed', completed_at: expect.any(Date) }),
+        });
+      });
+
+      it('marks the run failed when fetchOrgSuppliersForPrompt (supplier.findMany) rejects', async () => {
+        siteDb.findFirst.mockResolvedValue(SITE);
+        runDb.findFirst.mockResolvedValue(null);
+        runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+        mockApplicableTriage();
+        supplierDb.findMany.mockRejectedValue(new Error('DB connection lost'));
+
+        await ai_risk_analysis_service.start_ai_risk_analysis(
+          makeReq({ body: { siteId: 'site-1' } }),
+        );
+        await flush();
+
+        expect(riskDb.create).not.toHaveBeenCalled();
+        expect(runDb.update).toHaveBeenLastCalledWith({
+          where: { id: 'run-new' },
+          data: expect.objectContaining({ status: 'failed', completed_at: expect.any(Date) }),
+        });
+      });
+    });
   });
 
   // CEO bug report: regenerating a site's AI analysis kept re-proposing
@@ -1854,6 +1936,65 @@ describe('ai_risk_analysis_service', () => {
       expect(finalUpdateCall.data.categories_failed).toEqual([
         expect.objectContaining({ category: 'atex' }),
       ]);
+    });
+
+    // Review finding: retryFailedCategories shares the same three unguarded
+    // fetches as runAnalysis (fetchFrameworksForPrompt/fetchExistingRiskTitles/
+    // fetchOrgSuppliersForPrompt), reached via the same shared
+    // fetchPromptSupportData helper -- mirrors the runAnalysis coverage
+    // above for the retry path.
+    describe('fetch failures before category retry mark the run failed', () => {
+      function setUpRunningRetry() {
+        runDb.findFirst.mockResolvedValue(makeFailedRun());
+        siteDb.findFirst.mockResolvedValue(SITE);
+        runDb.update.mockResolvedValue(makeFailedRun({ status: 'running' }));
+        runDb.findUniqueOrThrow.mockResolvedValue(makeFailedRun({ status: 'running' }));
+        runDb.findUnique.mockResolvedValue(makeFailedRun());
+      }
+
+      it('marks the run failed when fetchFrameworksForPrompt (regulatoryFramework.findMany) rejects', async () => {
+        setUpRunningRetry();
+        frameworkDb.findMany.mockRejectedValue(new Error('DB connection lost'));
+
+        await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+        await flush();
+
+        expect(fetch).not.toHaveBeenCalled();
+        expect(riskDb.create).not.toHaveBeenCalled();
+        const finalUpdateCall = runDb.update.mock.calls[runDb.update.mock.calls.length - 1][0];
+        expect(finalUpdateCall.data.status).toBe('failed');
+        expect(finalUpdateCall.data.completed_at).toBeInstanceOf(Date);
+      });
+
+      it('marks the run failed when fetchExistingRiskTitles (risk.findMany) rejects', async () => {
+        setUpRunningRetry();
+        frameworkDb.findMany.mockResolvedValue([]);
+        riskDb.findMany.mockRejectedValue(new Error('DB connection lost'));
+
+        await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+        await flush();
+
+        expect(fetch).not.toHaveBeenCalled();
+        expect(riskDb.create).not.toHaveBeenCalled();
+        const finalUpdateCall = runDb.update.mock.calls[runDb.update.mock.calls.length - 1][0];
+        expect(finalUpdateCall.data.status).toBe('failed');
+        expect(finalUpdateCall.data.completed_at).toBeInstanceOf(Date);
+      });
+
+      it('marks the run failed when fetchOrgSuppliersForPrompt (supplier.findMany) rejects', async () => {
+        setUpRunningRetry();
+        frameworkDb.findMany.mockResolvedValue([]);
+        supplierDb.findMany.mockRejectedValue(new Error('DB connection lost'));
+
+        await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
+        await flush();
+
+        expect(fetch).not.toHaveBeenCalled();
+        expect(riskDb.create).not.toHaveBeenCalled();
+        const finalUpdateCall = runDb.update.mock.calls[runDb.update.mock.calls.length - 1][0];
+        expect(finalUpdateCall.data.status).toBe('failed');
+        expect(finalUpdateCall.data.completed_at).toBeInstanceOf(Date);
+      });
     });
   });
 });

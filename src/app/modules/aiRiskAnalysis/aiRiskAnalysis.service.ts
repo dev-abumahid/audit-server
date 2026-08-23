@@ -475,6 +475,48 @@ async function fetchOrgSuppliersForPrompt(
   }));
 }
 
+// Shared by runAnalysis and retryFailedCategories -- wraps the three
+// prompt-support-data fetches above (frameworks, existing risk titles,
+// supplier references), none of which had a try/catch despite each being a
+// real Prisma query. Same failure mode resolveSiteWebsiteDomain's own
+// comment documents: an unhandled rejection here propagates to the
+// top-level .catch() on runAnalysis/retryFailedCategories, which only
+// logs -- silently leaving the run stuck at status: 'running' forever.
+// Unlike resolveSiteWebsiteDomain's optional org-website lookup, none of
+// this data can be silently dropped (it's required prompt input, not a
+// nice-to-have), so the correct degrade here is the same one risk_triage's
+// own try/catch already uses just above in runAnalysis: mark the run
+// 'failed' and stop, not press on with partial data. Returns null (having
+// already marked the run failed) so both call sites can short-circuit with
+// one `if (!data) return;`, mirroring risk_triage's own early return.
+async function fetchPromptSupportData(
+  runId: string,
+  siteId: string,
+  orgAccountId: string,
+): Promise<{
+  frameworkByRef: Map<string, RegulatoryFrameworkRow>;
+  regulatoryFrameworksPayload: unknown[];
+  existingRiskTitles: ExistingRiskForDedup[];
+  suppliersPayload: { name: string; country?: string }[];
+} | null> {
+  try {
+    const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
+    const existingRiskTitles = await fetchExistingRiskTitles(siteId, orgAccountId);
+    const suppliersPayload = await fetchOrgSuppliersForPrompt(orgAccountId);
+    return { frameworkByRef, regulatoryFrameworksPayload, existingRiskTitles, suppliersPayload };
+  } catch (error) {
+    logger.error(
+      { err: error, runId },
+      'Failed to fetch prompt-support data (frameworks/existing risks/suppliers)',
+    );
+    await prisma.aiRiskAnalysisRun.update({
+      where: { id: runId },
+      data: { status: 'failed', completed_at: new Date() },
+    });
+    return null;
+  }
+}
+
 // Kicks off a new "Analyze with AI" run for a site: resolves/validates the
 // site, enforces the re-run cooldown, creates the AiRiskAnalysisRun row,
 // and hands off the actual two-phase generation to runAnalysis WITHOUT
@@ -735,9 +777,10 @@ async function runAnalysis(
     return;
   }
 
-  const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
-  const existingRiskTitles = await fetchExistingRiskTitles(site.id, ctx.organizationId);
-  const suppliersPayload = await fetchOrgSuppliersForPrompt(ctx.organizationId);
+  const promptSupportData = await fetchPromptSupportData(runId, site.id, ctx.organizationId);
+  if (!promptSupportData) return;
+  const { frameworkByRef, regulatoryFrameworksPayload, existingRiskTitles, suppliersPayload } =
+    promptSupportData;
 
   const outcomes = await Promise.allSettled(
     applicable.map((category, index) =>
@@ -816,9 +859,10 @@ async function retryFailedCategories(
     );
 
   const siteProfile = await buildSiteProfile(site, ctx.organizationId);
-  const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
-  const existingRiskTitles = await fetchExistingRiskTitles(site.id, ctx.organizationId);
-  const suppliersPayload = await fetchOrgSuppliersForPrompt(ctx.organizationId);
+  const promptSupportData = await fetchPromptSupportData(runId, site.id, ctx.organizationId);
+  if (!promptSupportData) return;
+  const { frameworkByRef, regulatoryFrameworksPayload, existingRiskTitles, suppliersPayload } =
+    promptSupportData;
 
   const outcomes = await Promise.allSettled(
     toRetry.map((category, index) =>
