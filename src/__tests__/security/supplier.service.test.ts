@@ -178,6 +178,50 @@ describe('supplier service — org scoping', () => {
     });
   });
 
+  describe('duplicate-name race (case-insensitive per-org unique index)', () => {
+    it('resolves a P2002 create race to a clean 409, not a raw 500', async () => {
+      mockMembership('ADMIN');
+      const { Prisma } = await import('@prisma/client');
+      db.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+      );
+
+      await expect(
+        supplier_service.create_supplier_into_db(makeReq({ body: { name: 'Acme Steel' } })),
+      ).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('resolves a P2002 update race to a clean 409, not a raw 500', async () => {
+      mockMembership('ADMIN');
+      db.findFirst.mockResolvedValue({ id: 's1', org_account_id: ANCHOR });
+      const { Prisma } = await import('@prisma/client');
+      db.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+      );
+
+      await expect(
+        supplier_service.update_supplier_into_db(
+          makeReq({ params: { id: 's1' }, body: { name: 'Acme Steel' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('a non-P2002 create error still propagates as-is', async () => {
+      mockMembership('ADMIN');
+      db.create.mockRejectedValue(new Error('connection lost'));
+
+      await expect(
+        supplier_service.create_supplier_into_db(makeReq({ body: { name: 'Acme Steel' } })),
+      ).rejects.toThrow('connection lost');
+    });
+  });
+
   describe('discover_suppliers_for_org (zero-input discovery, mirrors onboarding site discovery)', () => {
     it('LEAD_AUDITOR (a writer role) can trigger AI supplier discovery', async () => {
       mockMembership('LEAD_AUDITOR');

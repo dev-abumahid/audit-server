@@ -25,5 +25,15 @@ model Supplier {
     createdAt      DateTime @default(now())
     updatedAt      DateTime @updatedAt
 
+    // Round-7 finding from the aexa-frontend Supplier quality-bar-loop: the
+    // frontend's own AI-discovery dedup (case/whitespace-insensitive name
+    // match, checked client-side before calling this create endpoint) was
+    // the ONLY thing preventing a duplicate -- verified live that two
+    // identical-name POSTs both succeeded with a plain 200. A case-
+    // insensitive, per-org unique index (org_account_id + lower(trim(name)))
+    // is enforced via a hand-written index in the migration (see
+    // migration.sql) -- Prisma's schema DSL has no functional-index syntax,
+    // same reason FindingAssignment/InspectionAssignment's partial unique
+    // indexes are hand-added rather than expressed as @@unique here.
     @@index([org_account_id])
 }

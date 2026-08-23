@@ -67,8 +67,23 @@ const create_supplier_into_db = async (req: Request) => {
   assertCanWriteOrgResource(ctx);
   const payload = req.body;
   payload.org_account_id = ctx.organizationId;
-  const result = await prisma.supplier.create({ data: payload });
-  return result;
+  try {
+    const result = await prisma.supplier.create({ data: payload });
+    return result;
+  } catch (err) {
+    // A case-insensitive per-org unique index on (org_account_id,
+    // lower(trim(name))) was added by hand in the migration (Prisma's
+    // schema DSL has no functional-index syntax) after the frontend's own
+    // client-side AI-discovery dedup turned out to be the ONLY thing
+    // preventing a duplicate -- see supplier.prisma's comment. Without this
+    // catch, a race (two tabs, a slow dedup fetch, the manual-add form used
+    // for a name just AI-added) surfaces as a raw 500 instead of the same
+    // clean 409 every other unique-constraint race in this codebase returns.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw new AppError('A supplier with this name already exists', 409);
+    }
+    throw err;
+  }
 };
 
 const update_supplier_into_db = async (req: Request) => {
@@ -83,11 +98,21 @@ const update_supplier_into_db = async (req: Request) => {
   // Never trust org_account_id from the request body on an update -- same
   // cross-tenant integrity guard site.service.ts's update already applies.
   const { org_account_id: _ignored, ...safeBody } = req.body;
-  const result = await prisma.supplier.update({
-    where: { id },
-    data: { ...safeBody, org_account_id: ctx.organizationId },
-  });
-  return result;
+  try {
+    const result = await prisma.supplier.update({
+      where: { id },
+      data: { ...safeBody, org_account_id: ctx.organizationId },
+    });
+    return result;
+  } catch (err) {
+    // Same race as create_supplier_into_db -- renaming a supplier to a
+    // name that collides with another existing one hits the same
+    // case-insensitive per-org unique index.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw new AppError('A supplier with this name already exists', 409);
+    }
+    throw err;
+  }
 };
 
 const delete_supplier_from_db = async (req: Request) => {
