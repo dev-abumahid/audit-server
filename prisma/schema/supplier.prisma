@@ -1,3 +1,31 @@
+// Qualitative vendor-risk tier -- deliberately a simple 3-value enum, not
+// wired into Risk's own probability x impact scoring model (that's a much
+// larger integration, out of scope here). Nullable: a hand-entered or
+// freshly-discovered supplier has no tier until someone assesses it.
+enum SupplierRiskTier {
+    LOW
+    MEDIUM
+    HIGH
+}
+
+// A supplier's own lifecycle, distinct from ai_generated/source_info below
+// (which describe how the ROW was created, not the vendor relationship's
+// current state). Defaults to ACTIVE -- a freshly hand-entered or AI-
+// accepted supplier is presumed to be a real, current vendor relationship
+// unless someone marks it otherwise; UNDER_REVIEW/INACTIVE are deliberate
+// user actions, not states a supplier can arrive in on its own.
+enum SupplierStatus {
+    ACTIVE
+    UNDER_REVIEW
+    INACTIVE
+}
+
+enum SupplierContractStatus {
+    ACTIVE
+    EXPIRED
+    PENDING
+}
+
 // External-data-anchoring plan, supply_chain risk category. Added
 // specifically because no supplier/vendor data model existed anywhere in
 // this codebase -- the AI risk-generation pipeline had no way to screen
@@ -13,6 +41,18 @@ model Supplier {
     name           String
     country        String?
     notes          String?
+    // Vendor-risk fields (aexa-frontend quality-bar-loop, industry-standards
+    // axis): a supplier record with just name/country/notes couldn't answer
+    // "which suppliers need attention," only "who is a supplier" -- these
+    // close that gap. All nullable except `status` -- enrichment data a
+    // reviewer fills in over time, not required at creation (mirrors the
+    // existing "name is the only required field" philosophy below).
+    risk_tier             SupplierRiskTier?
+    next_review_date      DateTime?
+    primary_contact_name  String?
+    primary_contact_email String?
+    contract_status       SupplierContractStatus?
+    status                SupplierStatus           @default(ACTIVE)
     // Mirrors Site's ai_generated/source_info pair (zero-input onboarding,
     // #96): a supplier discovered via AI web search rather than hand-
     // entered, with source_info carrying the citation so a reviewer can
@@ -36,4 +76,8 @@ model Supplier {
     // same reason FindingAssignment/InspectionAssignment's partial unique
     // indexes are hand-added rather than expressed as @@unique here.
     @@index([org_account_id])
+    // Supports the list's new status/risk-tier filters (aexa-frontend
+    // quality-bar-loop follow-up) without a full table scan per org.
+    @@index([org_account_id, status])
+    @@index([org_account_id, risk_tier])
 }

@@ -23,6 +23,23 @@ router.post(
   RequestValidator(supplier_validations.discover_suppliers),
   supplier_controller.discover_suppliers,
 );
+// Bulk actions -- POST (not DELETE-with-body) for both, same convention
+// as risk.route.ts's bulk-approve/bulk-dismiss. Placed before /:id for the
+// same reason /discover is: readability grouping with the other fixed-path
+// routes (Express matches by HTTP method + path, so a POST here never
+// collides with the GET/PATCH/DELETE /:id routes regardless of order).
+router.post(
+  '/bulk-status',
+  auth('ORGANIZATION'),
+  RequestValidator(supplier_validations.bulk_update_status),
+  supplier_controller.bulk_update_status,
+);
+router.post(
+  '/bulk-delete',
+  auth('ORGANIZATION'),
+  RequestValidator(supplier_validations.bulk_delete),
+  supplier_controller.bulk_delete,
+);
 router.get('/:id', auth('ORGANIZATION'), supplier_controller.get_single_supplier);
 router.patch(
   '/:id',

@@ -13,8 +13,18 @@ import {
   wrapAiServiceError,
 } from '../ai/ai.service.js';
 
+// Allow-listed sort columns only -- req.query.sortBy is untrusted input,
+// and Prisma's orderBy key is a plain object property name, so an
+// unvalidated value would let a caller probe for the existence of
+// arbitrary model fields (or at minimum crash the query) rather than a
+// real injection risk. Same reasoning as any allow-listed dynamic field.
+const SUPPLIER_SORTABLE_FIELDS = ['name', 'risk_tier', 'next_review_date', 'createdAt'] as const;
+type SupplierSortableField = (typeof SUPPLIER_SORTABLE_FIELDS)[number];
+const isSupplierSortableField = (value: unknown): value is SupplierSortableField =>
+  SUPPLIER_SORTABLE_FIELDS.includes(value as SupplierSortableField);
+
 const get_all_supplier_from_db = async (req: Request) => {
-  const { searchTerm, page, limit } = req.query;
+  const { searchTerm, page, limit, status, risk_tier, sortBy, sortOrder } = req.query;
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
 
@@ -29,14 +39,19 @@ const get_all_supplier_from_db = async (req: Request) => {
         mode: 'insensitive',
       },
     }),
+    ...(status && { status: status as Prisma.SupplierWhereInput['status'] }),
+    ...(risk_tier && { risk_tier: risk_tier as Prisma.SupplierWhereInput['risk_tier'] }),
   };
+  const sortField: SupplierSortableField = isSupplierSortableField(sortBy) ? sortBy : 'createdAt';
+  const sortDirection: Prisma.SortOrder = sortOrder === 'asc' ? 'asc' : 'desc';
+
   const [data, total] = await Promise.all([
     prisma.supplier.findMany({
       where: whereCondition,
       skip,
       take: limitNumber,
       orderBy: {
-        createdAt: 'desc',
+        [sortField]: sortDirection,
       },
     }),
     prisma.supplier.count({
@@ -113,6 +128,53 @@ const update_supplier_into_db = async (req: Request) => {
     }
     throw err;
   }
+};
+
+type BulkSupplierOutcome = { updated: number; skipped: number };
+
+// Bulk status change + bulk delete (aexa-frontend quality-bar-loop,
+// industry-standards axis: a vendor list of any real size needs a way to
+// act on more than one row at a time). Mirrors risk.service.ts's
+// bulk_approve_risks_into_db/bulk_dismiss_risks_into_db shape exactly --
+// reject the whole batch on a cross-org id (can't arise from legitimate
+// client use, unlike an ordinary race), updateMany for the rest.
+const bulk_update_status_into_db = async (req: Request): Promise<BulkSupplierOutcome> => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { supplierIds, status } = req.body as { supplierIds: string[]; status: string };
+
+  const ownedCount = await prisma.supplier.count({
+    where: { id: { in: supplierIds }, org_account_id: ctx.organizationId },
+  });
+  if (ownedCount !== supplierIds.length) {
+    throw new AppError('One or more suppliers do not belong to this organization.', 400);
+  }
+
+  const outcome = await prisma.supplier.updateMany({
+    where: { id: { in: supplierIds }, org_account_id: ctx.organizationId },
+    data: { status: status as Prisma.SupplierUpdateManyMutationInput['status'] },
+  });
+  return { updated: outcome.count, skipped: supplierIds.length - outcome.count };
+};
+
+const bulk_delete_suppliers_from_db = async (req: Request): Promise<BulkSupplierOutcome> => {
+  const user = req.user as JwtPayloadType;
+  const ctx = await resolveCallerOrgContext(user.accountId);
+  assertCanWriteOrgResource(ctx);
+  const { supplierIds } = req.body as { supplierIds: string[] };
+
+  const ownedCount = await prisma.supplier.count({
+    where: { id: { in: supplierIds }, org_account_id: ctx.organizationId },
+  });
+  if (ownedCount !== supplierIds.length) {
+    throw new AppError('One or more suppliers do not belong to this organization.', 400);
+  }
+
+  const outcome = await prisma.supplier.deleteMany({
+    where: { id: { in: supplierIds }, org_account_id: ctx.organizationId },
+  });
+  return { updated: outcome.count, skipped: supplierIds.length - outcome.count };
 };
 
 const delete_supplier_from_db = async (req: Request) => {
@@ -215,4 +277,6 @@ export const supplier_service = {
   update_supplier_into_db,
   delete_supplier_from_db,
   discover_suppliers_for_org,
+  bulk_update_status_into_db,
+  bulk_delete_suppliers_from_db,
 };

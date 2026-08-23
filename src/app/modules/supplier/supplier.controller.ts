@@ -68,6 +68,28 @@ const discover_suppliers = catchAsync(async (req, res) => {
   });
 });
 
+const bulk_update_status = catchAsync(async (req, res) => {
+  const result = await supplier_service.bulk_update_status_into_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Suppliers updated successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
+const bulk_delete = catchAsync(async (req, res) => {
+  const result = await supplier_service.bulk_delete_suppliers_from_db(req);
+  manageResponse(res, {
+    success: true,
+    statusCode: 200,
+    message: 'Suppliers deleted successfully.',
+    data: result,
+    meta: {},
+  });
+});
+
 export const supplier_controller = {
   get_all_supplier,
   get_single_supplier,
@@ -75,4 +97,6 @@ export const supplier_controller = {
   update_supplier,
   delete_supplier,
   discover_suppliers,
+  bulk_update_status,
+  bulk_delete,
 };

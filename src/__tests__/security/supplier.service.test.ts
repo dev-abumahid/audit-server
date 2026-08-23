@@ -13,7 +13,9 @@ vi.mock('../../app/lib/prisma.js', () => ({
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
+      deleteMany: vi.fn(),
       count: vi.fn(),
     },
     organizationProfile: {
@@ -308,6 +310,133 @@ describe('supplier service — org scoping', () => {
       await expect(
         supplier_service.discover_suppliers_for_org(makeReq({ body: {} })),
       ).rejects.toMatchObject({ statusCode: 500, message: 'Failed to discover suppliers' });
+    });
+  });
+
+  describe('get_all_supplier_from_db (sort/filter)', () => {
+    beforeEach(() => {
+      mockMembership('ADMIN');
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+    });
+
+    it('defaults to sorting by createdAt desc when no sortBy is given', async () => {
+      await supplier_service.get_all_supplier_from_db(makeReq({ query: {} }));
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { createdAt: 'desc' } }),
+      );
+    });
+
+    it('sorts by an allow-listed field with an explicit sortOrder', async () => {
+      await supplier_service.get_all_supplier_from_db(
+        makeReq({ query: { sortBy: 'name', sortOrder: 'asc' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { name: 'asc' } }),
+      );
+    });
+
+    it('falls back to createdAt for a sortBy value not on the allow-list, rather than passing it through to Prisma', async () => {
+      await supplier_service.get_all_supplier_from_db(
+        makeReq({ query: { sortBy: 'org_account_id' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { createdAt: 'desc' } }),
+      );
+    });
+
+    it('filters by status and risk_tier when provided', async () => {
+      await supplier_service.get_all_supplier_from_db(
+        makeReq({ query: { status: 'UNDER_REVIEW', risk_tier: 'HIGH' } }),
+      );
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: 'UNDER_REVIEW', risk_tier: 'HIGH' }),
+        }),
+      );
+    });
+
+    it('omits status/risk_tier from the where clause when not provided', async () => {
+      await supplier_service.get_all_supplier_from_db(makeReq({ query: {} }));
+
+      const whereArg = db.findMany.mock.calls[0][0].where;
+      expect(whereArg).not.toHaveProperty('status');
+      expect(whereArg).not.toHaveProperty('risk_tier');
+    });
+  });
+
+  describe('bulk_update_status_into_db', () => {
+    beforeEach(() => mockMembership('ADMIN'));
+
+    it('updates every supplier in the list to the given status', async () => {
+      db.count.mockResolvedValue(2);
+      db.updateMany.mockResolvedValue({ count: 2 });
+
+      const result = await supplier_service.bulk_update_status_into_db(
+        makeReq({ body: { supplierIds: ['s1', 's2'], status: 'INACTIVE' } }),
+      );
+
+      expect(db.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['s1', 's2'] }, org_account_id: ORG_A },
+        data: { status: 'INACTIVE' },
+      });
+      expect(result).toEqual({ updated: 2, skipped: 0 });
+    });
+
+    it('rejects the whole batch with 400 when a supplierId belongs to a different org', async () => {
+      // Only 1 of the 2 ids actually resolves under this org's scope.
+      db.count.mockResolvedValue(1);
+
+      await expect(
+        supplier_service.bulk_update_status_into_db(
+          makeReq({ body: { supplierIds: ['s1', 'cross-org-supplier'], status: 'INACTIVE' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+      expect(db.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('a VIEWER cannot bulk-update supplier status', async () => {
+      mockMembership('VIEWER');
+
+      await expect(
+        supplier_service.bulk_update_status_into_db(
+          makeReq({ body: { supplierIds: ['s1'], status: 'INACTIVE' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(db.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('bulk_delete_suppliers_from_db', () => {
+    beforeEach(() => mockMembership('ADMIN'));
+
+    it('deletes every supplier in the list', async () => {
+      db.count.mockResolvedValue(2);
+      db.deleteMany.mockResolvedValue({ count: 2 });
+
+      const result = await supplier_service.bulk_delete_suppliers_from_db(
+        makeReq({ body: { supplierIds: ['s1', 's2'] } }),
+      );
+
+      expect(db.deleteMany).toHaveBeenCalledWith({
+        where: { id: { in: ['s1', 's2'] }, org_account_id: ORG_A },
+      });
+      expect(result).toEqual({ updated: 2, skipped: 0 });
+    });
+
+    it('rejects the whole batch with 400 when a supplierId belongs to a different org', async () => {
+      db.count.mockResolvedValue(1);
+
+      await expect(
+        supplier_service.bulk_delete_suppliers_from_db(
+          makeReq({ body: { supplierIds: ['s1', 'cross-org-supplier'] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 400 });
+      expect(db.deleteMany).not.toHaveBeenCalled();
     });
   });
 });
