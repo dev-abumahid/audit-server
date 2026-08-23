@@ -589,6 +589,19 @@ const create_risk_from_item_into_db = async (req: Request) => {
               : null,
           status: 'open',
           ai_generated: true,
+          // Every field on this Risk (name, description, category, scores)
+          // is derived directly from the AI-analyzed IntelligenceItem, not
+          // authored or edited by the caller -- same "AI-generated content
+          // needs a human review step before it's live" policy
+          // aiRiskAnalysis.service.ts's persistGeneratedRisk already
+          // enforces (docs/design-docs/ai-risk-review-approval-workflow.md).
+          // Omitting this let the schema default (APPROVED) apply, so a
+          // promoted item skipped PENDING_REVIEW entirely and landed
+          // straight in the register/dashboard/EBITDA/KRI calculations with
+          // no human ever reviewing the risk's actual generated content --
+          // clicking "Create Risk" only reviews the source intelligence
+          // item, not the risk fields this creates from it.
+          review_status: 'PENDING_REVIEW',
           is_edited: false,
           site_id: site.id,
           source_info: item.source_evidence ?? item.link ?? null,

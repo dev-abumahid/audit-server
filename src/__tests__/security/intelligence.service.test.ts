@@ -695,6 +695,14 @@ describe('intelligence service', () => {
           ai_generated: true,
           is_edited: false,
           site_id: 'site-1',
+          // Every field on this Risk is AI-derived from the analyzed item,
+          // not authored/edited by the caller -- must land as
+          // PENDING_REVIEW like every other AI-generated risk, not skip
+          // straight to the schema's APPROVED default (found via
+          // independent review: omitting this field entirely let an
+          // AI-generated risk bypass the review gate and flow straight
+          // into the register/dashboard/EBITDA/KRI calculations).
+          review_status: 'PENDING_REVIEW',
         }),
       });
       expect(itemDb.updateMany).toHaveBeenCalledWith({
