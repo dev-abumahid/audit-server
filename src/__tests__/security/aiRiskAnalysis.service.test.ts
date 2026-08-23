@@ -21,6 +21,7 @@ vi.mock('../../app/lib/prisma.js', () => ({
     orgMember: { findUnique: vi.fn() },
     organization: { findUnique: vi.fn() },
     organizationProfile: { findUnique: vi.fn() },
+    supplier: { findMany: vi.fn() },
   },
 }));
 
@@ -39,6 +40,7 @@ const orgProfileDb = prisma.organizationProfile as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
+const supplierDb = prisma.supplier as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 const SITE = {
   id: 'site-1',
@@ -76,6 +78,7 @@ describe('ai_risk_analysis_service', () => {
       Promise.resolve({ id: 'risk-new', ref: 'GEN-001', ...args.data }),
     );
     frameworkDb.findMany.mockResolvedValue([]);
+    supplierDb.findMany.mockResolvedValue([]);
     runDb.update.mockResolvedValue({});
     // Default: the guarded updateMany "wins" the race (count: 1) --
     // individual tests override to simulate a lost race (count: 0).
@@ -1256,6 +1259,39 @@ describe('ai_risk_analysis_service', () => {
       );
       const sentBody = JSON.parse(categoryGenCall![1].body as string);
       expect(sentBody.existing_risks).toEqual([{ title: 'Cyber intrusion' }]);
+    });
+
+    it("sends the org's suppliers to aexa-ai as {name, country} regardless of which site is analyzed", async () => {
+      // aexa-ai#228: suppliers are org-scoped, not site-scoped -- confirms
+      // the query filters by org only (not site.id) and the wire shape is
+      // slimmed to just {name, country}, dropping notes/ai_generated/
+      // source_info/id, same "minimal wire shape" convention as
+      // existing_risks's {title}-only payload above.
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      supplierDb.findMany.mockResolvedValue([
+        { name: 'Acme Steel', country: 'France' },
+        { name: 'No Country Co', country: null },
+      ]);
+      mockGenerationFlow('supply_chain', []);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(supplierDb.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { org_account_id: ORG_A } }),
+      );
+      const categoryGenCall = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(([url]) =>
+        (url as string).endsWith('/risk_category_generation'),
+      );
+      const sentBody = JSON.parse(categoryGenCall![1].body as string);
+      expect(sentBody.site_suppliers).toEqual([
+        { name: 'Acme Steel', country: 'France' },
+        { name: 'No Country Co' },
+      ]);
     });
 
     // External-data-anchoring plan, Phase 0a: source_type/source_reference

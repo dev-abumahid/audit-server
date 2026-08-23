@@ -76,6 +76,10 @@ const CATEGORY_CALL_STAGGER_MS = 300;
 const MAX_EXISTING_RISKS_FOR_DEDUP = 200;
 const MAX_EXISTING_RISK_TITLE_LENGTH = 200;
 const MAX_REGULATORY_FRAMEWORKS = 50;
+// External-data-anchoring plan, supply_chain category (aexa-ai#228) --
+// matches that repo's own MAX_SUPPLIERS cap on the request schema, kept
+// in sync by hand like every other cross-repo constant in this file.
+const MAX_SUPPLIERS_FOR_PROMPT = 100;
 
 // design-docs/site-ai-risk-register-generation.md §6: the free-text
 // "existing risks" prompt hint sent to aexa-ai (below) is explicitly
@@ -449,6 +453,28 @@ async function fetchExistingRiskTitles(
   }));
 }
 
+// External-data-anchoring plan, supply_chain category (aexa-ai#228) --
+// Supplier rows are org-scoped, not site-scoped (a company's supplier
+// relationships are typically org-wide, not tied to one site), so unlike
+// fetchExistingRiskTitles this queries by org only, regardless of which
+// site is being analyzed. Slimmed to just {name, country} for the wire,
+// matching aexa-ai's SupplierReference schema exactly -- same
+// keep-the-wire-shape-minimal convention as existing_risks's {title}-only
+// payload above.
+async function fetchOrgSuppliersForPrompt(
+  orgAccountId: string,
+): Promise<{ name: string; country?: string }[]> {
+  const suppliers = await prisma.supplier.findMany({
+    where: { org_account_id: orgAccountId },
+    select: { name: true, country: true },
+    take: MAX_SUPPLIERS_FOR_PROMPT,
+  });
+  return suppliers.map((s) => ({
+    name: s.name,
+    ...(s.country ? { country: s.country } : {}),
+  }));
+}
+
 // Kicks off a new "Analyze with AI" run for a site: resolves/validates the
 // site, enforces the re-run cooldown, creates the AiRiskAnalysisRun row,
 // and hands off the actual two-phase generation to runAnalysis WITHOUT
@@ -711,6 +737,7 @@ async function runAnalysis(
 
   const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
   const existingRiskTitles = await fetchExistingRiskTitles(site.id, ctx.organizationId);
+  const suppliersPayload = await fetchOrgSuppliersForPrompt(ctx.organizationId);
 
   const outcomes = await Promise.allSettled(
     applicable.map((category, index) =>
@@ -725,6 +752,7 @@ async function runAnalysis(
           regulatoryFrameworksPayload,
           existingRiskTitles,
           frameworkByRef,
+          suppliersPayload,
         ),
       ),
     ),
@@ -790,6 +818,7 @@ async function retryFailedCategories(
   const siteProfile = await buildSiteProfile(site, ctx.organizationId);
   const { frameworkByRef, regulatoryFrameworksPayload } = await fetchFrameworksForPrompt();
   const existingRiskTitles = await fetchExistingRiskTitles(site.id, ctx.organizationId);
+  const suppliersPayload = await fetchOrgSuppliersForPrompt(ctx.organizationId);
 
   const outcomes = await Promise.allSettled(
     toRetry.map((category, index) =>
@@ -804,6 +833,7 @@ async function retryFailedCategories(
           regulatoryFrameworksPayload,
           existingRiskTitles,
           frameworkByRef,
+          suppliersPayload,
         ),
       ),
     ),
@@ -866,6 +896,7 @@ async function runCategoryGeneration(
   regulatoryFrameworksPayload: unknown[],
   existingRiskTitles: ExistingRiskForDedup[],
   frameworkByRef: Map<string, RegulatoryFrameworkRow>,
+  suppliersPayload: { name: string; country?: string }[],
 ): Promise<void> {
   const body = {
     category: triageCategory.category,
@@ -877,6 +908,10 @@ async function runCategoryGeneration(
     // fields on ExistingRiskForDedup are for the enforced check below,
     // server-side only, not sent over the wire.
     existing_risks: existingRiskTitles.map((r) => ({ title: r.title })),
+    // aexa-ai#228: same org-wide supplier list sent for every category
+    // call this run makes -- only the supply_chain dispatch actually acts
+    // on it, the rest ignore it (aexa-ai's schema accepts it unconditionally).
+    site_suppliers: suppliersPayload,
   };
 
   const generation = await callAiJson('/risk_category_generation', body, ctx.organizationId);
