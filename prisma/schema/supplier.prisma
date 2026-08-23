@@ -1,0 +1,29 @@
+// External-data-anchoring plan, supply_chain risk category. Added
+// specifically because no supplier/vendor data model existed anywhere in
+// this codebase -- the AI risk-generation pipeline had no way to screen
+// real supplier names against external registries, since it only ever
+// received the site's own name/location/country/activity. Org-scoped
+// (not site-scoped) since a company's supplier relationships are
+// typically org-wide, not tied to a single site, matching the existing
+// OrganizationProfile pattern.
+model Supplier {
+    id             String   @id @default(uuid())
+    org_account_id String
+    account        Account  @relation(fields: [org_account_id], references: [id], onDelete: Cascade)
+    name           String
+    country        String?
+    notes          String?
+    // Mirrors Site's ai_generated/source_info pair (zero-input onboarding,
+    // #96): a supplier discovered via AI web search rather than hand-
+    // entered, with source_info carrying the citation so a reviewer can
+    // verify it. Discovery is a draft/review step (see the /supplier/
+    // discover endpoint) -- nothing is persisted here until the user
+    // accepts a candidate, same as onboarding's draft-sites-then-commit
+    // pattern, so there is no separate "pending review" status needed.
+    ai_generated   Boolean  @default(false)
+    source_info    String?
+    createdAt      DateTime @default(now())
+    updatedAt      DateTime @updatedAt
+
+    @@index([org_account_id])
+}

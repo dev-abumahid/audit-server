@@ -22,6 +22,7 @@ import reportRoute from './app/modules/report/report.route.js';
 import riskRoute from './app/modules/risk/risk.route.js';
 import riskLinkRoute from './app/modules/risk_link/risk_link.route.js';
 import siteRoute from './app/modules/site/site.route.js';
+import supplierRoute from './app/modules/supplier/supplier.route.js';
 import templateRoute from './app/modules/template/template.route.js';
 
 const appRouter = Router();
@@ -48,6 +49,7 @@ const moduleRoutes = [
   { path: '/report', route: reportRoute },
   { path: '/action', route: actionRoute },
   { path: '/site', route: siteRoute },
+  { path: '/supplier', route: supplierRoute },
   { path: '/template', route: templateRoute },
   { path: '/profile', route: profileRoute },
   { path: '/organization', route: organizationRoute },
