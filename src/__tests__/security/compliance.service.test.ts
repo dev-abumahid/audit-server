@@ -2228,6 +2228,24 @@ describe('compliance obligation <-> risk linking (aexa-server#346)', () => {
       expect(db.update).not.toHaveBeenCalled();
     });
 
+    // Re-run/staleness fix
+    it('409s when the risk was superseded', async () => {
+      db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: null });
+      riskDb.findFirst.mockResolvedValue({
+        id: 'risk-1',
+        org_account_id: ORG_A,
+        review_status: 'APPROVED',
+        supersededAt: new Date('2026-08-24T00:00:00Z'),
+      });
+
+      await expect(
+        compliance_service.link_risk_to_obligation_into_db(
+          makeReq({ params: { id: 'obl-1' }, body: { riskId: 'risk-1' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
     it('allows linking a PENDING_REVIEW risk (unreviewed, but not rejected)', async () => {
       db.findFirst.mockResolvedValue({ id: 'obl-1', org_account_id: ORG_A, risk_id: null });
       riskDb.findFirst.mockResolvedValue({

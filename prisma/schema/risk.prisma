@@ -229,6 +229,24 @@ model Risk {
     // persistGeneratedRisk, not relying on this default.
     review_status              RiskReviewStatus @default(APPROVED)
 
+    // Re-run/staleness fix: when a re-analysis run's fuzzy-dedup match
+    // (isDuplicateOfExistingRisk in aiRiskAnalysis.service.ts) finds a risk
+    // that already exists, the old behavior silently skipped creating the
+    // new one -- a stale external citation (SEC/EPA/Eurostat data) then
+    // sat untouched forever. Now the new risk is created and this old
+    // row's supersededAt/supersededByRiskId are set instead, in the same
+    // transaction. The row is NEVER deleted or hidden from its own detail
+    // page -- only excluded from "current risk" list/aggregate/dashboard
+    // views by a default `supersededAt: null` filter, same soft-supersede
+    // shape RiskApproval.invalidatedAt/invalidatedById already uses.
+    // SetNull (not Restrict/Cascade): deleting the superseding risk should
+    // never block deletion or destroy the superseded row's own audit
+    // trail -- it just loses the forward pointer.
+    supersededAt           DateTime?
+    supersededByRiskId     String?
+    supersededBy           Risk?     @relation("RiskSupersession", fields: [supersededByRiskId], references: [id], onDelete: SetNull)
+    supersededRisks        Risk[]    @relation("RiskSupersession")
+
     createdAt             DateTime @default(now())
     updatedAt             DateTime @updatedAt
 
@@ -275,6 +293,11 @@ model Risk {
     // Register listing and several filtered read paths query by both
     // together on every load (see the design doc's filtering table).
     @@index([org_account_id, review_status])
+    @@index([supersededByRiskId])
+    // Nearly every "current risk" list/aggregate/dashboard read path now
+    // filters org_account_id + supersededAt: null together -- same
+    // reasoning as the review_status composite index above.
+    @@index([org_account_id, supersededAt])
 }
 
 // aexa-frontend#142 — explicit risk-to-risk relationship table, mirroring

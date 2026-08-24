@@ -18,7 +18,7 @@ import { buildPaginationMeta, paginationHelper } from '../../utils/paginationHel
 const assertRiskRefExists = async (orgAccountId: string, ref: string): Promise<void> => {
   const risk = await prisma.risk.findFirst({
     where: { org_account_id: orgAccountId, ref },
-    select: { id: true, review_status: true },
+    select: { id: true, review_status: true, supersededAt: true },
   });
   if (!risk) {
     throw new AppError(`Risk with ref "${ref}" not found in this organization`, 404);
@@ -30,6 +30,10 @@ const assertRiskRefExists = async (orgAccountId: string, ref: string): Promise<v
   // can still be a legitimate link target while awaiting review.
   if (risk.review_status === 'DISMISSED') {
     throw new AppError(`Risk with ref "${ref}" was dismissed and can't be linked`, 409);
+  }
+  // Re-run/staleness fix: same guard extended to a superseded risk.
+  if (risk.supersededAt) {
+    throw new AppError(`Risk with ref "${ref}" was superseded and can't be linked`, 409);
   }
 };
 

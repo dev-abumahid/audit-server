@@ -630,6 +630,21 @@ describe('audit service — org scoping (issue #92)', () => {
       expect(db.create).not.toHaveBeenCalled();
     });
 
+    // Re-run/staleness fix
+    it('create REJECTS a superseded risk id with 409 and writes nothing', async () => {
+      // Both ids exist (first count), neither dismissed (second count = 0),
+      // one superseded (third count).
+      riskDb.count.mockResolvedValueOnce(2).mockResolvedValueOnce(0).mockResolvedValue(1);
+
+      await expect(
+        audit_service.create_audit_into_db(
+          makeReq({ body: { title: 'x', status: 'planned', riskIds: [RISK_1, RISK_2] } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+
+      expect(db.create).not.toHaveBeenCalled();
+    });
+
     it('create with no riskIds writes no risks relation at all', async () => {
       db.create.mockResolvedValue({ id: 'a1', org_account_id: ORG_A, risks: [] });
 

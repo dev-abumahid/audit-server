@@ -68,11 +68,11 @@ describe('risk_link_service', () => {
 
       expect(riskDb.findFirst).toHaveBeenCalledWith({
         where: { org_account_id: ORG_A, ref: 'CYB-001' },
-        select: { id: true, review_status: true },
+        select: { id: true, review_status: true, supersededAt: true },
       });
       expect(riskDb.findFirst).toHaveBeenCalledWith({
         where: { org_account_id: ORG_A, ref: 'OPS-002' },
-        select: { id: true, review_status: true },
+        select: { id: true, review_status: true, supersededAt: true },
       });
       expect(linkDb.create).toHaveBeenCalledWith({
         data: {
@@ -88,6 +88,22 @@ describe('risk_link_service', () => {
     // docs/design-docs/ai-risk-review-approval-workflow.md, open item 1
     it('409s when a ref resolves to a DISMISSED risk', async () => {
       riskDb.findFirst.mockResolvedValue({ id: 'risk-1', review_status: 'DISMISSED' });
+
+      await expect(
+        risk_link_service.create_risk_link_into_db(
+          makeReq({ body: { source_ref: 'CYB-001', target_ref: 'OPS-002', link_type: 'CAUSES' } }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(linkDb.create).not.toHaveBeenCalled();
+    });
+
+    // Re-run/staleness fix
+    it('409s when a ref resolves to a superseded risk', async () => {
+      riskDb.findFirst.mockResolvedValue({
+        id: 'risk-1',
+        review_status: 'APPROVED',
+        supersededAt: new Date('2026-08-24T00:00:00Z'),
+      });
 
       await expect(
         risk_link_service.create_risk_link_into_db(

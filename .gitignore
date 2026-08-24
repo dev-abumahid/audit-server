@@ -6,8 +6,6 @@ dist/
 build/
 
 # Env files
-.env
-.env.production
 
 # Logs
 logs/
@@ -27,7 +25,6 @@ prisma/generated/
 coverage/
 
 # IDE/editor
-.vscode/
 .idea/
 
 # Docker 
@@ -37,3 +34,4 @@ coverage/
 
 # Local file uploads (created at runtime; Docker build creates it in the image)
 /uploads/
+config.bat

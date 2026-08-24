@@ -46,8 +46,13 @@ const get_correlation_matrix_data = async (req: Request) => {
     prisma.risk.findMany({
       // docs/design-docs/ai-risk-review-approval-workflow.md -- feeds the
       // correlation matrix and page-rank graph, neither of which should
-      // ever show unreviewed AI risks.
-      where: { org_account_id: ctx.organizationId, review_status: 'APPROVED' },
+      // ever show unreviewed AI risks. Re-run/staleness fix: nor a
+      // superseded (stale) risk.
+      where: {
+        org_account_id: ctx.organizationId,
+        review_status: 'APPROVED',
+        supersededAt: null,
+      },
       orderBy: { createdAt: 'asc' },
     }),
     prisma.riskLink.findMany({
@@ -195,9 +200,14 @@ const run_root_cause_bucketing = async (req: Request) => {
     const [organizationContext, risks, actions] = await Promise.all([
       buildOrganizationContext(ctx.organizationId),
       // docs/design-docs/ai-risk-review-approval-workflow.md -- same
-      // APPROVED-only treatment as get_correlation_matrix_data above.
+      // APPROVED-only treatment as get_correlation_matrix_data above,
+      // including the re-run/staleness supersededAt exclusion.
       prisma.risk.findMany({
-        where: { org_account_id: ctx.organizationId, review_status: 'APPROVED' },
+        where: {
+          org_account_id: ctx.organizationId,
+          review_status: 'APPROVED',
+          supersededAt: null,
+        },
       }),
       prisma.action.findMany({ where: actionWhere }),
     ]);

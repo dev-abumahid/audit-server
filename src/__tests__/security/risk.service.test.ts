@@ -232,7 +232,7 @@ describe('risk service — org scoping (ticket #6)', () => {
 
       expect(db.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { org_account_id: ORG_A, review_status: 'APPROVED' },
+          where: { org_account_id: ORG_A, review_status: 'APPROVED', supersededAt: null },
         }),
       );
       expect(siteDb.findMany).toHaveBeenCalledWith(
@@ -1595,7 +1595,12 @@ describe('risk_service — POST /risk/suggest-fields (mocked aexa-ai call)', () 
     });
     expect(db.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { org_account_id: ORG_A, site_id: 'site-1', review_status: 'APPROVED' },
+        where: {
+          org_account_id: ORG_A,
+          site_id: 'site-1',
+          review_status: 'APPROVED',
+          supersededAt: null,
+        },
       }),
     );
   });
@@ -1817,6 +1822,46 @@ describe('risk service — AI-risk review/approval workflow', () => {
       expect(db.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({ org_account_id: ORG_A, review_status: 'APPROVED' }),
+        }),
+      );
+    });
+  });
+
+  // Re-run/staleness fix
+  describe('get_all_risk_from_db includeSuperseded filtering', () => {
+    it('excludes superseded risks by default when includeSuperseded is omitted', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(makeReq({}));
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ org_account_id: ORG_A, supersededAt: null }),
+        }),
+      );
+    });
+
+    it('includes superseded risks when includeSuperseded=true is passed (the audit-trail/history view)', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(makeReq({ query: { includeSuperseded: 'true' } }));
+
+      const call = db.findMany.mock.calls[0][0];
+      expect(call.where.supersededAt).toBeUndefined();
+      expect(call.where.org_account_id).toBe(ORG_A);
+    });
+
+    it('falls back to excluding superseded risks for any other includeSuperseded value', async () => {
+      db.findMany.mockResolvedValue([]);
+      db.count.mockResolvedValue(0);
+
+      await risk_service.get_all_risk_from_db(makeReq({ query: { includeSuperseded: 'yes' } }));
+
+      expect(db.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ org_account_id: ORG_A, supersededAt: null }),
         }),
       );
     });

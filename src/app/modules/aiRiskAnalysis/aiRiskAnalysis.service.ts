@@ -18,7 +18,12 @@ import {
 } from '../ai/ai.service.js';
 import { computeEbitdaAtRisk } from '../risk/ebitda_risk.js';
 import { resolveEbitdaFields } from '../risk/ebitda_risk.js';
-import { createRiskWithGeneratedRef } from '../risk/risk_ref.js';
+import { risk_approval_service } from '../risk/risk.approval.service.js';
+import {
+  computeNextRiskRef,
+  createRiskWithGeneratedRef,
+  retryTransactionOnRefConflict,
+} from '../risk/risk_ref.js';
 import { resolveInherentFields, resolveResidualFields } from '../risk/risk_scoring.js';
 
 // design-docs/site-ai-risk-register-generation.md §4: the same 20 fixed
@@ -348,8 +353,11 @@ async function fetchFrameworksForPrompt(): Promise<{
 // risks with no resolved citation. Also doubles as the shape of a
 // just-persisted risk appended mid-run in runCategoryGeneration, so a
 // category's own batch is deduped against itself, not just the pre-run
-// snapshot.
+// snapshot. `id` is required (not optional) so a match against a
+// PRE-EXISTING entry can be superseded -- see persistGeneratedRisk's two
+// separate dedup passes (same-run batch vs. pre-existing register entries).
 type ExistingRiskForDedup = {
+  id: string;
   title: string;
   category: string;
   regulatoryFrameworkId: string | null;
@@ -407,20 +415,24 @@ function isLikelyDuplicateTitle(existingTitle: string, candidateTitle: string): 
 // 2. Fuzzy title match (exact or high word-overlap) -- the fallback for
 //    risks with no resolved citation, or as a second check even when one
 //    exists.
-function isDuplicateOfExistingRisk(
+// Returns the matched existing entry (so a match against a PRE-EXISTING
+// register entry can be superseded with its real id) or null if no match.
+function findDuplicateOfExistingRisk(
   candidate: { title: string; category: string; regulatoryFrameworkId: string | null },
   existingRisks: ExistingRiskForDedup[],
-): boolean {
-  return existingRisks.some((existing) => {
-    if (existing.category !== candidate.category) return false;
-    if (
-      candidate.regulatoryFrameworkId &&
-      existing.regulatoryFrameworkId === candidate.regulatoryFrameworkId
-    ) {
-      return true;
-    }
-    return isLikelyDuplicateTitle(existing.title, candidate.title);
-  });
+): ExistingRiskForDedup | null {
+  return (
+    existingRisks.find((existing) => {
+      if (existing.category !== candidate.category) return false;
+      if (
+        candidate.regulatoryFrameworkId &&
+        existing.regulatoryFrameworkId === candidate.regulatoryFrameworkId
+      ) {
+        return true;
+      }
+      return isLikelyDuplicateTitle(existing.title, candidate.title);
+    }) ?? null
+  );
 }
 
 // Shared by runAnalysis and retryFailedCategories -- the pre-run snapshot
@@ -438,15 +450,22 @@ async function fetchExistingRiskTitles(
     // DISMISSED -- a reviewer's rejection of one attempt's proposal isn't a
     // permanent "never applicable" verdict, so a later run may legitimately
     // re-flag it (accepted tradeoff, see the design doc's open items).
+    // supersededAt: null -- re-run/staleness fix: an already-superseded row
+    // must never be matched again (it's already been replaced once; a
+    // fresh match should supersede the CURRENT row, not chain off a stale
+    // one), and matching against it would also silently orphan the newer
+    // superseding risk's own dedup eligibility.
     where: {
       site_id: siteId,
       org_account_id: orgAccountId,
       review_status: { in: ['APPROVED', 'PENDING_REVIEW'] },
+      supersededAt: null,
     },
-    select: { name: true, category: true, regulatory_framework_id: true },
+    select: { id: true, name: true, category: true, regulatory_framework_id: true },
     take: MAX_EXISTING_RISKS_FOR_DEDUP,
   });
   return existingRisks.map((r) => ({
+    id: r.id,
     title: r.name.slice(0, MAX_EXISTING_RISK_TITLE_LENGTH),
     category: r.category,
     regulatoryFrameworkId: r.regulatory_framework_id,
@@ -960,12 +979,28 @@ async function runCategoryGeneration(
 
   const generation = await callAiJson('/risk_category_generation', body, ctx.organizationId);
 
-  // Mutable, category-scoped copy of the pre-run snapshot: each risk this
-  // loop persists is appended so the REST of this same category's batch is
-  // deduped against it too, not just against risks that existed before the
-  // run started. Catches the same LLM call proposing two near-duplicate
-  // risks in one response, not just cross-run duplication.
-  const dedupSet = [...existingRiskTitles];
+  // Category-scoped, this-run-only batch: each risk this loop persists is
+  // appended so the REST of this same category's batch is deduped against
+  // it too, not just against risks that existed before the run started --
+  // catches the same LLM call proposing two near-duplicate risks in one
+  // response. Kept SEPARATE from existingRiskTitles (the pre-run snapshot)
+  // deliberately: a same-run duplicate is just noise to skip, never a
+  // supersede candidate -- superseding is for refreshing a PRE-EXISTING
+  // register entry with fresh data, not for de-noising one run's own
+  // batch (see persistGeneratedRisk's two separate dedup passes).
+  const sameRunBatch: ExistingRiskForDedup[] = [];
+  // Round-1 review (this same session): a per-category COPY of the
+  // pre-run snapshot, not the shared original -- persistGeneratedRisk
+  // removes an entry from this copy once it's been superseded, so a
+  // SECOND risk later in this same category's LLM response that also
+  // fuzzy-matches that same old entry can't supersede it again (which
+  // would silently overwrite the first supersession's
+  // supersededByRiskId, orphaning it from the trail with no data loss
+  // but a broken pointer). Two different categories can never collide on
+  // the same entry regardless (findDuplicateOfExistingRisk requires
+  // category equality), so a per-category copy is sufficient -- no need
+  // to coordinate across the run's other concurrent category calls.
+  const availableExisting = [...existingRiskTitles];
 
   for (const raw of generation.risks ?? []) {
     const persisted = await persistGeneratedRisk(
@@ -976,9 +1011,10 @@ async function runCategoryGeneration(
       triageCategory.category,
       raw,
       frameworkByRef,
-      dedupSet,
+      availableExisting,
+      sameRunBatch,
     );
-    if (persisted) dedupSet.push(persisted);
+    if (persisted) sameRunBatch.push(persisted);
   }
 }
 
@@ -990,7 +1026,12 @@ async function persistGeneratedRisk(
   category: RiskCategoryValue,
   raw: any,
   frameworkByRef: Map<string, RegulatoryFrameworkRow>,
-  dedupSet: ExistingRiskForDedup[],
+  // Caller's per-category working copy (runCategoryGeneration's
+  // availableExisting) -- mutated below (an entry is removed once
+  // superseded) so a second risk in this same category's batch can't
+  // supersede the same old entry twice.
+  availableExisting: ExistingRiskForDedup[],
+  sameRunBatch: ExistingRiskForDedup[],
 ): Promise<ExistingRiskForDedup | null> {
   let legalStatus = raw.legal_status;
   let citationConfidence = raw.citation_confidence;
@@ -1069,22 +1110,30 @@ async function persistGeneratedRisk(
   // design-docs §6's enforced dedup layer -- the free-text "existing risks"
   // prompt hint sent to aexa-ai doesn't guarantee anything on its own (bug
   // report: regenerating a site's AI analysis kept re-proposing risks
-  // already sitting in the register). Skip persisting anything that matches
-  // an existing PENDING_REVIEW/APPROVED risk in the same category, either
-  // by resolved regulatory_framework_id or by title similarity -- see
-  // isDuplicateOfExistingRisk.
+  // already sitting in the register). Two separate checks against two
+  // separate sets, not one merged dedupSet:
   const candidateForDedup = {
     title: typeof raw.name === 'string' ? raw.name : '',
     category,
     regulatoryFrameworkId,
   };
-  if (isDuplicateOfExistingRisk(candidateForDedup, dedupSet)) {
+  // 1. A duplicate within THIS RUN's own batch (the same LLM call proposing
+  //    two near-identical risks) is pure noise -- still just skip, never
+  //    supersede (there's no stale pre-existing data to refresh).
+  if (findDuplicateOfExistingRisk(candidateForDedup, sameRunBatch)) {
     logger.info(
       { runId, category, name: raw.name },
-      'Skipped AI-generated risk: duplicate of an existing register entry',
+      "Skipped AI-generated risk: duplicate within this run's own batch",
     );
     return null;
   }
+  // 2. A match against a PRE-EXISTING register entry (from before this run
+  //    started) is a genuine re-run-staleness case -- re-run/staleness fix
+  //    supersedes the old row with fresh data instead of silently skipping
+  //    (the old behavior, which left a stale external citation untouched
+  //    forever). Resolved here; the actual create-and-supersede transaction
+  //    happens below once the full payload is built.
+  const matchedExisting = findDuplicateOfExistingRisk(candidateForDedup, availableExisting);
 
   // design-docs §4: same fixed enums risk_category_generation_schema.py's
   // Velocity/Trend target -- server-validated the same way category is,
@@ -1171,8 +1220,57 @@ async function persistGeneratedRisk(
     ...ebitda.fields,
   };
 
-  await createRiskWithGeneratedRef(payload);
-  return candidateForDedup;
+  if (matchedExisting) {
+    // Re-run/staleness fix: create the new risk AND mark the matched
+    // pre-existing row superseded, atomically -- a crash between the two
+    // writes must never leave a fresh risk created with no record of what
+    // it replaced, or an old row marked superseded with no successor to
+    // point at. retryTransactionOnRefConflict retries the whole
+    // transaction (fresh ref recomputed) on a concurrent ref collision,
+    // same as intelligence.service.ts's create-risk-from-item path -- this
+    // Risk is created for an existing, live org, so a concurrent write for
+    // the same org+category can genuinely race computeNextRiskRef.
+    const created = await retryTransactionOnRefConflict(() =>
+      prisma.$transaction(async (tx) => {
+        const ref = await computeNextRiskRef(tx, payload.org_account_id, category);
+        const risk = await tx.risk.create({ data: { ...payload, ref } });
+        await tx.risk.update({
+          where: { id: matchedExisting.id },
+          data: { supersededAt: new Date(), supersededByRiskId: risk.id },
+        });
+        // The superseded row's own reviewed/approved state no longer
+        // reflects reality (the successor carries fresh data) -- same
+        // "edit invalidates a live approval cycle" contract
+        // update_risk_into_db already enforces, applied here since a
+        // supersede is a bigger change than an edit (the row itself is
+        // being replaced, not just modified).
+        await risk_approval_service.invalidateLiveApprovalsOnEdit(
+          matchedExisting.id,
+          ctx,
+          triggeredByAccountId,
+          tx,
+        );
+        return risk;
+      }),
+    );
+    logger.info(
+      { runId, category, name: raw.name, supersededRiskId: matchedExisting.id },
+      'Superseded existing risk with fresh re-analysis result',
+    );
+    // Remove from THIS category's available-to-match pool now that it's
+    // been superseded -- a second risk later in the same LLM response
+    // that also fuzzy-matches this same old entry must not supersede it
+    // again (which would silently overwrite supersededByRiskId, orphaning
+    // the first supersession from the trail). After removal it can still
+    // fall through to a plain create below, same as any other genuinely
+    // new risk.
+    const staleIndex = availableExisting.indexOf(matchedExisting);
+    if (staleIndex !== -1) availableExisting.splice(staleIndex, 1);
+    return { id: created.id, ...candidateForDedup };
+  }
+
+  const created = await createRiskWithGeneratedRef(payload);
+  return { id: created.id, ...candidateForDedup };
 }
 
 // computeEbitdaAtRisk is re-exported transitively via resolveEbitdaFields

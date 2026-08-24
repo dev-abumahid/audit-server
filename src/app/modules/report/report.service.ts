@@ -146,9 +146,14 @@ const fetchOrgData = async (ctx: CallerOrgContext): Promise<OrgReportData> => {
 
   const [profile, risks, kris, sites, actions] = await Promise.all([
     prisma.organizationProfile.findUnique({ where: { accountId: orgAccountId } }),
-    // docs/design-docs/ai-risk-review-approval-workflow.md
+    // docs/design-docs/ai-risk-review-approval-workflow.md. Re-run/
+    // staleness fix: excludes a superseded (stale) risk too.
     prisma.risk.findMany({
-      where: { org_account_id: orgAccountId, review_status: 'APPROVED' },
+      where: {
+        org_account_id: orgAccountId,
+        review_status: 'APPROVED',
+        supersededAt: null,
+      },
       include: { site: { select: { name: true } } },
       orderBy: { residual_score: 'desc' },
     }),
@@ -162,7 +167,11 @@ const fetchOrgData = async (ctx: CallerOrgContext): Promise<OrgReportData> => {
       // (Prisma only supports filtering the parent by the relation), so
       // this excludes the KRI row itself when its risk isn't approved --
       // consistent with the report only reflecting confirmed register data.
-      where: { org_account_id: orgAccountId, risk: { review_status: 'APPROVED' } },
+      // Re-run/staleness fix: same exclusion extended to a superseded risk.
+      where: {
+        org_account_id: orgAccountId,
+        risk: { review_status: 'APPROVED', supersededAt: null },
+      },
       include: { risk: { select: { name: true } } },
     }),
     prisma.site.findMany({ where: { org_account_id: orgAccountId } }),

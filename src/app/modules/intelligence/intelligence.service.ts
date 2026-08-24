@@ -45,11 +45,18 @@ const buildOrgContext = async (organizationId: string): Promise<OrgContext> => {
 const fetchExistingRisks = async (organizationId: string): Promise<ExistingRisk[]> => {
   // docs/design-docs/ai-risk-review-approval-workflow.md -- APPROVED +
   // PENDING_REVIEW for dedup, excluding only DISMISSED (same rationale as
-  // aiRiskAnalysis.service.ts's fetchExistingRiskTitles).
+  // aiRiskAnalysis.service.ts's fetchExistingRiskTitles). Re-run/staleness
+  // fix: also excludes a superseded risk -- unlike aiRiskAnalysis.service.ts's
+  // periodic-re-run flow, this promotion flow creates risks one-at-a-time
+  // from discrete intelligence items, so a match against a superseded row
+  // is simply treated as "doesn't exist" for dedup purposes (no supersede
+  // semantics here, just exclusion) rather than getting its own
+  // supersede-on-match transaction.
   const risks = await prisma.risk.findMany({
     where: {
       org_account_id: organizationId,
       review_status: { in: ['APPROVED', 'PENDING_REVIEW'] },
+      supersededAt: null,
     },
     select: { id: true, name: true, category: true, description: true },
   });

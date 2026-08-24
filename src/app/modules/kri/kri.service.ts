@@ -155,6 +155,12 @@ const create_kri_into_db = async (req: Request) => {
   if (risk.review_status === 'DISMISSED') {
     throw new AppError('This risk was dismissed and cannot be linked to a KRI.', 409);
   }
+  // Re-run/staleness fix: same guard extended to a superseded risk -- a
+  // stale ref is almost certainly a mistake, same rationale as DISMISSED
+  // above.
+  if (risk.supersededAt) {
+    throw new AppError('This risk was superseded and cannot be linked to a KRI.', 409);
+  }
 
   // aexa-server#242: the value a KRI is created with counts as its first
   // reading — seeded via a nested create so the Kri row and its first

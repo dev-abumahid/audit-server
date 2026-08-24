@@ -5,37 +5,57 @@ vi.mock('../../app/lib/logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
 
-vi.mock('../../app/lib/prisma.js', () => ({
-  prisma: {
-    site: { findFirst: vi.fn(), update: vi.fn() },
-    risk: { findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
-    regulatoryFramework: { findMany: vi.fn() },
-    aiRiskAnalysisRun: {
-      create: vi.fn(),
-      update: vi.fn(),
-      updateMany: vi.fn(),
-      findFirst: vi.fn(),
-      findUnique: vi.fn(),
-      findUniqueOrThrow: vi.fn(),
+vi.mock('../../app/lib/prisma.js', () => {
+  const risk = { findMany: vi.fn(), create: vi.fn(), count: vi.fn(), update: vi.fn() };
+  const riskApproval = { findMany: vi.fn(), updateMany: vi.fn() };
+  return {
+    prisma: {
+      site: { findFirst: vi.fn(), update: vi.fn() },
+      risk,
+      riskApproval,
+      regulatoryFramework: { findMany: vi.fn() },
+      aiRiskAnalysisRun: {
+        create: vi.fn(),
+        update: vi.fn(),
+        updateMany: vi.fn(),
+        findFirst: vi.fn(),
+        findUnique: vi.fn(),
+        findUniqueOrThrow: vi.fn(),
+      },
+      orgMember: { findUnique: vi.fn() },
+      organization: { findUnique: vi.fn() },
+      organizationProfile: { findUnique: vi.fn() },
+      supplier: { findMany: vi.fn() },
+      orgAuditLog: { create: vi.fn() },
+      // Re-run/staleness fix: persistGeneratedRisk's supersede path runs
+      // `create` + `update` inside a real transaction. The mock `tx`
+      // passed to the callback reuses the SAME `risk`/`riskApproval` spies
+      // as the top-level `prisma` mock (not fresh ones), so
+      // `riskDb.create`/`riskDb.update` assertions in tests see calls made
+      // via `tx.risk.*` too -- matches how real Prisma's transaction
+      // client shares the same underlying tables the top-level client
+      // sees, just inside one atomic unit.
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ risk, riskApproval }),
+      ),
     },
-    orgMember: { findUnique: vi.fn() },
-    organization: { findUnique: vi.fn() },
-    organizationProfile: { findUnique: vi.fn() },
-    supplier: { findMany: vi.fn() },
-  },
-}));
+  };
+});
 
 import { prisma } from '../../app/lib/prisma.js';
 import { ai_risk_analysis_service } from '../../app/modules/aiRiskAnalysis/aiRiskAnalysis.service.js';
 
 const siteDb = prisma.site as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const riskDb = prisma.risk as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const riskApprovalDb = prisma.riskApproval as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const frameworkDb = prisma.regulatoryFramework as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
 >;
 const runDb = prisma.aiRiskAnalysisRun as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgMemberDb = prisma.orgMember as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgDb = prisma.organization as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const orgAuditLogDb = prisma.orgAuditLog as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const orgProfileDb = prisma.organizationProfile as unknown as Record<
   string,
   ReturnType<typeof vi.fn>
@@ -77,6 +97,11 @@ describe('ai_risk_analysis_service', () => {
     riskDb.create.mockImplementation((args: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: 'risk-new', ref: 'GEN-001', ...args.data }),
     );
+    riskDb.update.mockResolvedValue({});
+    // Default: no live approval cycle to invalidate on supersede -- most
+    // tests don't exercise that path. Dedicated tests override this.
+    riskApprovalDb.findMany.mockResolvedValue([]);
+    orgAuditLogDb.create.mockResolvedValue({});
     frameworkDb.findMany.mockResolvedValue([]);
     supplierDb.findMany.mockResolvedValue([]);
     runDb.update.mockResolvedValue({});
@@ -1122,12 +1147,17 @@ describe('ai_risk_analysis_service', () => {
       );
     }
 
-    it('skips an exact-title duplicate of an existing PENDING_REVIEW risk in the same category', async () => {
+    it('supersedes an exact-title duplicate of an existing PENDING_REVIEW risk in the same category', async () => {
       siteDb.findFirst.mockResolvedValue(SITE);
       runDb.findFirst.mockResolvedValue(null);
       runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
       mockExistingRisksForDedup([
-        { name: 'Cyber intrusion', category: 'cyber', regulatory_framework_id: null },
+        {
+          id: 'risk-existing-1',
+          name: 'Cyber intrusion',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
       ]);
       mockGenerationFlow('cyber', [makeRawRisk({ name: 'Cyber intrusion' })]);
 
@@ -1136,15 +1166,23 @@ describe('ai_risk_analysis_service', () => {
       );
       await flush();
 
-      expect(riskDb.create).not.toHaveBeenCalled();
+      // Re-run/staleness fix: a match against a PRE-EXISTING risk creates
+      // the fresh risk AND marks the old one superseded -- it no longer
+      // silently skips.
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-existing-1' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new' },
+      });
     });
 
-    it('skips a reworded duplicate (same words, different order, one extra word) via title similarity', async () => {
+    it('supersedes a reworded duplicate (same words, different order, one extra word) via title similarity', async () => {
       siteDb.findFirst.mockResolvedValue(SITE);
       runDb.findFirst.mockResolvedValue(null);
       runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
       mockExistingRisksForDedup([
         {
+          id: 'risk-existing-1',
           name: 'Ransomware attack on production systems',
           category: 'cyber',
           regulatory_framework_id: null,
@@ -1162,7 +1200,11 @@ describe('ai_risk_analysis_service', () => {
       );
       await flush();
 
-      expect(riskDb.create).not.toHaveBeenCalled();
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-existing-1' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new' },
+      });
     });
 
     it('does NOT skip the same title in a different category', async () => {
@@ -1172,7 +1214,12 @@ describe('ai_risk_analysis_service', () => {
       // Existing risk is filed under "operational", the new one is "cyber"
       // -- same title text should not collide across categories.
       mockExistingRisksForDedup([
-        { name: 'Data loss', category: 'operational', regulatory_framework_id: null },
+        {
+          id: 'risk-existing-1',
+          name: 'Data loss',
+          category: 'operational',
+          regulatory_framework_id: null,
+        },
       ]);
       mockGenerationFlow('cyber', [makeRawRisk({ name: 'Data loss' })]);
 
@@ -1182,9 +1229,10 @@ describe('ai_risk_analysis_service', () => {
       await flush();
 
       expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).not.toHaveBeenCalled();
     });
 
-    it('skips a duplicate matched by resolved regulatory_framework_id even when the title differs entirely', async () => {
+    it('supersedes a duplicate matched by resolved regulatory_framework_id even when the title differs entirely', async () => {
       siteDb.findFirst.mockResolvedValue(SITE);
       runDb.findFirst.mockResolvedValue(null);
       runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
@@ -1205,6 +1253,7 @@ describe('ai_risk_analysis_service', () => {
       // reference, which resolves to the same regulatory_framework_id.
       mockExistingRisksForDedup([
         {
+          id: 'risk-existing-1',
           name: 'Missing whistleblower channel',
           category: 'compliance',
           regulatory_framework_id: 'framework-sapin-ii',
@@ -1224,7 +1273,11 @@ describe('ai_risk_analysis_service', () => {
       );
       await flush();
 
-      expect(riskDb.create).not.toHaveBeenCalled();
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-existing-1' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new' },
+      });
     });
 
     it('dedups within the same category generation batch, not just against the pre-run snapshot', async () => {
@@ -1246,7 +1299,95 @@ describe('ai_risk_analysis_service', () => {
       );
       await flush();
 
+      // Same-run-batch duplicate is still just noise to skip, never a
+      // supersede candidate -- there's no pre-existing row to mark stale.
       expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).not.toHaveBeenCalled();
+    });
+
+    it('supersedes the CORRECT pre-existing risk when multiple candidates exist in the same category', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      // Two distinct pre-existing risks in the same category -- only one
+      // genuinely matches the new proposal. A regression that always
+      // superseded existingRiskTitles[0] regardless of the real match
+      // would supersede 'risk-unrelated' here instead of 'risk-match'.
+      mockExistingRisksForDedup([
+        {
+          id: 'risk-unrelated',
+          name: 'Data loss via backup failure',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+        {
+          id: 'risk-match',
+          name: 'Ransomware attack on production systems',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Ransomware attack production systems' })]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-match' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new' },
+      });
+    });
+
+    it('does not double-supersede the same pre-existing risk when two same-batch proposals both match it', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([
+        {
+          id: 'risk-existing-1',
+          name: 'Ransomware attack on production database systems',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      let createCount = 0;
+      riskDb.create.mockImplementation((args: { data: Record<string, unknown> }) => {
+        createCount += 1;
+        return Promise.resolve({
+          id: `risk-new-${createCount}`,
+          ref: `GEN-00${createCount}`,
+          ...args.data,
+        });
+      });
+      // Both proposals independently fuzz-match the 6-word pre-existing
+      // title at >=0.8 Jaccard (each drops one distinct word), but are
+      // NOT close enough to EACH OTHER (0.667 Jaccard) to trigger the
+      // same-run-batch skip -- so both reach the availableExisting check.
+      mockGenerationFlow('cyber', [
+        makeRawRisk({ name: 'Ransomware attack on production database' }),
+        makeRawRisk({ name: 'Ransomware attack on production systems' }),
+      ]);
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      // Both proposals get created (no data loss)...
+      expect(riskDb.create).toHaveBeenCalledTimes(2);
+      // ...but only the FIRST one actually supersedes the old entry --
+      // the second, finding it already removed from the available pool,
+      // falls through to a plain create instead of overwriting the first
+      // supersession's pointer.
+      expect(riskDb.update).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-existing-1' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new-1' },
+      });
     });
 
     it('does not skip a genuinely distinct risk in the same category (no false positive)', async () => {
@@ -1307,6 +1448,7 @@ describe('ai_risk_analysis_service', () => {
       // titles can arrive from different input sources.
       mockExistingRisksForDedup([
         {
+          id: 'risk-existing-1',
           name: 'Fuite de données sensibles',
           category: 'cyber',
           regulatory_framework_id: null,
@@ -1319,7 +1461,94 @@ describe('ai_risk_analysis_service', () => {
       );
       await flush();
 
-      expect(riskDb.create).not.toHaveBeenCalled();
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-existing-1' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new' },
+      });
+    });
+
+    it('invalidates a live approval cycle on the superseded risk, atomically with the supersede', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([
+        {
+          id: 'risk-existing-1',
+          name: 'Cyber intrusion',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Cyber intrusion' })]);
+      // A live (non-invalidated, PENDING_APPROVAL/APPROVED) approval cycle
+      // on the risk about to be superseded.
+      riskApprovalDb.findMany.mockResolvedValue([{ id: 'approval-1' }]);
+      // requireCallerOrganizationId's path: a real multi-member org, not
+      // the solo-admin default this file's other tests rely on --
+      // invalidateLiveApprovalsOnEdit only reaches this when there's a
+      // live cycle to invalidate. Routes by the differing `where` shapes
+      // resolveCallerOrgContext (by accountId) and requireCallerOrganizationId
+      // (by id) each use.
+      orgMemberDb.findUnique.mockImplementation((args: { where: Record<string, unknown> }) =>
+        Promise.resolve({
+          id: 'member-1',
+          accountId: args.where.accountId ?? 'account-1',
+          organizationId: 'org-anchor-1',
+          role: 'ADMIN',
+          status: 'ACTIVE',
+          expiresAt: null,
+        }),
+      );
+      orgDb.findUnique.mockResolvedValue({ id: 'org-anchor-1', anchorAccountId: 'org-anchor-1' });
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      // The supersede itself still happened.
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-existing-1' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new' },
+      });
+      // The superseded row's own live approval cycle got invalidated in
+      // the same transaction -- a supersede is a bigger change than an
+      // edit (the row is being replaced, not just modified), same
+      // contract update_risk_into_db already enforces for a plain edit.
+      expect(riskApprovalDb.updateMany).toHaveBeenCalledWith({
+        where: {
+          riskId: 'risk-existing-1',
+          invalidatedAt: null,
+          status: { in: ['PENDING_APPROVAL', 'APPROVED'] },
+        },
+        data: { invalidatedAt: expect.any(Date), invalidatedById: expect.any(String) },
+      });
+    });
+
+    it('does NOT touch approvals when the superseded risk has no live cycle', async () => {
+      siteDb.findFirst.mockResolvedValue(SITE);
+      runDb.findFirst.mockResolvedValue(null);
+      runDb.create.mockResolvedValue({ id: 'run-new', status: 'running' });
+      mockExistingRisksForDedup([
+        {
+          id: 'risk-existing-1',
+          name: 'Cyber intrusion',
+          category: 'cyber',
+          regulatory_framework_id: null,
+        },
+      ]);
+      mockGenerationFlow('cyber', [makeRawRisk({ name: 'Cyber intrusion' })]);
+      // riskApprovalDb.findMany defaults to [] (beforeEach) -- no live cycle.
+
+      await ai_risk_analysis_service.start_ai_risk_analysis(
+        makeReq({ body: { siteId: 'site-1' } }),
+      );
+      await flush();
+
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskApprovalDb.updateMany).not.toHaveBeenCalled();
     });
 
     it('still sends the existing-risks list to aexa-ai as a plain {title} array (wire contract unchanged)', async () => {
@@ -1818,7 +2047,14 @@ describe('ai_risk_analysis_service', () => {
       riskDb.findMany.mockImplementation((args: { where?: { review_status?: unknown } }) =>
         Promise.resolve(
           args?.where?.review_status
-            ? [{ name: 'Fire safety gap', category: 'fire', regulatory_framework_id: null }]
+            ? [
+                {
+                  id: 'risk-existing-1',
+                  name: 'Fire safety gap',
+                  category: 'fire',
+                  regulatory_framework_id: null,
+                },
+              ]
             : [],
         ),
       );
@@ -1856,7 +2092,14 @@ describe('ai_risk_analysis_service', () => {
       await ai_risk_analysis_service.retry_ai_risk_analysis(makeReq({ params: { id: 'run-1' } }));
       await flush();
 
-      expect(riskDb.create).not.toHaveBeenCalled();
+      // Re-run/staleness fix: retry_ai_risk_analysis shares persistGeneratedRisk
+      // with the original run, so a match against a pre-existing risk
+      // supersedes it here too, not just a plain skip.
+      expect(riskDb.create).toHaveBeenCalledTimes(1);
+      expect(riskDb.update).toHaveBeenCalledWith({
+        where: { id: 'risk-existing-1' },
+        data: { supersededAt: expect.any(Date), supersededByRiskId: 'risk-new' },
+      });
     });
 
     it('keeps a category that fails again in categories_failed, staying partial', async () => {

@@ -809,6 +809,10 @@ const link_risk_to_obligation_into_db = async (req: Request) => {
   if (risk.review_status === 'DISMISSED') {
     throw new AppError('This risk was dismissed and cannot be linked to an obligation.', 409);
   }
+  // Re-run/staleness fix: same guard extended to a superseded risk.
+  if (risk.supersededAt) {
+    throw new AppError('This risk was superseded and cannot be linked to an obligation.', 409);
+  }
 
   const result = await prisma.complianceObligation.update({
     where: { id: obligation.id },

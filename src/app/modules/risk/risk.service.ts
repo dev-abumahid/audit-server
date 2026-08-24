@@ -29,7 +29,10 @@ import { computeEbitdaSummary } from './ebitda_summary.js';
 import { mapActivityToSector } from './sector_mapper.js';
 
 const get_all_risk_from_db = async (req: Request) => {
-  const { searchTerm, siteId, category, reviewStatus } = req.query as Record<string, string>;
+  const { searchTerm, siteId, category, reviewStatus, includeSuperseded } = req.query as Record<
+    string,
+    string
+  >;
 
   const user = req.user as JwtPayloadType;
   const ctx = await resolveCallerOrgContext(user.accountId);
@@ -60,6 +63,16 @@ const get_all_risk_from_db = async (req: Request) => {
     whereCondition.review_status = reviewStatus;
   } else {
     whereCondition.review_status = 'APPROVED';
+  }
+
+  // Re-run/staleness fix: a superseded risk (replaced by a fresher re-run
+  // result) is excluded from the register by default, same "filter at the
+  // source" rationale as review_status above -- every consumer of this
+  // endpoint expects "the risks currently on this site/org's register,"
+  // and a stale superseded row showing up would be misleading. Explicit
+  // opt-in (?includeSuperseded=true) for an audit-trail/history view.
+  if (includeSuperseded !== 'true') {
+    whereCondition.supersededAt = null;
   }
 
   // search by name
@@ -655,8 +668,13 @@ const get_ebitda_at_risk_summary = async (req: Request) => {
   const [risks, sites] = await Promise.all([
     prisma.risk.findMany({
       // docs/design-docs/ai-risk-review-approval-workflow.md -- financial
-      // exposure chart shouldn't include unreviewed AI numbers.
-      where: { org_account_id: ctx.organizationId, review_status: 'APPROVED' },
+      // exposure chart shouldn't include unreviewed AI numbers. Re-run/
+      // staleness fix: nor a superseded risk's stale figure.
+      where: {
+        org_account_id: ctx.organizationId,
+        review_status: 'APPROVED',
+        supersededAt: null,
+      },
       select: { ebitda_at_risk: true },
     }),
     prisma.site.findMany({
@@ -743,7 +761,13 @@ const suggest_risk_fields_with_ai = async (req: Request) => {
     const existingRisks = await prisma.risk.findMany({
       // docs/design-docs/ai-risk-review-approval-workflow.md -- don't
       // calibrate a new AI suggestion off other not-yet-reviewed AI output.
-      where: { org_account_id: ctx.organizationId, site_id, review_status: 'APPROVED' },
+      // Re-run/staleness fix: nor off a superseded (stale) risk.
+      where: {
+        org_account_id: ctx.organizationId,
+        site_id,
+        review_status: 'APPROVED',
+        supersededAt: null,
+      },
       orderBy: { createdAt: 'desc' },
       take: 5,
       select: {

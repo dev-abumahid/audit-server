@@ -105,6 +105,13 @@ const assertRisksBelongToOrg = async (riskIds: unknown, orgAccountId: string): P
   if (dismissedCount > 0) {
     throw new AppError('One or more linked risks were dismissed and cannot be linked.', 409);
   }
+  // Re-run/staleness fix: same guard extended to a superseded risk.
+  const supersededCount = await prisma.risk.count({
+    where: { id: { in: ids }, org_account_id: orgAccountId, supersededAt: { not: null } },
+  });
+  if (supersededCount > 0) {
+    throw new AppError('One or more linked risks were superseded and cannot be linked.', 409);
+  }
 };
 
 const get_all_audit_from_db = async (req: Request) => {

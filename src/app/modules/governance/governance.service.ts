@@ -67,8 +67,13 @@ const get_three_lines_of_defense_from_db = async (req: Request) => {
 
   const [risks, actions, kris, complianceObligations, auditEngagements] = await Promise.all([
     prisma.risk.findMany({
-      // docs/design-docs/ai-risk-review-approval-workflow.md
-      where: { org_account_id: ctx.organizationId, review_status: 'APPROVED' },
+      // docs/design-docs/ai-risk-review-approval-workflow.md. Re-run/
+      // staleness fix: excludes a superseded (stale) risk too.
+      where: {
+        org_account_id: ctx.organizationId,
+        review_status: 'APPROVED',
+        supersededAt: null,
+      },
       select: {
         id: true,
         name: true,
